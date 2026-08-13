@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rig-control"
+version = "0.1.0"
+description = "Control and monitoring software for the automated electrolyser rig"
+requires-python = ">=3.14"
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+markers = [
+    "hardware: tests requiring connected physical hardware",
+]
+addopts = '-m "not hardware"'

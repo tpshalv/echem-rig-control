@@ -1,0 +1,21 @@
+# Project-specific Python environment
+.venv/
+
+# Python temporary files
+__pycache__/
+*.py[cod]
+
+# Test and analysis caches
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editor settings
+.vscode/
+
+# Local settings and secrets
+.env
+*.local.toml
+
+# Generated Python package information
+*.egg-info/

@@ -7,7 +7,7 @@ from rig_control.esp32.client import (
 from rig_control.esp32.protocol_handler import ControllerProtocolHandler
 from rig_control.esp32.simulated_controller import SimulatedController
 from rig_control.esp32.protocol import Message
-from rig_control.transports.loopback import LoopbackTransport
+from rig_control.transports.loopback_duplex_text import LoopbackDuplexTextTransport
 
 
 def make_system() -> tuple[
@@ -29,7 +29,7 @@ def make_system() -> tuple[
         response = handler.handle(request)
         return response.to_json()
 
-    transport = LoopbackTransport(respond)
+    transport = LoopbackDuplexTextTransport(respond)
     transport.connect()
 
     return controller, ControllerClient(transport)

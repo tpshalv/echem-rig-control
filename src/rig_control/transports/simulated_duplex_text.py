@@ -1,9 +1,9 @@
 from collections import deque
 
-from rig_control.transports.base import Transport
+from rig_control.transports.duplex_text import DuplexTextTransport
 
 
-class SimulatedTransport(Transport):
+class SimulatedDuplexTextTransport(DuplexTextTransport):
     """In-memory communication channel used during development."""
 
     def __init__(self) -> None:

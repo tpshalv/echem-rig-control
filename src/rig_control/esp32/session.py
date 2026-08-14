@@ -1,6 +1,6 @@
-from src.rig_control.esp32.client import ControllerClient
+from rig_control.esp32.client import ControllerClient
 from rig_control.models import DeviceStatus, Event, EventSeverity
-from rig_control.transports.base import Transport
+from rig_control.transports.duplex_text import DuplexTextTransport
 from rig_control.esp32.protocol import PROTOCOL_VERSION
 
 class ControllerIdentityError(RuntimeError):
@@ -12,7 +12,7 @@ class ControllerSession:
     def __init__(
         self,
         controller_id: str,
-        transport: Transport,
+        transport: DuplexTextTransport,
     ) -> None:
         self._controller_id = controller_id
         self._transport = transport

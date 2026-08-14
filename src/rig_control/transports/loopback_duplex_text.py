@@ -1,10 +1,10 @@
 from collections import deque
 from collections.abc import Callable
 
-from rig_control.transports.base import Transport
+from rig_control.transports.duplex_text import DuplexTextTransport
 
 
-class LoopbackTransport(Transport):
+class LoopbackDuplexTextTransport(DuplexTextTransport):
     """In-memory transport connected directly to a message responder."""
 
     def __init__(self, responder: Callable[[str], str]) -> None:

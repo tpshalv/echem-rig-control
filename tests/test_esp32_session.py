@@ -5,7 +5,7 @@ from rig_control.esp32.session import ControllerIdentityError, ControllerSession
 from rig_control.esp32.simulated_controller import SimulatedController
 from rig_control.models import DeviceStatus, EventSeverity
 from rig_control.esp32.protocol import Message
-from rig_control.transports.loopback import LoopbackTransport
+from rig_control.transports.loopback_duplex_text import LoopbackDuplexTextTransport
 
 
 def make_session() -> ControllerSession:
@@ -21,7 +21,7 @@ def make_session() -> ControllerSession:
 
     return ControllerSession(
         controller_id="main_controller",
-        transport=LoopbackTransport(respond),
+        transport=LoopbackDuplexTextTransport(respond),
     )
 
 
@@ -58,7 +58,7 @@ def test_session_records_failed_connection() -> None:
 
     session = ControllerSession(
         controller_id="main_controller",
-        transport=LoopbackTransport(fail_to_respond),
+        transport=LoopbackDuplexTextTransport(fail_to_respond),
     )
 
     with pytest.raises(RuntimeError, match="communication failure"):
@@ -85,7 +85,7 @@ def test_session_rejects_wrong_controller() -> None:
 
     session = ControllerSession(
         controller_id="main_controller",
-        transport=LoopbackTransport(respond),
+        transport=LoopbackDuplexTextTransport(respond),
     )
 
     with pytest.raises(
@@ -116,7 +116,7 @@ def test_session_rejects_incompatible_protocol() -> None:
 
     session = ControllerSession(
         controller_id="main_controller",
-        transport=LoopbackTransport(respond),
+        transport=LoopbackDuplexTextTransport(respond),
     )
 
     with pytest.raises(

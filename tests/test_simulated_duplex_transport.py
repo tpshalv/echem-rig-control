@@ -1,16 +1,17 @@
 import pytest
 
-from rig_control.transports.simulated import SimulatedTransport
-
+from rig_control.transports.simulated_duplex_text import (
+    SimulatedDuplexTextTransport,
+)
 
 def test_simulated_transport_starts_disconnected() -> None:
-    transport = SimulatedTransport()
+    transport = SimulatedDuplexTextTransport()
 
     assert transport.is_connected is False
 
 
 def test_simulated_transport_can_connect_and_disconnect() -> None:
-    transport = SimulatedTransport()
+    transport = SimulatedDuplexTextTransport()
 
     transport.connect()
     assert transport.is_connected is True
@@ -20,7 +21,7 @@ def test_simulated_transport_can_connect_and_disconnect() -> None:
 
 
 def test_simulated_transport_records_sent_messages() -> None:
-    transport = SimulatedTransport()
+    transport = SimulatedDuplexTextTransport()
     transport.connect()
 
     transport.send("STATUS")
@@ -30,7 +31,7 @@ def test_simulated_transport_records_sent_messages() -> None:
 
 
 def test_simulated_transport_receives_queued_messages_in_order() -> None:
-    transport = SimulatedTransport()
+    transport = SimulatedDuplexTextTransport()
     transport.queue_incoming("READY")
     transport.queue_incoming("25.4 degC")
     transport.connect()
@@ -40,7 +41,7 @@ def test_simulated_transport_receives_queued_messages_in_order() -> None:
 
 
 def test_simulated_transport_rejects_use_while_disconnected() -> None:
-    transport = SimulatedTransport()
+    transport = SimulatedDuplexTextTransport()
 
     with pytest.raises(RuntimeError, match="not connected"):
         transport.send("STATUS")
@@ -50,7 +51,7 @@ def test_simulated_transport_rejects_use_while_disconnected() -> None:
 
 
 def test_simulated_transport_reports_when_no_message_is_available() -> None:
-    transport = SimulatedTransport()
+    transport = SimulatedDuplexTextTransport()
     transport.connect()
 
     with pytest.raises(RuntimeError, match="No message"):

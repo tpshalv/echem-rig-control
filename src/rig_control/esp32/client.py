@@ -1,7 +1,7 @@
 from typing import Any
 
 from rig_control.esp32.protocol import Message, MessageType
-from rig_control.transports.base import Transport
+from rig_control.transports.duplex_text import DuplexTextTransport
 
 
 class ControllerCommandError(RuntimeError):
@@ -11,7 +11,7 @@ class ControllerCommandError(RuntimeError):
 class ControllerClient:
     """PC-side interface for sending commands to a controller."""
 
-    def __init__(self, transport: Transport) -> None:
+    def __init__(self, transport: DuplexTextTransport) -> None:
         self._transport = transport
 
     def identify(self) -> dict[str, Any]:

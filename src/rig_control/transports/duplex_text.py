@@ -1,8 +1,8 @@
 from abc import ABC, abstractmethod
 
 
-class Transport(ABC):
-    """Communication channel between the PC and a remote controller."""
+class DuplexTextTransport(ABC):
+    """Bidirectional text-message channel between two endpoints."""
 
     @property
     @abstractmethod

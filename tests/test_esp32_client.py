@@ -5,17 +5,17 @@ from rig_control.esp32.client import (
     ControllerCommandError,
 )
 from rig_control.esp32.protocol import Message, MessageType
-from rig_control.transports.simulated import SimulatedTransport
+from rig_control.transports.simulated_duplex_text import SimulatedDuplexTextTransport
 
 
-def make_client() -> tuple[SimulatedTransport, ControllerClient]:
-    transport = SimulatedTransport()
+def make_client() -> tuple[SimulatedDuplexTextTransport, ControllerClient]:
+    transport = SimulatedDuplexTextTransport()
     transport.connect()
     return transport, ControllerClient(transport)
 
 
 def queue_response(
-    transport: SimulatedTransport,
+    transport: SimulatedDuplexTextTransport,
     *,
     reply_to: str,
     name: str = "ok",
@@ -33,7 +33,7 @@ def queue_response(
     transport.queue_incoming(response.to_json())
 
 
-def sent_request(transport: SimulatedTransport) -> Message:
+def sent_request(transport: SimulatedDuplexTextTransport) -> Message:
     return Message.from_json(transport.sent_messages[-1])
 
 
@@ -132,7 +132,7 @@ def test_client_rejects_mismatched_response() -> None:
 
 
 def test_client_requires_connected_transport() -> None:
-    transport = SimulatedTransport()
+    transport = SimulatedDuplexTextTransport()
     client = ControllerClient(transport)
 
     with pytest.raises(RuntimeError, match="not connected"):

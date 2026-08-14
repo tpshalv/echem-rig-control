@@ -1,5 +1,5 @@
-from rig_control.controllers.simulated import SimulatedController
-from rig_control.protocol import Message, MessageType, PROTOCOL_VERSION
+from rig_control.esp32.simulated_controller import SimulatedController
+from rig_control.esp32.protocol import Message, MessageType, PROTOCOL_VERSION
 
 
 class ControllerProtocolHandler:

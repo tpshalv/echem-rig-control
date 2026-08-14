@@ -1,6 +1,6 @@
 from typing import Any
 
-from rig_control.protocol import Message, MessageType
+from rig_control.esp32.protocol import Message, MessageType
 from rig_control.transports.base import Transport
 
 

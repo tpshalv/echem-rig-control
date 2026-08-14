@@ -1,6 +1,6 @@
-from rig_control.controllers.protocol_handler import ControllerProtocolHandler
-from rig_control.controllers.simulated import SimulatedController
-from rig_control.protocol import Message, MessageType
+from rig_control.esp32.protocol_handler import ControllerProtocolHandler
+from rig_control.esp32.simulated_controller import SimulatedController
+from rig_control.esp32.protocol import Message, MessageType
 
 
 def make_handler() -> tuple[

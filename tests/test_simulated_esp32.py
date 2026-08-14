@@ -1,6 +1,6 @@
 import pytest
 
-from rig_control.controllers.simulated import SimulatedController
+from rig_control.esp32.simulated_controller import SimulatedController
 
 
 class FakeClock:

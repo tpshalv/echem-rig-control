@@ -1,7 +1,7 @@
-from rig_control.controllers.client import ControllerClient
+from src.rig_control.esp32.client import ControllerClient
 from rig_control.models import DeviceStatus, Event, EventSeverity
 from rig_control.transports.base import Transport
-from rig_control.protocol import PROTOCOL_VERSION
+from rig_control.esp32.protocol import PROTOCOL_VERSION
 
 class ControllerIdentityError(RuntimeError):
     """The connected controller is not the one expected by this session."""

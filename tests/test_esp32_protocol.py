@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from rig_control.protocol import Message, MessageType
+from rig_control.esp32.protocol import Message, MessageType
 
 
 def test_message_receives_a_unique_identifier() -> None:

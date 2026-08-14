@@ -19,3 +19,9 @@ htmlcov/
 
 # Generated Python package information
 *.egg-info/
+
+
+# Keep rig-config.example.toml in Git as the documented 
+# template, but the computer-specific rig-config.toml 
+# will remain local
+rig-config.toml

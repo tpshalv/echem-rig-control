@@ -1,10 +1,10 @@
 import pytest
 
-from rig_control.controllers.client import (
+from rig_control.esp32.client import (
     ControllerClient,
     ControllerCommandError,
 )
-from rig_control.protocol import Message, MessageType
+from rig_control.esp32.protocol import Message, MessageType
 from rig_control.transports.simulated import SimulatedTransport
 
 

@@ -1,10 +1,10 @@
 import pytest
 
-from rig_control.controllers.protocol_handler import ControllerProtocolHandler
-from rig_control.controllers.session import ControllerIdentityError, ControllerSession
-from rig_control.controllers.simulated import SimulatedController
+from rig_control.esp32.protocol_handler import ControllerProtocolHandler
+from rig_control.esp32.session import ControllerIdentityError, ControllerSession
+from rig_control.esp32.simulated_controller import SimulatedController
 from rig_control.models import DeviceStatus, EventSeverity
-from rig_control.protocol import Message
+from rig_control.esp32.protocol import Message
 from rig_control.transports.loopback import LoopbackTransport
 
 

@@ -1,5 +1,5 @@
 from rig_control.devices.sensor import Sensor
-from rig_control.devices.simulated import SimulatedDevice
+from rig_control.devices.simulated_device import SimulatedDevice
 from rig_control.models import DeviceStatus, Measurement
 
 

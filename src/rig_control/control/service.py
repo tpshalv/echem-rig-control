@@ -120,6 +120,9 @@ class RigControlService:
         return record
 
     def _authorize(self, command: ControlCommand) -> None:
+        if isinstance(command, EnterDeviceSafeState):
+            return
+
         source = command.source
 
         if source is CommandSource.SAFETY_SYSTEM:

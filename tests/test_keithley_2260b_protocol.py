@@ -1,6 +1,6 @@
 import pytest
 
-from rig_control.devices.keithley_2260b_protocol import (
+from rig_control.devices.keithley_2260b.protocol import (
     Keithley2260BProtocol,
 )
 

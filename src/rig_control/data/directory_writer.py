@@ -3,6 +3,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TextIO
+from time import sleep
 
 from rig_control.data.experiment import ExperimentMetadata
 from rig_control.data.records import MeasurementRecord
@@ -238,4 +239,15 @@ class DirectoryExperimentWriter(ExperimentWriter):
             file.write("\n")
             file.flush()
 
-        temporary_path.replace(path)
+        for attempt in range(10):
+            try:
+                temporary_path.replace(path)
+                return
+            except PermissionError:
+                if attempt == 9:
+                    raise
+
+                # Windows antivirus or indexing may briefly hold the
+                # existing JSON file open. Retrying preserves the
+                # atomic replacement rather than deleting it first.
+                sleep(0.05)

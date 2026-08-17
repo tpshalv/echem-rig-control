@@ -1,0 +1,102 @@
+[profile]
+profile_id = "development_simulation"
+friendly_name = "Development simulation"
+
+
+[[devices]]
+device_id = "nitrogen_mfc"
+friendly_name = "Nitrogen"
+capability = "mass_flow_controller"
+driver = "alicat"
+backend = "simulated"
+required = true
+enabled = true
+
+[devices.settings]
+maximum_flow = 100.0
+flow_unit = "sccm"
+
+
+[[devices]]
+device_id = "wet_co2_mfc"
+friendly_name = "Wet CO2"
+capability = "mass_flow_controller"
+driver = "alicat"
+backend = "simulated"
+required = true
+enabled = true
+
+[devices.settings]
+maximum_flow = 100.0
+flow_unit = "sccm"
+
+
+[[devices]]
+device_id = "dry_co2_mfc"
+friendly_name = "Dry CO2"
+capability = "mass_flow_controller"
+driver = "alicat"
+backend = "simulated"
+required = true
+enabled = true
+
+[devices.settings]
+maximum_flow = 100.0
+flow_unit = "sccm"
+
+
+[[devices]]
+device_id = "main_power_supply"
+friendly_name = "Main power supply"
+capability = "dc_power_supply"
+driver = "keithley_2260b"
+backend = "simulated"
+required = true
+enabled = true
+
+[devices.settings]
+maximum_voltage = 30.0
+maximum_current = 108.0
+maximum_power = 1080.0
+
+
+[[devices]]
+device_id = "cell_temperature"
+friendly_name = "Cell temperature"
+capability = "temperature_sensor"
+driver = "esp32_thermocouple"
+backend = "simulated"
+required = true
+enabled = true
+
+[devices.settings]
+initial_value = 25.0
+unit = "degC"
+
+
+[[devices]]
+device_id = "inlet_humidity"
+friendly_name = "Inlet humidity"
+capability = "humidity_sensor"
+driver = "esp32_humidity"
+backend = "simulated"
+required = false
+enabled = true
+
+[devices.settings]
+initial_value = 50.0
+unit = "%RH"
+
+
+[[devices]]
+device_id = "cell_differential_pressure"
+friendly_name = "Cell differential pressure"
+capability = "pressure_sensor_differential"
+driver = "esp32_analogue_pressure"
+backend = "simulated"
+required = false
+enabled = true
+
+[devices.settings]
+initial_value = 0.0
+unit = "Pa"

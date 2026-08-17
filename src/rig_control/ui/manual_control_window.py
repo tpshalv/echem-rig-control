@@ -3,7 +3,8 @@ from collections.abc import Callable
 from datetime import datetime
 from tkinter import messagebox, ttk
 
-from rig_control.bootstrap import create_simulated_device_manager
+from rig_control.device_factory import create_device_manager
+from rig_control.rig_profile_loading import load_rig_profile
 from rig_control.control.service import RigControlService
 from rig_control.ui.manual_control_model import (
     ManualActionResult,
@@ -1317,7 +1318,10 @@ class ManualControlWindow:
 
 def main() -> None:
     root = tk.Tk()
-    manager = create_simulated_device_manager()
+    profile = load_rig_profile(
+        "rig-profile.simulation.toml"
+    )
+    manager = create_device_manager(profile)
 
     # This program is explicitly simulation-only. Simulated devices are
     # therefore connected automatically for manual-control testing.

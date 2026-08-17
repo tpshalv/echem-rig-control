@@ -1,10 +1,13 @@
 import argparse
 from collections.abc import Sequence
 
-from rig_control.configuration import (
-    Keithley2260BConfiguration,
-    load_keithley_configuration,
+from rig_control.configuration import Keithley2260BConfiguration
+from rig_control.devices.keithley_2260b.configuration import (
+    configuration_from_profile,
 )
+
+from rig_control.rig_profile_loading import load_rig_profile
+
 from rig_control.devices.keithley_2260b.protocol import (
     Keithley2260BProtocol,
     KeithleyIdentity,
@@ -25,7 +28,7 @@ def identify_keithley(
         if connection.host.strip().upper() == "CHANGE_ME":
             raise ValueError(
                 "The Keithley IP address has not been configured. "
-                "Copy rig-config.example.toml to rig-config.toml and "
+                "Copy rig-profile.example.toml to rig-profile.toml and "
                 "replace CHANGE_ME with the instrument's IP address."
             )
 
@@ -68,17 +71,21 @@ def main(arguments: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "configuration",
         nargs="?",
-        default="rig-config.toml",
+        default="rig-profile.toml",
         help=(
-            "Path to the rig TOML configuration file "
-            "(default: rig-config.toml)"
+            "Path to the rig profile TOML  file "
+            "(default: rig-profile.toml)"
         ),
     )
     parsed_arguments = parser.parse_args(arguments)
 
     try:
-        configuration = load_keithley_configuration(
+        profile = load_rig_profile(
             parsed_arguments.configuration
+        )
+        configuration = configuration_from_profile(
+            profile,
+            "main_power_supply",
         )
         connection = configuration.connection
 

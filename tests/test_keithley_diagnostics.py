@@ -71,18 +71,33 @@ def make_configuration(
 
 
 def write_configuration(path: Path) -> Path:
-    configuration_path = path / "rig-config.toml"
+    configuration_path = path / "rig-profile.toml"
     configuration_path.write_text(
         """
-[keithley_2260b]
-device_id = "main_power_supply"
+[profile]
+profile_id = "test_rig"
+friendly_name = "Test rig"
 
-[keithley_2260b.connection]
+[[connections]]
+connection_id = "keithley_ethernet"
+connection_type = "socket_scpi"
+
+[connections.parameters]
 host = "192.168.1.50"
 port = 2268
 timeout_seconds = 5.0
 
-[keithley_2260b.limits]
+[[devices]]
+device_id = "main_power_supply"
+friendly_name = "Main power supply"
+capability = "dc_power_supply"
+driver = "keithley_2260b"
+backend = "real"
+required = true
+enabled = true
+connection_id = "keithley_ethernet"
+
+[devices.settings]
 maximum_voltage = 30.0
 maximum_current = 108.0
 maximum_power = 1080.0
@@ -90,7 +105,6 @@ maximum_power = 1080.0
         encoding="utf-8",
     )
     return configuration_path
-
 
 def test_diagnostic_sends_identification_query_only() -> None:
     transport = DiagnosticTransport()

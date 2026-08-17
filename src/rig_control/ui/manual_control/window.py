@@ -16,19 +16,26 @@ from rig_control.devices.power_supply import (
     PowerSupplyOperatingMode,
 )
 
+from rig_control.ui.common.theme import (
+    BANNER_FONT,
+    BODY_BOLD_FONT,
+    DANGER_BUTTON_ACTIVE_BACKGROUND,
+    DANGER_BUTTON_BACKGROUND,
+    ERROR_TEXT,
+    MONOSPACE_FONT,
+    MUTED_TEXT,
+    NEUTRAL_BACKGROUND,
+    SECTION_FONT,
+    STATUS_TEXT_COLOURS,
+    SUCCESS_BACKGROUND,
+    SUCCESS_TEXT,
+    TITLE_FONT,
+    WARNING_BACKGROUND,
+    WARNING_TEXT,
+)
 
 class ManualControlWindow:
     """Manual commissioning controls backed by the control service."""
-
-    STATUS_COLOURS = {
-        "ready": "#16823B",
-        "connected": "#16823B",
-        "degraded": "#B26A00",
-        "connecting": "#1769AA",
-        "faulted": "#C62828",
-        "disconnected": "#555555",
-        "unknown": "#777777",
-    }
 
     def __init__(
         self,
@@ -68,9 +75,9 @@ class ManualControlWindow:
         simulation_label = tk.Label(
             main,
             text="SIMULATION MODE - NO PHYSICAL HARDWARE",
-            foreground="#7A3E00",
-            background="#FFF4CE",
-            font=("Segoe UI", 11, "bold"),
+            foreground=WARNING_TEXT,
+            background=WARNING_BACKGROUND,
+            font=BANNER_FONT,
             padx=10,
             pady=7,
         )
@@ -93,13 +100,13 @@ class ManualControlWindow:
         ttk.Label(
             heading_row,
             text="Manual control",
-            font=("Segoe UI", 16, "bold"),
+            font=TITLE_FONT
         ).grid(row=0, column=0, sticky="w")
 
         self._mode_label = ttk.Label(
             heading_row,
             text="",
-            font=("Segoe UI", 10, "bold"),
+            font=SECTION_FONT,
         )
         self._mode_label.grid(row=0, column=1, sticky="e")
 
@@ -158,10 +165,10 @@ class ManualControlWindow:
             text="ENTER SAFE STATE — ALL DEVICES",
             command=self._enter_global_safe_state,
             foreground="white",
-            background="#B71C1C",
+            background=DANGER_BUTTON_BACKGROUND,
             activeforeground="white",
-            activebackground="#8E0000",
-            font=("Segoe UI", 10, "bold"),
+            activebackground=DANGER_BUTTON_ACTIVE_BACKGROUND,
+            font=SECTION_FONT,
             padx=12,
             pady=5,
             relief="raised",
@@ -186,7 +193,7 @@ class ManualControlWindow:
             log_frame,
             height=10,
             wrap="word",
-            font=("Consolas", 9),
+            font=MONOSPACE_FONT,
             state="disabled",
         )
         self._log.grid(
@@ -269,19 +276,19 @@ class ManualControlWindow:
             ttk.Label(
                 headings,
                 text="Measurement",
-                font=("Segoe UI", 9, "bold"),
+                font=BODY_BOLD_FONT,
             ).grid(row=0, column=0, sticky="w")
 
             ttk.Label(
                 headings,
                 text="Set",
-                font=("Segoe UI", 9, "bold"),
+                font=BODY_BOLD_FONT,
             ).grid(row=0, column=1, sticky="w", padx=(18, 0))
 
             ttk.Label(
                 headings,
                 text="Actual",
-                font=("Segoe UI", 9, "bold"),
+                font=BODY_BOLD_FONT,
             ).grid(row=0, column=2, sticky="w", padx=(18, 0))
 
             values = ttk.Frame(frame)
@@ -314,7 +321,7 @@ class ManualControlWindow:
                     row.measured_flow,
                     row.flow_unit,
                 ),
-                font=("Segoe UI", 10, "bold"),
+                font=SECTION_FONT,
             ).grid(row=0, column=2, sticky="w", padx=(18, 0))
 
             detail_text = self._measurement_detail(
@@ -325,7 +332,7 @@ class ManualControlWindow:
             ttk.Label(
                 frame,
                 text=detail_text,
-                foreground="#555555",
+                foreground=MUTED_TEXT,
             ).grid(
                 row=3,
                 column=0,
@@ -451,7 +458,7 @@ class ManualControlWindow:
             ttk.Label(
                 mode_frame,
                 text="Intended control mode:",
-                font=("Segoe UI", 9, "bold"),
+                font=BODY_BOLD_FONT,
             ).grid(row=0, column=0, sticky="w")
 
             mode_selector = ttk.Combobox(
@@ -502,7 +509,7 @@ class ManualControlWindow:
                     f"{row.maximum_current} A, "
                     f"{row.maximum_power} W"
                 ),
-                foreground="#555555",
+                foreground=MUTED_TEXT,
             ).grid(
                 row=1,
                 column=0,
@@ -607,13 +614,13 @@ class ManualControlWindow:
             ttk.Label(
                 values,
                 text="Measurement",
-                font=("Segoe UI", 9, "bold"),
+                font=BODY_BOLD_FONT,
             ).grid(row=0, column=0, sticky="w")
 
             ttk.Label(
                 values,
                 text="Set",
-                font=("Segoe UI", 9, "bold"),
+                font=BODY_BOLD_FONT,
             ).grid(
                 row=0,
                 column=1,
@@ -624,7 +631,7 @@ class ManualControlWindow:
             ttk.Label(
                 values,
                 text="Actual",
-                font=("Segoe UI", 9, "bold"),
+                font=BODY_BOLD_FONT,
             ).grid(
                 row=0,
                 column=2,
@@ -664,7 +671,7 @@ class ManualControlWindow:
                 ttk.Label(
                     values,
                     text=actual_text,
-                    font=("Segoe UI", 10, "bold"),
+                    font=SECTION_FONT,
                 ).grid(
                     row=value_row,
                     column=2,
@@ -700,7 +707,7 @@ class ManualControlWindow:
                     row.measured_voltage,
                     row.measured_current,
                 ),
-                font=("Segoe UI", 10, "bold"),
+                font=SECTION_FONT,
             ).grid(
                 row=3,
                 column=2,
@@ -724,7 +731,7 @@ class ManualControlWindow:
                     f"Voltage: {voltage_detail}    "
                     f"Current: {current_detail}"
                 ),
-                foreground="#555555",
+                foreground=MUTED_TEXT,
             ).grid(
                 row=3,
                 column=0,
@@ -895,16 +902,16 @@ class ManualControlWindow:
         column: int,
         columnspan: int = 1,
     ) -> None:
-        colour = self.STATUS_COLOURS.get(
+        colour = STATUS_TEXT_COLOURS.get(
             status,
-            self.STATUS_COLOURS["unknown"],
+            STATUS_TEXT_COLOURS["unknown"],
         )
 
         indicator = tk.Label(
             parent,
             text=f"●  {status.replace('_', ' ').title()}",
             foreground=colour,
-            font=("Segoe UI", 10, "bold"),
+            font=SECTION_FONT,
         )
         indicator.grid(
             row=row,
@@ -922,23 +929,23 @@ class ManualControlWindow:
     ) -> None:
         if not is_available:
             text = "●  OUTPUT STATE UNKNOWN"
-            foreground = "#B26A00"
-            background = "#FFF4CE"
+            foreground = WARNING_TEXT
+            background = WARNING_BACKGROUND
         elif output_enabled:
             text = "●  OUTPUT ENABLED"
-            foreground = "#0B6E2F"
-            background = "#DFF6E5"
+            foreground = SUCCESS_TEXT
+            background = SUCCESS_BACKGROUND
         else:
             text = "●  Output disabled"
-            foreground = "#555555"
-            background = "#EEEEEE"
+            foreground = MUTED_TEXT
+            background = NEUTRAL_BACKGROUND
 
         indicator = tk.Label(
             parent,
             text=text,
             foreground=foreground,
             background=background,
-            font=("Segoe UI", 10, "bold"),
+            font=SECTION_FONT,
             padx=9,
             pady=4,
         )

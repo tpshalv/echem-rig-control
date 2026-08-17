@@ -8,7 +8,21 @@ from rig_control.rig_profile_loading import load_rig_profile
 from rig_control.ui.diagnostics.model import (
     DiagnosticViewModel,
 )
-
+from rig_control.ui.common.theme import (
+    BODY_BOLD_FONT,
+    BODY_FONT,
+    ERROR_BACKGROUND,
+    ERROR_TEXT,
+    MONOSPACE_FONT,
+    MUTED_TEXT,
+    NEUTRAL_BACKGROUND,
+    SECTION_FONT,
+    SUCCESS_BACKGROUND,
+    SUCCESS_TEXT,
+    TITLE_FONT,
+    WARNING_BACKGROUND,
+    WARNING_TEXT,
+)
 
 class DiagnosticWindow:
     """Tkinter diagnostic screen backed by DiagnosticViewModel."""
@@ -49,7 +63,7 @@ class DiagnosticWindow:
         title = ttk.Label(
             main,
             text="Device diagnostics",
-            font=("Segoe UI", 16, "bold"),
+            font=TITLE_FONT,
         )
         title.grid(
             row=0,
@@ -95,29 +109,27 @@ class DiagnosticWindow:
 
         self._device_table.tag_configure(
             "ready",
-            foreground="#087A28",
-            background="#E6F4EA",
-            font=("Segoe UI", 9, "bold"),
+            foreground=SUCCESS_TEXT,
+            background=SUCCESS_BACKGROUND,
+            font=BODY_BOLD_FONT,
         )
         self._device_table.tag_configure(
             "disconnected",
-            foreground="#555555",
-            background="#F3F3F3",
-            font=("Segoe UI", 9, "normal"),
+            foreground=MUTED_TEXT,
+            background=NEUTRAL_BACKGROUND,
+            font=BODY_FONT,
         )
-
         self._device_table.tag_configure(
             "warning",
-            foreground="#8A4B00",
-            background="#FFF4CE",
-            font=("Segoe UI", 9, "bold"),
+            foreground=WARNING_TEXT,
+            background=WARNING_BACKGROUND,
+            font=BODY_BOLD_FONT,
         )
-
         self._device_table.tag_configure(
             "error",
-            foreground="#B3261E",
-            background="#FDE7E9",
-            font=("Segoe UI", 9, "bold"),
+            foreground=ERROR_TEXT,
+            background=ERROR_BACKGROUND,
+            font=BODY_BOLD_FONT,
         )
 
         self._device_table.grid(
@@ -155,7 +167,7 @@ class DiagnosticWindow:
         details_label = ttk.Label(
             main,
             text="Diagnostic details",
-            font=("Segoe UI", 10, "bold"),
+            font=SECTION_FONT,
         )
         details_label.grid(
             row=3,
@@ -168,7 +180,7 @@ class DiagnosticWindow:
             main,
             height=10,
             wrap="word",
-            font=("Consolas", 9),
+            font=MONOSPACE_FONT,
         )
         self._details.grid(
             row=4,

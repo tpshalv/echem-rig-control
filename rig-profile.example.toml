@@ -54,7 +54,7 @@ manufacturer = "Alicat"
 address = "A"
 
 [devices.settings]
-maximum_flow = 100.0
+maximum_flow = 200.0
 flow_unit = "sccm"
 
 
@@ -75,7 +75,7 @@ manufacturer = "Alicat"
 address = "B"
 
 [devices.settings]
-maximum_flow = 100.0
+maximum_flow = 200.0
 flow_unit = "sccm"
 
 
@@ -96,7 +96,7 @@ manufacturer = "Alicat"
 address = "C"
 
 [devices.settings]
-maximum_flow = 100.0
+maximum_flow = 200.0
 flow_unit = "sccm"
 
 

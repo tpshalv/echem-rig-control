@@ -248,6 +248,62 @@ Planned export formats include:
 - Wide CSV as a convenient human-facing export.
 - Metadata and event information alongside measurements.
 
+## Units and conversions
+
+Numbers must not move through the system without a clear physical meaning.
+Each measured or controlled quantity will therefore have a documented
+canonical unit used by control logic and saved experiment data.
+
+The system distinguishes three representations:
+
+1. The canonical unit used internally and in saved data.
+2. The unit used by a particular instrument or protocol.
+3. A convenient display or input unit selected for the user interface.
+
+For example, a recipe duration may be entered as `2 h` in the UI. The UI
+converts it to the canonical duration value of `7200 s` before sending it to
+the control or recipe layer. Saved data uses `7200` with the unit `s`, rather
+than depending on the UI choice.
+
+Initial canonical units are:
+
+| Quantity | Canonical unit | Possible display units |
+| --- | --- | --- |
+| Duration | second (`s`) | s, min, h, day |
+| Timestamp | UTC ISO 8601 timestamp | local date and time |
+| Voltage | volt (`V`) | V, mV |
+| Current | ampere (`A`) | A, mA |
+| Power | watt (`W`) | W, kW |
+| Temperature | to be selected before temperature control is added | degC, K |
+| Gas flow | rig standard, currently `sccm` | supported flow units |
+
+Canonical does not always mean an SI base unit. A well-defined laboratory
+unit such as `sccm` can be more useful than an awkward SI representation.
+Consistency and unambiguous metadata are more important than converting every
+quantity to an SI base unit.
+
+Conversions belong at system boundaries:
+
+- A driver converts instrument values to canonical units before creating
+  shared measurement models.
+- A driver converts canonical control values to instrument units before
+  sending commands when necessary.
+- The UI converts user input to canonical units and converts canonical values
+  to the selected display unit.
+- Data writers save canonical values and explicit unit identifiers. They do
+  not depend on UI display preferences.
+
+Unit identifiers must use one standardized spelling. Values labelled `V`,
+`volts`, and `mV` must not be mixed without conversion. The current
+`Measurement` model stores a value and a free-text unit; future unit support
+will validate these identifiers and conversions centrally rather than
+spreading conversion formulas across drivers, recipes, and UI code.
+
+Standard-volume gas-flow units require extra care because the meaning of
+"standard" depends on reference temperature and pressure. Those reference
+conditions must be defined in the rig configuration or measurement metadata
+before conversions between standard-volume flow units are supported.
+
 ## Simulation
 
 Simulation is a supported backend, not a temporary collection of throwaway tests.

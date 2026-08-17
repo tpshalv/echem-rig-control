@@ -6,6 +6,7 @@ from rig_control.device_factory import (
     DeviceFactoryError,
     create_device_manager,
 )
+from rig_control.devices.keithley_2260b.driver import Keithley2260B
 from rig_control.devices.simulated_mfc import (
     SimulatedMassFlowController,
 )
@@ -14,11 +15,13 @@ from rig_control.devices.simulated_power_supply import (
 )
 from rig_control.devices.simulated_sensor import SimulatedSensor
 from rig_control.rig_profile import (
+    ConnectionDefinition,
     DeviceBackend,
     DeviceCapability,
     DeviceRole,
     RigProfile,
 )
+from rig_control.models import DeviceStatus
 from rig_control.rig_profile_loading import load_rig_profile
 
 
@@ -47,11 +50,15 @@ def make_role(
     )
 
 
-def make_profile(*roles: DeviceRole) -> RigProfile:
+def make_profile(
+    *roles: DeviceRole,
+    connections: tuple[ConnectionDefinition, ...] = (),
+) -> RigProfile:
     return RigProfile(
         profile_id="test_profile",
         friendly_name="Test profile",
         device_roles=roles,
+        connections=connections,
     )
 
 
@@ -132,7 +139,7 @@ def test_disabled_device_is_not_constructed() -> None:
     assert manager.device_ids == ()
 
 
-def test_real_device_is_rejected_without_connection_attempt() -> None:
+def test_unsupported_real_device_is_rejected_without_connection() -> None:
     role = replace(
         make_role(),
         backend=DeviceBackend.REAL,
@@ -166,3 +173,40 @@ def test_unsupported_simulated_capability_is_rejected() -> None:
         match="No simulated device factory",
     ):
         create_device_manager(make_profile(role))
+
+
+def test_real_keithley_is_constructed_without_connecting() -> None:
+    connection = ConnectionDefinition(
+        connection_id="keithley_ethernet",
+        connection_type="socket_scpi",
+        parameters={
+            "host": "192.168.1.29",
+            "port": 2268,
+            "timeout_seconds": 4.0,
+        },
+    )
+    role = DeviceRole(
+        device_id="main_power_supply",
+        friendly_name="Main power supply",
+        capability=DeviceCapability.DC_POWER_SUPPLY,
+        driver="keithley_2260b",
+        backend=DeviceBackend.REAL,
+        connection_id=connection.connection_id,
+        settings={
+            "maximum_voltage": 30.0,
+            "maximum_current": 108.0,
+            "maximum_power": 1080.0,
+        },
+    )
+
+    manager = create_device_manager(
+        make_profile(role, connections=(connection,))
+    )
+    device = manager.get("main_power_supply")
+
+    assert isinstance(device, Keithley2260B)
+    assert device.status is DeviceStatus.DISCONNECTED
+    assert device.identity is None
+    assert device.limits.maximum_voltage == 30.0
+    assert device.limits.maximum_current == 108.0
+    assert device.limits.maximum_power == 1080.0

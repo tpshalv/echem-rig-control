@@ -1,6 +1,10 @@
 from collections.abc import Mapping
 
 from rig_control.devices.base import Device
+from rig_control.devices.keithley_2260b.configuration import (
+    configuration_from_profile,
+)
+from rig_control.devices.keithley_2260b.driver import Keithley2260B
 from rig_control.devices.manager import DeviceManager
 from rig_control.devices.mass_flow_controller import (
     MassFlowControllerLimits,
@@ -20,6 +24,7 @@ from rig_control.rig_profile import (
     DeviceRole,
     RigProfile,
 )
+from rig_control.transports.socket_scpi import SocketScpiTransport
 
 
 class DeviceFactoryError(RuntimeError):
@@ -44,18 +49,26 @@ def create_device_manager(profile: RigProfile) -> DeviceManager:
     manager = DeviceManager()
 
     for role in profile.enabled_roles:
-        manager.register(_create_device(role))
+        manager.register(_create_device(profile, role))
 
     return manager
 
 
-def _create_device(role: DeviceRole) -> Device:
+def _create_device(
+    profile: RigProfile,
+    role: DeviceRole,
+) -> Device:
     if role.backend is DeviceBackend.REAL:
+        if (
+            role.capability is DeviceCapability.DC_POWER_SUPPLY
+            and role.driver == "keithley_2260b"
+        ):
+            return _create_real_keithley(profile, role)
+
         raise DeviceFactoryError(
             f"Device {role.device_id!r} is configured as real "
-            "hardware, but real-hardware construction is not yet "
-            "enabled in the general device factory. No connection "
-            "was attempted."
+            f"hardware using unsupported driver {role.driver!r}. "
+            "No connection was attempted."
         )
 
     if role.backend is not DeviceBackend.SIMULATED:
@@ -88,6 +101,36 @@ def _create_device(role: DeviceRole) -> Device:
         f"{role.device_id!r} with capability "
         f"{role.capability.value!r}"
     )
+
+
+def _create_real_keithley(
+    profile: RigProfile,
+    role: DeviceRole,
+) -> Keithley2260B:
+    """Construct a disconnected Keithley from its profile settings."""
+
+    try:
+        configuration = configuration_from_profile(
+            profile,
+            role.device_id,
+        )
+        connection = configuration.connection
+        transport = SocketScpiTransport(
+            host=connection.host,
+            port=connection.port,
+            timeout_seconds=connection.timeout_seconds,
+        )
+        return Keithley2260B(
+            device_id=configuration.device_id,
+            limits=configuration.limits,
+            transport=transport,
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise DeviceFactoryError(
+            f"Invalid settings for real Keithley device "
+            f"{role.device_id!r}: {type(error).__name__}: {error}. "
+            "No connection was attempted."
+        ) from error
 
 
 def _create_simulated_mfc(

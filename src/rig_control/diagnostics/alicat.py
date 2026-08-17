@@ -1,0 +1,144 @@
+import argparse
+from collections.abc import Sequence
+from dataclasses import dataclass
+
+from rig_control.devices.alicat.bus import AlicatBus
+from rig_control.devices.alicat.configuration import (
+    AlicatMfcConfiguration,
+    configuration_from_profile,
+)
+from rig_control.devices.alicat.protocol import (
+    AlicatAsciiProtocolClient,
+    AlicatInstrumentState,
+)
+from rig_control.rig_profile_loading import load_rig_profile
+from rig_control.transports.pyserial_text import PySerialTextTransport
+from rig_control.transports.serial_text import SerialTextTransport
+
+
+@dataclass(frozen=True, slots=True)
+class AlicatDiagnosticResult:
+    """Raw and decoded results from one read-only poll."""
+
+    raw_response: str
+    state: AlicatInstrumentState
+
+
+def read_alicat_state(
+    configuration: AlicatMfcConfiguration,
+    transport: SerialTextTransport | None = None,
+) -> AlicatDiagnosticResult:
+    """Open, poll once, decode, and close without changing the MFC."""
+
+    connection = configuration.connection
+    if transport is None:
+        if connection.port.strip().upper() == "CHANGE_ME":
+            raise ValueError(
+                "The Alicat COM port has not been configured. Copy "
+                "rig-profile.example.toml to rig-profile.toml and replace "
+                "CHANGE_ME with the BB3 Windows COM port."
+            )
+        transport = PySerialTextTransport(
+            port=connection.port,
+            baud_rate=connection.baud_rate,
+            timeout_seconds=connection.timeout_seconds,
+        )
+
+    bus = AlicatBus(connection.connection_id, transport)
+    protocol = AlicatAsciiProtocolClient(
+        bus,
+        configuration.frame_fields,
+        configuration.engineering_units,
+    )
+
+    try:
+        bus.connect()
+        raw_response = bus.request(configuration.unit_address)
+        state = protocol.parse_state(
+            configuration.unit_address,
+            raw_response,
+        )
+    finally:
+        bus.disconnect()
+
+    return AlicatDiagnosticResult(raw_response, state)
+
+
+def main(arguments: Sequence[str] | None = None) -> int:
+    """Run one deliberately read-only Alicat connection diagnostic."""
+
+    parser = argparse.ArgumentParser(
+        description=(
+            "Poll one configured Alicat MFC and display its raw and "
+            "decoded state without sending a setpoint."
+        )
+    )
+    parser.add_argument(
+        "device_id",
+        help="Configured MFC device ID, for example nitrogen_mfc",
+    )
+    parser.add_argument(
+        "--configuration",
+        default="rig-profile.toml",
+        help="Rig profile path (default: rig-profile.toml)",
+    )
+    parsed = parser.parse_args(arguments)
+
+    try:
+        profile = load_rig_profile(parsed.configuration)
+        configuration = configuration_from_profile(
+            profile,
+            parsed.device_id,
+        )
+        connection = configuration.connection
+
+        print("Alicat MFC read-only diagnostic")
+        print(f"Device ID: {configuration.device_id}")
+        print(f"Target: {connection.port}, address {configuration.unit_address}")
+        print(f"Baud rate: {connection.baud_rate}")
+        print(f"Timeout: {connection.timeout_seconds:g} seconds")
+        print("Sending one status poll only; no setpoint command.")
+
+        result = read_alicat_state(configuration)
+
+    except Exception as error:
+        print()
+        print("DIAGNOSTIC FAILED")
+        print(f"Error type: {type(error).__name__}")
+        print(f"Details: {error}")
+        print()
+        print("No setpoint or gas-selection command was requested.")
+        return 1
+
+    state = result.state
+    print()
+    print("DIAGNOSTIC PASSED")
+    print(f"Raw response: {result.raw_response}")
+    print(f"Mass flow: {state.mass_flow:g} {state.mass_flow_unit}")
+    print(
+        "Volumetric flow: "
+        f"{state.volumetric_flow:g} {state.volumetric_flow_unit}"
+    )
+    print(
+        "Absolute pressure: "
+        f"{state.absolute_pressure:g} {state.pressure_unit}"
+    )
+    print(
+        "Gas temperature: "
+        f"{state.gas_temperature:g} {state.temperature_unit}"
+    )
+    print(f"Setpoint: {state.setpoint:g} {state.setpoint_unit}")
+    print(f"Selected gas/calibration: {state.gas or 'not reported'}")
+    print(
+        "Status codes: "
+        + (", ".join(state.status_codes) if state.status_codes else "none")
+    )
+    print(f"Measurement quality: {state.quality.value}")
+    print(f"Timestamp (UTC): {state.timestamp.isoformat()}")
+    print()
+    print("No setpoint or gas-selection command was requested.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

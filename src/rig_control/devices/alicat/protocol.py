@@ -144,6 +144,12 @@ class AlicatProtocolClient(ABC):
     third-party package without exposing that choice to the rest of the rig.
     """
 
+    def connect(self) -> None:
+        """Acquire communication resources when the implementation owns any."""
+
+    def disconnect(self) -> None:
+        """Release communication resources owned by this client."""
+
     @abstractmethod
     def read_state(self, unit_address: str) -> AlicatInstrumentState:
         """Read and decode the current state of one addressed MFC."""
@@ -213,10 +219,35 @@ class AlicatAsciiProtocolClient(AlicatProtocolClient):
         self._bus = bus
         self._frame_fields = frame_fields
         self._units = units
+        self._connected = False
+
+    def connect(self) -> None:
+        if self._connected:
+            raise RuntimeError("Alicat protocol client is already connected")
+        self._bus.acquire()
+        self._connected = True
+
+    def disconnect(self) -> None:
+        if not self._connected:
+            return
+        self._bus.release()
+        self._connected = False
 
     def read_state(self, unit_address: str) -> AlicatInstrumentState:
         address = self._validate_address(unit_address)
         response = self._bus.request(address)
+        return self.parse_state(address, response)
+
+    def parse_state(
+        self,
+        unit_address: str,
+        response: str,
+    ) -> AlicatInstrumentState:
+        """Decode a captured response using the configured frame layout."""
+
+        address = self._validate_address(unit_address)
+        if not isinstance(response, str) or not response.strip():
+            raise ValueError("Alicat response must be non-empty text")
         return self._parse_state(address, response)
 
     def set_flow_setpoint(self, unit_address: str, flow: float) -> None:

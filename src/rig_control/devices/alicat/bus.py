@@ -17,6 +17,8 @@ class AlicatBus:
         self._bus_id = bus_id
         self._transport = transport
         self._request_lock = Lock()
+        self._client_count = 0
+        self._opened_by_clients = False
 
     @property
     def bus_id(self) -> str:
@@ -46,6 +48,28 @@ class AlicatBus:
         """Close the shared serial connection."""
 
         self._transport.close()
+
+    def acquire(self) -> None:
+        """Acquire one device's reference to the shared connection."""
+
+        with self._request_lock:
+            if self._client_count == 0 and not self.is_connected:
+                self.connect()
+                self._opened_by_clients = True
+            self._client_count += 1
+
+    def release(self) -> None:
+        """Release one device without disrupting remaining users."""
+
+        with self._request_lock:
+            if self._client_count <= 0:
+                raise RuntimeError(
+                    f"Alicat bus {self.bus_id!r} has no acquired clients"
+                )
+            self._client_count -= 1
+            if self._client_count == 0 and self._opened_by_clients:
+                self.disconnect()
+                self._opened_by_clients = False
 
     def request(self, message: str) -> str:
         """Perform one uninterrupted request/response exchange."""

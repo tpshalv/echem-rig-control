@@ -9,6 +9,8 @@ from rig_control.devices.alicat.configuration import (
 )
 from rig_control.devices.alicat.driver import AlicatMassFlowController
 from rig_control.devices.alicat.protocol import (
+    AlicatEngineeringUnits,
+    AlicatFrameField,
     AlicatInstrumentState,
     AlicatProtocolClient,
 )
@@ -74,6 +76,21 @@ def make_driver(
                 timeout_seconds=1.0,
             ),
             limits=MassFlowControllerLimits(200.0, "sccm"),
+            frame_fields=(
+                AlicatFrameField.ABSOLUTE_PRESSURE,
+                AlicatFrameField.GAS_TEMPERATURE,
+                AlicatFrameField.VOLUMETRIC_FLOW,
+                AlicatFrameField.MASS_FLOW,
+                AlicatFrameField.SETPOINT,
+                AlicatFrameField.GAS,
+            ),
+            engineering_units=AlicatEngineeringUnits(
+                mass_flow="sccm",
+                volumetric_flow="sccm",
+                absolute_pressure="psia",
+                gas_temperature="degC",
+                setpoint="sccm",
+            ),
         ),
         protocol,
     )

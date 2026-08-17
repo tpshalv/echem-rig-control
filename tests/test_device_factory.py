@@ -7,6 +7,8 @@ from rig_control.device_factory import (
     create_device_manager,
 )
 from rig_control.devices.keithley_2260b.driver import Keithley2260B
+from rig_control.devices.alicat.driver import AlicatMassFlowController
+from rig_control.devices.alicat.configuration import AlicatSerialConfiguration
 from rig_control.devices.simulated_mfc import (
     SimulatedMassFlowController,
 )
@@ -23,6 +25,9 @@ from rig_control.rig_profile import (
 )
 from rig_control.models import DeviceStatus
 from rig_control.rig_profile_loading import load_rig_profile
+from rig_control.transports.simulated_serial_text import (
+    SimulatedSerialTextTransport,
+)
 
 
 def make_role(
@@ -210,3 +215,97 @@ def test_real_keithley_is_constructed_without_connecting() -> None:
     assert device.limits.maximum_voltage == 30.0
     assert device.limits.maximum_current == 108.0
     assert device.limits.maximum_power == 1080.0
+
+
+def make_real_alicat_role(device_id: str, address: str) -> DeviceRole:
+    return DeviceRole(
+        device_id=device_id,
+        friendly_name=device_id.upper(),
+        capability=DeviceCapability.MASS_FLOW_CONTROLLER,
+        driver="alicat",
+        backend=DeviceBackend.REAL,
+        connection_id="alicat_bus",
+        connection_parameters={"address": address},
+        settings={
+            "maximum_flow": 200.0,
+            "flow_unit": "sccm",
+            "volumetric_flow_unit": "sccm",
+            "pressure_unit": "psia",
+            "temperature_unit": "degC",
+            "frame_fields": (
+                "absolute_pressure,gas_temperature,volumetric_flow,"
+                "mass_flow,setpoint,gas"
+            ),
+        },
+    )
+
+
+def test_real_alicats_share_one_transport_without_connecting() -> None:
+    connection = ConnectionDefinition(
+        connection_id="alicat_bus",
+        connection_type="serial_text",
+        parameters={
+            "port": "COM5",
+            "baud_rate": 19200,
+            "timeout_seconds": 1.0,
+        },
+    )
+    transports: list[SimulatedSerialTextTransport] = []
+
+    def create_transport(
+        configuration: AlicatSerialConfiguration,
+    ) -> SimulatedSerialTextTransport:
+        assert configuration.port == "COM5"
+        transport = SimulatedSerialTextTransport()
+        transports.append(transport)
+        return transport
+
+    manager = create_device_manager(
+        make_profile(
+            make_real_alicat_role("mfc_a", "A"),
+            make_real_alicat_role("mfc_b", "B"),
+            connections=(connection,),
+        ),
+        alicat_transport_factory=create_transport,
+    )
+
+    assert isinstance(manager.get("mfc_a"), AlicatMassFlowController)
+    assert isinstance(manager.get("mfc_b"), AlicatMassFlowController)
+    assert len(transports) == 1
+    assert transports[0].is_open is False
+
+
+def test_factory_created_alicats_keep_shared_bus_open_until_last_disconnect(
+) -> None:
+    connection = ConnectionDefinition(
+        connection_id="alicat_bus",
+        connection_type="serial_text",
+        parameters={
+            "port": "COM5",
+            "baud_rate": 19200,
+            "timeout_seconds": 1.0,
+        },
+    )
+    transport = SimulatedSerialTextTransport()
+    response_a = "A 14.7 22.5 0.0 0.0 0.0 N2"
+    response_b = "B 14.7 22.5 0.0 0.0 0.0 CO2"
+    transport.queue_response("A", response_a)
+    transport.queue_response("B", response_b)
+    manager = create_device_manager(
+        make_profile(
+            make_real_alicat_role("mfc_a", "A"),
+            make_real_alicat_role("mfc_b", "B"),
+            connections=(connection,),
+        ),
+        alicat_transport_factory=lambda _: transport,
+    )
+
+    manager.connect("mfc_a")
+    manager.connect("mfc_b")
+    manager.disconnect("mfc_a")
+
+    assert transport.is_open is True
+
+    manager.disconnect("mfc_b")
+
+    assert transport.is_open is False

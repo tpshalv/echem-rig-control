@@ -21,7 +21,6 @@ htmlcov/
 *.egg-info/
 
 
-# Keep rig-config.example.toml in Git as the documented 
-# template, but the computer-specific rig-config.toml 
-# will remain local
-rig-config.toml
+# Keep rig-profile.example.toml in Git as the documented template, but the
+# computer-specific real-hardware profile remains local.
+rig-profile.toml

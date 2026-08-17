@@ -56,6 +56,10 @@ address = "A"
 [devices.settings]
 maximum_flow = 200.0
 flow_unit = "sccm"
+volumetric_flow_unit = "sccm"
+pressure_unit = "psia"
+temperature_unit = "degC"
+frame_fields = "absolute_pressure,gas_temperature,volumetric_flow,mass_flow,setpoint,gas"
 
 
 [[devices]]
@@ -77,6 +81,10 @@ address = "B"
 [devices.settings]
 maximum_flow = 200.0
 flow_unit = "sccm"
+volumetric_flow_unit = "sccm"
+pressure_unit = "psia"
+temperature_unit = "degC"
+frame_fields = "absolute_pressure,gas_temperature,volumetric_flow,mass_flow,setpoint,gas"
 
 
 [[devices]]
@@ -98,6 +106,10 @@ address = "C"
 [devices.settings]
 maximum_flow = 200.0
 flow_unit = "sccm"
+volumetric_flow_unit = "sccm"
+pressure_unit = "psia"
+temperature_unit = "degC"
+frame_fields = "absolute_pressure,gas_temperature,volumetric_flow,mass_flow,setpoint,gas"
 
 
 # Keithley power supply using its own Ethernet connection

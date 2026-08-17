@@ -1,8 +1,15 @@
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 from rig_control.devices.base import Device
+from rig_control.devices.alicat.bus import AlicatBus
+from rig_control.devices.alicat.configuration import (
+    AlicatSerialConfiguration,
+    configuration_from_profile as alicat_configuration_from_profile,
+)
+from rig_control.devices.alicat.driver import AlicatMassFlowController
+from rig_control.devices.alicat.protocol import AlicatAsciiProtocolClient
 from rig_control.devices.keithley_2260b.configuration import (
-    configuration_from_profile,
+    configuration_from_profile as keithley_configuration_from_profile,
 )
 from rig_control.devices.keithley_2260b.driver import Keithley2260B
 from rig_control.devices.manager import DeviceManager
@@ -25,6 +32,14 @@ from rig_control.rig_profile import (
     RigProfile,
 )
 from rig_control.transports.socket_scpi import SocketScpiTransport
+from rig_control.transports.pyserial_text import PySerialTextTransport
+from rig_control.transports.serial_text import SerialTextTransport
+
+
+type AlicatTransportFactory = Callable[
+    [AlicatSerialConfiguration],
+    SerialTextTransport,
+]
 
 
 class DeviceFactoryError(RuntimeError):
@@ -40,16 +55,31 @@ _SENSOR_CAPABILITIES = {
 }
 
 
-def create_device_manager(profile: RigProfile) -> DeviceManager:
+def create_device_manager(
+    profile: RigProfile,
+    *,
+    alicat_transport_factory: AlicatTransportFactory | None = None,
+) -> DeviceManager:
     """Construct all enabled devices described by a rig profile."""
 
     if not isinstance(profile, RigProfile):
         raise TypeError("Profile must be a RigProfile")
 
     manager = DeviceManager()
+    alicat_buses: dict[str, AlicatBus] = {}
+    selected_alicat_transport_factory = (
+        alicat_transport_factory or _create_pyserial_transport
+    )
 
     for role in profile.enabled_roles:
-        manager.register(_create_device(profile, role))
+        manager.register(
+            _create_device(
+                profile,
+                role,
+                alicat_buses,
+                selected_alicat_transport_factory,
+            )
+        )
 
     return manager
 
@@ -57,6 +87,8 @@ def create_device_manager(profile: RigProfile) -> DeviceManager:
 def _create_device(
     profile: RigProfile,
     role: DeviceRole,
+    alicat_buses: dict[str, AlicatBus],
+    alicat_transport_factory: AlicatTransportFactory,
 ) -> Device:
     if role.backend is DeviceBackend.REAL:
         if (
@@ -64,6 +96,17 @@ def _create_device(
             and role.driver == "keithley_2260b"
         ):
             return _create_real_keithley(profile, role)
+
+        if (
+            role.capability is DeviceCapability.MASS_FLOW_CONTROLLER
+            and role.driver == "alicat"
+        ):
+            return _create_real_alicat(
+                profile,
+                role,
+                alicat_buses,
+                alicat_transport_factory,
+            )
 
         raise DeviceFactoryError(
             f"Device {role.device_id!r} is configured as real "
@@ -110,7 +153,7 @@ def _create_real_keithley(
     """Construct a disconnected Keithley from its profile settings."""
 
     try:
-        configuration = configuration_from_profile(
+        configuration = keithley_configuration_from_profile(
             profile,
             role.device_id,
         )
@@ -131,6 +174,52 @@ def _create_real_keithley(
             f"{role.device_id!r}: {type(error).__name__}: {error}. "
             "No connection was attempted."
         ) from error
+
+
+def _create_real_alicat(
+    profile: RigProfile,
+    role: DeviceRole,
+    buses: dict[str, AlicatBus],
+    transport_factory: AlicatTransportFactory,
+) -> AlicatMassFlowController:
+    """Construct a disconnected Alicat on its profile's shared bus."""
+
+    try:
+        configuration = alicat_configuration_from_profile(
+            profile,
+            role.device_id,
+        )
+        connection = configuration.connection
+        bus = buses.get(connection.connection_id)
+        if bus is None:
+            bus = AlicatBus(
+                connection.connection_id,
+                transport_factory(connection),
+            )
+            buses[connection.connection_id] = bus
+
+        protocol = AlicatAsciiProtocolClient(
+            bus,
+            configuration.frame_fields,
+            configuration.engineering_units,
+        )
+        return AlicatMassFlowController(configuration, protocol)
+    except (KeyError, TypeError, ValueError) as error:
+        raise DeviceFactoryError(
+            f"Invalid settings for real Alicat device "
+            f"{role.device_id!r}: {type(error).__name__}: {error}. "
+            "No connection was attempted."
+        ) from error
+
+
+def _create_pyserial_transport(
+    configuration: AlicatSerialConfiguration,
+) -> PySerialTextTransport:
+    return PySerialTextTransport(
+        port=configuration.port,
+        baud_rate=configuration.baud_rate,
+        timeout_seconds=configuration.timeout_seconds,
+    )
 
 
 def _create_simulated_mfc(

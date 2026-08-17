@@ -66,15 +66,18 @@ class AlicatMassFlowController(MassFlowController):
 
         self._status = DeviceStatus.CONNECTING
         try:
+            self._protocol.connect()
             self._refresh_state("connect")
         except Exception:
             self._status = DeviceStatus.FAULTED
+            self._protocol.disconnect()
             raise
         self._status = DeviceStatus.READY
 
     def disconnect(self) -> None:
-        """Forget cached state without closing the shared serial bus."""
+        """Release this MFC's reference to the shared serial bus."""
 
+        self._protocol.disconnect()
         self._state = None
         self._status = DeviceStatus.DISCONNECTED
 

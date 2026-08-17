@@ -43,6 +43,13 @@ def make_role(
         settings={
             "maximum_flow": 200.0,
             "flow_unit": "sccm",
+            "volumetric_flow_unit": "sccm",
+            "pressure_unit": "psia",
+            "temperature_unit": "degC",
+            "frame_fields": (
+                "absolute_pressure,gas_temperature,volumetric_flow,"
+                "mass_flow,setpoint,gas"
+            ),
         },
     )
 

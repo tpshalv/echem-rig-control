@@ -5,6 +5,10 @@ from math import isfinite
 from rig_control.devices.mass_flow_controller import (
     MassFlowControllerLimits,
 )
+from rig_control.devices.alicat.protocol import (
+    AlicatEngineeringUnits,
+    AlicatFrameField,
+)
 from rig_control.rig_profile import (
     ConfigurationValue,
     DeviceBackend,
@@ -58,6 +62,8 @@ class AlicatMfcConfiguration:
     unit_address: str
     connection: AlicatSerialConfiguration
     limits: MassFlowControllerLimits
+    frame_fields: tuple[AlicatFrameField, ...]
+    engineering_units: AlicatEngineeringUnits
 
     def __post_init__(self) -> None:
         _validate_text(self.device_id, "Alicat device ID")
@@ -81,6 +87,18 @@ class AlicatMfcConfiguration:
 
         if not isinstance(self.limits, MassFlowControllerLimits):
             raise TypeError("Alicat limits must be MassFlowControllerLimits")
+
+        if not isinstance(self.frame_fields, tuple) or any(
+            not isinstance(field, AlicatFrameField)
+            for field in self.frame_fields
+        ):
+            raise TypeError(
+                "Alicat frame fields must be AlicatFrameField values"
+            )
+        if not isinstance(self.engineering_units, AlicatEngineeringUnits):
+            raise TypeError(
+                "Alicat engineering units must be AlicatEngineeringUnits"
+            )
 
 
 def configuration_from_profile(
@@ -119,6 +137,12 @@ def configuration_from_profile(
         unit_address,
     )
 
+    flow_unit = _require_text(
+        role.settings,
+        "flow_unit",
+        f"devices.{role.device_id}.settings.flow_unit",
+    )
+
     return AlicatMfcConfiguration(
         device_id=role.device_id,
         friendly_name=role.friendly_name,
@@ -149,13 +173,61 @@ def configuration_from_profile(
                 "maximum_flow",
                 f"devices.{role.device_id}.settings.maximum_flow",
             ),
-            flow_unit=_require_text(
+            flow_unit=flow_unit,
+        ),
+        frame_fields=_parse_frame_fields(
+            _require_text(
                 role.settings,
-                "flow_unit",
-                f"devices.{role.device_id}.settings.flow_unit",
+                "frame_fields",
+                f"devices.{role.device_id}.settings.frame_fields",
+            ),
+            role.device_id,
+        ),
+        engineering_units=AlicatEngineeringUnits(
+            mass_flow=flow_unit,
+            volumetric_flow=_require_text(
+                role.settings,
+                "volumetric_flow_unit",
+                f"devices.{role.device_id}.settings.volumetric_flow_unit",
+            ),
+            absolute_pressure=_require_text(
+                role.settings,
+                "pressure_unit",
+                f"devices.{role.device_id}.settings.pressure_unit",
+            ),
+            gas_temperature=_require_text(
+                role.settings,
+                "temperature_unit",
+                f"devices.{role.device_id}.settings.temperature_unit",
+            ),
+            setpoint=flow_unit,
+            totalized_flow=_optional_text(
+                role.settings,
+                "totalized_flow_unit",
+                f"devices.{role.device_id}.settings.totalized_flow_unit",
             ),
         ),
     )
+
+
+def _parse_frame_fields(
+    value: str,
+    device_id: str,
+) -> tuple[AlicatFrameField, ...]:
+    names = tuple(item.strip() for item in value.split(","))
+    if not names or any(not name for name in names):
+        raise ValueError(
+            f"Alicat device {device_id!r} frame_fields must be a "
+            "comma-separated list"
+        )
+    try:
+        return tuple(AlicatFrameField(name) for name in names)
+    except ValueError as error:
+        allowed = ", ".join(field.value for field in AlicatFrameField)
+        raise ValueError(
+            f"Alicat device {device_id!r} has an unknown frame field. "
+            f"Allowed fields: {allowed}"
+        ) from error
 
 
 def _validate_alicat_role(role: DeviceRole) -> None:
@@ -277,6 +349,16 @@ def _require_integer(
         )
 
     return value
+
+
+def _optional_text(
+    values: Mapping[str, ConfigurationValue],
+    key: str,
+    setting_name: str,
+) -> str | None:
+    if key not in values:
+        return None
+    return _require_text(values, key, setting_name)
 
 
 def _require_number(

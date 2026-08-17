@@ -74,6 +74,27 @@ def test_disconnect_closes_shared_transport() -> None:
     assert transport.is_open is False
 
 
+def test_acquired_clients_share_one_open_connection() -> None:
+    bus, transport = make_bus()
+
+    bus.acquire()
+    bus.acquire()
+    bus.release()
+
+    assert transport.is_open is True
+
+    bus.release()
+
+    assert transport.is_open is False
+
+
+def test_releasing_without_acquiring_is_rejected() -> None:
+    bus, _ = make_bus()
+
+    with pytest.raises(RuntimeError, match="no acquired clients"):
+        bus.release()
+
+
 def test_request_uses_shared_transport() -> None:
     bus, transport = make_bus()
     transport.queue_response("A", "A 0.0")

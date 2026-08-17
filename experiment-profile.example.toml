@@ -1,0 +1,21 @@
+[experiment]
+profile_id = "standard_electrolysis"
+friendly_name = "Standard electrolysis experiment"
+
+[[devices]]
+device_id = "nitrogen_mfc"
+purpose_label = "Nitrogen"
+required = true
+enabled = true
+
+[[devices]]
+device_id = "wet_co2_mfc"
+purpose_label = "Wet CO2"
+required = true
+enabled = true
+
+[[devices]]
+device_id = "main_power_supply"
+purpose_label = "Electrolysis power supply"
+required = true
+enabled = true

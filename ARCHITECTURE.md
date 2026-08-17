@@ -226,6 +226,14 @@ Read-only diagnostics must not enable outputs or change operating setpoints.
 
 The future Rig Setup screen will use these diagnostic capabilities to verify the configured hardware.
 
+Physical device configuration and experiment selection are separate. The
+local device library is the single source of truth for connection details,
+driver choice, hardware labels, and safety limits. Experiment profiles contain
+only device IDs plus experiment-specific purpose, required, and enabled
+settings. Resolving the two produces the existing `RigProfile` consumed by the
+device factory, control services, diagnostics, and user interfaces. This avoids
+copying COM ports, network addresses, or safety limits into every experiment.
+
 ## Data layer
 
 The data layer is independent of the UI and hardware drivers.

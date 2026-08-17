@@ -24,3 +24,8 @@ htmlcov/
 # Keep rig-profile.example.toml in Git as the documented template, but the
 # computer-specific real-hardware profile remains local.
 rig-profile.toml
+rig-profile.toml.bak
+rig-profile.toml.tmp
+device-library.toml
+device-library.toml.bak
+device-library.toml.tmp

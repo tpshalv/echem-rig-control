@@ -1,9 +1,5 @@
 from collections.abc import Mapping
-
-from rig_control.configuration import (
-    Keithley2260BConfiguration,
-    SocketScpiConfiguration,
-)
+from dataclasses import dataclass
 from rig_control.devices.power_supply import PowerSupplyLimits
 from rig_control.rig_profile import (
     ConfigurationValue,
@@ -12,6 +8,73 @@ from rig_control.rig_profile import (
     RigProfile,
 )
 
+@dataclass(frozen=True, slots=True)
+class SocketScpiConfiguration:
+    """Settings for communicating with an instrument over Ethernet."""
+
+    host: str
+    port: int
+    timeout_seconds: float = 5.0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.host, str) or not self.host.strip():
+            raise ValueError(
+                "SCPI host name or IP address cannot be empty"
+            )
+
+        if not isinstance(self.port, int) or isinstance(
+            self.port,
+            bool,
+        ):
+            raise TypeError("SCPI port must be an integer")
+
+        if not 1 <= self.port <= 65535:
+            raise ValueError(
+                "SCPI port must be between 1 and 65535"
+            )
+
+        if isinstance(self.timeout_seconds, bool) or not isinstance(
+            self.timeout_seconds,
+            (int, float),
+        ):
+            raise TypeError(
+                "SCPI timeout must be an int or float"
+            )
+
+        if self.timeout_seconds <= 0:
+            raise ValueError(
+                "SCPI timeout must be greater than zero"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class Keithley2260BConfiguration:
+    """Validated settings needed to construct one Keithley 2260B."""
+
+    device_id: str
+    connection: SocketScpiConfiguration
+    limits: PowerSupplyLimits
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.device_id, str)
+            or not self.device_id.strip()
+        ):
+            raise ValueError("Keithley device ID cannot be empty")
+
+        if not isinstance(
+            self.connection,
+            SocketScpiConfiguration,
+        ):
+            raise TypeError(
+                "Keithley connection must be a "
+                "SocketScpiConfiguration"
+            )
+
+        if not isinstance(self.limits, PowerSupplyLimits):
+            raise TypeError(
+                "Keithley limits must be PowerSupplyLimits"
+            )
 
 def configuration_from_profile(
     profile: RigProfile,

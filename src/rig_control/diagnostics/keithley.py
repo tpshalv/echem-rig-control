@@ -1,8 +1,8 @@
 import argparse
 from collections.abc import Sequence
 
-from rig_control.configuration import Keithley2260BConfiguration
 from rig_control.devices.keithley_2260b.configuration import (
+    Keithley2260BConfiguration,
     configuration_from_profile,
 )
 

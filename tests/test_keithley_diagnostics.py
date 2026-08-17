@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 import rig_control.diagnostics.keithley as diagnostic
-from rig_control.configuration import (
+from rig_control.devices.keithley_2260b.configuration import (
     Keithley2260BConfiguration,
     SocketScpiConfiguration,
 )

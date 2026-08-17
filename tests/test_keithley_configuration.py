@@ -1,9 +1,10 @@
 import pytest
 
-from rig_control.configuration import (
+from rig_control.devices.keithley_2260b.configuration import (
     Keithley2260BConfiguration,
     SocketScpiConfiguration,
 )
+
 from rig_control.devices.power_supply import PowerSupplyLimits
 
 

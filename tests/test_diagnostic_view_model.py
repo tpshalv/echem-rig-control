@@ -4,8 +4,9 @@ from rig_control.devices.simulated_power_supply import (
     SimulatedPowerSupply,
 )
 from rig_control.models import DeviceStatus
-from rig_control.ui.diagnostic_model import DiagnosticViewModel
-
+from rig_control.ui.diagnostics.model import (
+    DiagnosticViewModel,
+)
 
 def make_supply(
     device_id: str,

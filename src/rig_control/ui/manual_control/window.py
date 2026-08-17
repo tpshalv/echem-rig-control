@@ -6,9 +6,11 @@ from tkinter import messagebox, ttk
 from rig_control.device_factory import create_device_manager
 from rig_control.rig_profile_loading import load_rig_profile
 from rig_control.control.service import RigControlService
-from rig_control.ui.manual_control_model import (
-    ManualActionResult,
+from rig_control.ui.manual_control.model import (
     ManualControlViewModel,
+)
+from rig_control.ui.manual_control.types import (
+    ManualActionResult,
 )
 from rig_control.devices.power_supply import (
     PowerSupplyOperatingMode,

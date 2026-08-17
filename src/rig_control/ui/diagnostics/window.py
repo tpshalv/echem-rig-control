@@ -5,8 +5,7 @@ from datetime import datetime
 from rig_control.device_factory import create_device_manager
 from rig_control.rig_profile_loading import load_rig_profile
 
-from rig_control.ui.diagnostic_model import (
-    DiagnosticActionResult,
+from rig_control.ui.diagnostics.model import (
     DiagnosticViewModel,
 )
 

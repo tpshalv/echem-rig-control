@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from traceback import format_exc
 from enum import StrEnum
 
 from rig_control.control.commands import (
@@ -43,6 +44,37 @@ class ExecutedCommand:
     executed_at: datetime
     message: str
 
+@dataclass(frozen=True, slots=True)
+class SafeStateDeviceResult:
+    """Result of requesting safe state from one device."""
+
+    device_id: str
+    succeeded: bool
+    message: str
+    technical_details: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class GlobalSafeStateResult:
+    """Combined result of requesting safe state across the rig."""
+
+    requested_at: datetime
+    device_results: tuple[SafeStateDeviceResult, ...]
+
+    @property
+    def all_succeeded(self) -> bool:
+        return all(
+            result.succeeded
+            for result in self.device_results
+        )
+
+    @property
+    def failures(self) -> tuple[SafeStateDeviceResult, ...]:
+        return tuple(
+            result
+            for result in self.device_results
+            if not result.succeeded
+        )
 
 class RigControlService:
     """Authorize and route commands to registered device capabilities."""
@@ -89,6 +121,66 @@ class RigControlService:
             )
 
         self._mode = ControlMode.IDLE
+
+    def enter_global_safe_state(
+        self,
+        source: CommandSource = CommandSource.SAFETY_SYSTEM,
+    ) -> GlobalSafeStateResult:
+        """Request safe state from every capable device.
+
+        Every device is attempted even if another device fails.
+        """
+
+        requested_at = datetime.now(timezone.utc)
+        results: list[SafeStateDeviceResult] = []
+
+        # A safe-state request stops recipe control, but it does not create
+        # or clear a genuine fault lock.
+        if self.mode is ControlMode.RECIPE_ACTIVE:
+            self._mode = ControlMode.IDLE
+
+        for device_id in self._device_manager.device_ids:
+            device = self._device_manager.get(device_id)
+
+            # Sensors and other read-only devices may have no physical
+            # safe-state action. They are not treated as failures.
+            if not isinstance(device, SafeStateCapable):
+                continue
+
+            try:
+                executed = self.execute(
+                    EnterDeviceSafeState(
+                        device_id=device_id,
+                        source=source,
+                    )
+                )
+            except Exception as error:
+                results.append(
+                    SafeStateDeviceResult(
+                        device_id=device_id,
+                        succeeded=False,
+                        message=(
+                            f"Safe-state request failed for "
+                            f"{device_id!r}. "
+                            f"{type(error).__name__}: {error}"
+                        ),
+                        technical_details=format_exc(),
+                    )
+                )
+                continue
+
+            results.append(
+                SafeStateDeviceResult(
+                    device_id=device_id,
+                    succeeded=True,
+                    message=executed.message,
+                )
+            )
+
+        return GlobalSafeStateResult(
+            requested_at=requested_at,
+            device_results=tuple(results),
+        )
 
     def execute(
         self,

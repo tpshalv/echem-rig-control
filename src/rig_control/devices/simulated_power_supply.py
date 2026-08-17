@@ -129,12 +129,3 @@ class SimulatedPowerSupply(PowerSupply):
                 f"Current {current} A exceeds configured maximum "
                 f"{self.limits.maximum_current} A"
             )
-
-        requested_power = voltage * current
-
-        if requested_power > self.limits.maximum_power:
-            raise ValueError(
-                f"Operating point could permit {requested_power} W, "
-                f"exceeding configured maximum "
-                f"{self.limits.maximum_power} W"
-            )

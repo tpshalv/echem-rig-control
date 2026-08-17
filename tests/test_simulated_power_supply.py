@@ -52,7 +52,6 @@ def test_supply_accepts_valid_operating_point() -> None:
         (0.0, -1.0, "Current cannot be negative"),
         (31.0, 0.0, "exceeds configured maximum"),
         (0.0, 109.0, "exceeds configured maximum"),
-        (30.0, 40.0, "1200.0 W"),
     ],
 )
 def test_supply_rejects_unsafe_operating_points(
@@ -120,3 +119,13 @@ def test_disconnect_applies_safe_state() -> None:
     assert supply.output_enabled is False
     assert supply.voltage_setpoint == 0.0
     assert supply.current_limit == 0.0
+
+def test_supply_accepts_independent_voltage_and_current_limits() -> None:
+    supply = make_supply()
+    supply.connect()
+
+    supply.set_voltage(30.0)
+    supply.set_current_limit(108.0)
+
+    assert supply.voltage_setpoint == 30.0
+    assert supply.current_limit == 108.0

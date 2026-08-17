@@ -353,3 +353,102 @@ def test_unsupported_command_object_is_rejected() -> None:
         match="unsupported command object",
     ):
         service.execute(object())  # type: ignore[arg-type]
+
+
+def test_global_safe_state_handles_every_capable_device() -> None:
+    service, supply, mfc = make_control_service()
+
+    supply.set_voltage(10.0)
+    supply.set_current_limit(5.0)
+    supply.set_output_enabled(True)
+    mfc.set_flow_setpoint(25.0)
+
+    result = service.enter_global_safe_state(
+        CommandSource.MANUAL,
+    )
+
+    assert result.all_succeeded is True
+    assert result.failures == ()
+    assert len(result.device_results) == 2
+
+    assert supply.output_enabled is False
+    assert supply.voltage_setpoint == 0.0
+    assert supply.current_limit == 0.0
+    assert mfc.flow_setpoint == 0.0
+
+    assert service.mode is ControlMode.IDLE
+
+
+def test_global_safe_state_continues_after_device_failure() -> None:
+    service, supply, mfc = make_control_service()
+
+    mfc.set_flow_setpoint(25.0)
+
+    def failed_safe_state():
+        raise OSError("Simulated supply communication failure")
+
+    supply.enter_safe_state = failed_safe_state  # type: ignore[method-assign]
+
+    result = service.enter_global_safe_state(
+        CommandSource.MANUAL,
+    )
+
+    assert result.all_succeeded is False
+    assert len(result.failures) == 1
+
+    supply_result = result.device_results[0]
+    mfc_result = result.device_results[1]
+
+    assert supply_result.device_id == "main_supply"
+    assert supply_result.succeeded is False
+    assert "OSError" in supply_result.message
+    assert "Simulated supply communication failure" in (
+        supply_result.message
+    )
+    assert supply_result.technical_details is not None
+    assert "Traceback" in supply_result.technical_details
+
+    # The failed supply did not prevent the following MFC operation.
+    assert mfc_result.device_id == "dry_gas_mfc"
+    assert mfc_result.succeeded is True
+    assert mfc.flow_setpoint == 0.0
+
+    assert service.mode is ControlMode.IDLE
+
+
+def test_global_safe_state_records_successful_commands() -> None:
+    service, _, _ = make_control_service()
+
+    result = service.enter_global_safe_state()
+
+    assert result.all_succeeded is True
+    assert len(service.history) == 2
+
+    assert all(
+        isinstance(record.command, EnterDeviceSafeState)
+        for record in service.history
+    )
+    assert all(
+        record.command.source is CommandSource.SAFETY_SYSTEM
+        for record in service.history
+    )
+
+def test_global_safe_state_stops_recipe_without_fault_lock() -> None:
+    service, _, mfc = make_control_service()
+
+    service.begin_recipe_control()
+    service.execute(
+        SetMfcFlow(
+            "dry_gas_mfc",
+            25.0,
+            CommandSource.RECIPE,
+        )
+    )
+
+    result = service.enter_global_safe_state(
+        CommandSource.MANUAL,
+    )
+
+    assert result.all_succeeded is True
+    assert mfc.flow_setpoint == 0.0
+    assert service.mode is ControlMode.IDLE

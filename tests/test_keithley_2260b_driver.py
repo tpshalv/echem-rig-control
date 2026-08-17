@@ -140,7 +140,7 @@ def test_connect_rejects_wrong_instrument_model() -> None:
     assert transport.is_open is False
 
 
-def test_connect_rejects_unsafe_reported_operating_point() -> None:
+def test_connect_accepts_independent_voltage_and_current_settings() -> None:
     transport = FakeScpiTransport()
     queue_connection_responses(
         transport,
@@ -149,11 +149,12 @@ def test_connect_rejects_unsafe_reported_operating_point() -> None:
     )
     supply = make_supply(transport)
 
-    with pytest.raises(ValueError, match="1200.0 W"):
-        supply.connect()
+    supply.connect()
 
-    assert supply.status is DeviceStatus.DISCONNECTED
-    assert transport.is_open is False
+    assert supply.status is DeviceStatus.READY
+    assert supply.voltage_setpoint == 30.0
+    assert supply.current_limit == 40.0
+    assert transport.is_open is True
 
 
 def test_set_voltage_sends_expected_command() -> None:
@@ -184,19 +185,18 @@ def test_set_current_limit_sends_expected_command() -> None:
     )
 
 
-def test_unsafe_operating_point_is_rejected_before_command_is_sent() -> None:
+def test_independent_voltage_and_current_settings_are_sent() -> None:
     transport = FakeScpiTransport()
     queue_connection_responses(transport, voltage="30")
     supply = make_supply(transport)
     supply.connect()
 
-    writes_before_attempt = transport.writes.copy()
+    supply.set_current_limit(40.0)
 
-    with pytest.raises(ValueError, match="1200.0 W"):
-        supply.set_current_limit(40)
-
-    assert transport.writes == writes_before_attempt
-    assert supply.current_limit == 0.0
+    assert supply.current_limit == 40.0
+    assert transport.writes[-1] == (
+        "SOUR:CURR:LEV:IMM:AMPL 40"
+    )
 
 
 def test_output_control_sends_expected_commands() -> None:

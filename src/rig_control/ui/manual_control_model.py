@@ -1,7 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime
 from traceback import format_exc
-from enum import StrEnum
 
 from rig_control.control.commands import (
     CommandSource,
@@ -17,7 +16,10 @@ from rig_control.devices.manager import DeviceManager
 from rig_control.devices.mass_flow_controller import (
     MassFlowController,
 )
-from rig_control.devices.power_supply import PowerSupply
+from rig_control.devices.power_supply import (
+    PowerSupply,
+    PowerSupplyOperatingMode,
+)
 from rig_control.models import (
     DeviceStatus,
     Event,
@@ -25,11 +27,6 @@ from rig_control.models import (
     Measurement,
 )
 
-class PowerSupplyOperatingMode(StrEnum):
-    """Operator's intended power-supply regulation mode."""
-
-    CONSTANT_CURRENT = "constant_current"
-    CONSTANT_VOLTAGE = "constant_voltage"
 
 @dataclass(frozen=True, slots=True)
 class ManualActionResult:

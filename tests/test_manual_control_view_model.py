@@ -10,10 +10,13 @@ from rig_control.devices.simulated_mfc import (
 from rig_control.devices.simulated_power_supply import (
     SimulatedPowerSupply,
 )
-from rig_control.ui.manual_control_model import (
-    ManualControlViewModel,
+from rig_control.devices.power_supply import (
     PowerSupplyOperatingMode,
 )
+from rig_control.ui.manual_control_model import (
+    ManualControlViewModel,
+)
+
 
 
 def make_model() -> tuple[

@@ -1,10 +1,16 @@
 from abc import abstractmethod
 from dataclasses import dataclass
+from enum import StrEnum
 
 from rig_control.devices.base import Device
 from rig_control.models import Measurement
 
+class PowerSupplyOperatingMode(StrEnum):
+    """How the operator or recipe intends the supply to regulate."""
 
+    CONSTANT_CURRENT = "constant_current"
+    CONSTANT_VOLTAGE = "constant_voltage"
+    
 @dataclass(frozen=True, slots=True)
 class PowerSupplyLimits:
     """Hard configuration limits applied by the PC software."""

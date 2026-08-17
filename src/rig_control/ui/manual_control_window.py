@@ -9,6 +9,8 @@ from rig_control.control.service import RigControlService
 from rig_control.ui.manual_control_model import (
     ManualActionResult,
     ManualControlViewModel,
+)
+from rig_control.devices.power_supply import (
     PowerSupplyOperatingMode,
 )
 

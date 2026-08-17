@@ -9,12 +9,12 @@ from rig_control.ui.common.theme import (
     MUTED_TEXT,
     NEUTRAL_BACKGROUND,
     SECTION_FONT,
-    STATUS_TEXT_COLOURS,
     SUCCESS_BACKGROUND,
     SUCCESS_TEXT,
     WARNING_BACKGROUND,
     WARNING_TEXT,
 )
+from rig_control.ui.common.widgets import create_device_status_indicator
 from rig_control.ui.manual_control.model import ManualControlViewModel
 
 
@@ -79,7 +79,7 @@ class PowerSupplyPanel(ttk.Frame):
             )
             status_row.columnconfigure(0, weight=1)
 
-            self._create_status_indicator(
+            create_device_status_indicator(
                 status_row,
                 status=row.status,
                 row=0,
@@ -539,33 +539,6 @@ class PowerSupplyPanel(ttk.Frame):
                 for widget in normal_control_widgets:
                     widget.configure(state="disabled")
 
-    def _create_status_indicator(
-        self,
-        parent: tk.Misc,
-        *,
-        status: str,
-        row: int,
-        column: int,
-        columnspan: int = 1,
-    ) -> None:
-        colour = STATUS_TEXT_COLOURS.get(
-            status,
-            STATUS_TEXT_COLOURS["unknown"],
-        )
-
-        indicator = tk.Label(
-            parent,
-            text=f"â—  {status.replace('_', ' ').title()}",
-            foreground=colour,
-            font=SECTION_FONT,
-        )
-        indicator.grid(
-            row=row,
-            column=column,
-            columnspan=columnspan,
-            sticky="w",
-        )
-
     def _create_output_indicator(
         self,
         parent: tk.Misc,
@@ -673,5 +646,4 @@ class PowerSupplyPanel(ttk.Frame):
             f"Quality: {displayed_quality}; "
             f"updated {local_timestamp}"
         )
-
 

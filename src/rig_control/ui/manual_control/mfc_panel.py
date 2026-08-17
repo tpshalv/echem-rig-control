@@ -7,8 +7,8 @@ from rig_control.ui.common.theme import (
     BODY_BOLD_FONT,
     MUTED_TEXT,
     SECTION_FONT,
-    STATUS_TEXT_COLOURS,
 )
+from rig_control.ui.common.widgets import create_device_status_indicator
 from rig_control.ui.manual_control.model import ManualControlViewModel
 
 
@@ -57,9 +57,10 @@ class MfcPanel(ttk.Frame):
             )
             frame.columnconfigure(1, weight=1)
 
-            self._create_status_indicator(
+            create_device_status_indicator(
                 frame,
                 status=row.status,
+                columnspan=4,
             )
 
             headings = ttk.Frame(frame)
@@ -175,23 +176,6 @@ class MfcPanel(ttk.Frame):
             if not row.is_available:
                 entry.configure(state="disabled")
                 set_button.configure(state="disabled")
-
-    @staticmethod
-    def _create_status_indicator(
-        parent: tk.Misc,
-        *,
-        status: str,
-    ) -> None:
-        colour = STATUS_TEXT_COLOURS.get(
-            status,
-            STATUS_TEXT_COLOURS["unknown"],
-        )
-        tk.Label(
-            parent,
-            text=f"●  {status.replace('_', ' ').title()}",
-            foreground=colour,
-            font=SECTION_FONT,
-        ).grid(row=0, column=0, columnspan=4, sticky="w")
 
     @staticmethod
     def _format_number(value: float) -> str:

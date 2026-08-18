@@ -338,7 +338,7 @@ class PowerSupplyPanel(ttk.Frame):
 
             ttk.Label(
                 values,
-                text="â€”",
+                text="—",
             ).grid(
                 row=3,
                 column=1,
@@ -547,15 +547,15 @@ class PowerSupplyPanel(ttk.Frame):
         output_enabled: bool,
     ) -> None:
         if not is_available:
-            text = "â—  OUTPUT STATE UNKNOWN"
+            text = "●  OUTPUT STATE UNKNOWN"
             foreground = WARNING_TEXT
             background = WARNING_BACKGROUND
         elif output_enabled:
-            text = "â—  OUTPUT ENABLED"
+            text = "●  OUTPUT ENABLED"
             foreground = SUCCESS_TEXT
             background = SUCCESS_BACKGROUND
         else:
-            text = "â—  Output disabled"
+            text = "●  Output disabled"
             foreground = MUTED_TEXT
             background = NEUTRAL_BACKGROUND
 
@@ -610,7 +610,7 @@ class PowerSupplyPanel(ttk.Frame):
         unit: str,
     ) -> str:
         if value is None:
-            return "â€”"
+            return "—"
 
         return f"{cls._format_number(value)} {unit}"
 
@@ -621,7 +621,7 @@ class PowerSupplyPanel(ttk.Frame):
         current: float | None,
     ) -> str:
         if voltage is None or current is None:
-            return "â€”"
+            return "—"
 
         return f"{cls._format_number(voltage * current)} W"
 
@@ -646,4 +646,3 @@ class PowerSupplyPanel(ttk.Frame):
             f"Quality: {displayed_quality}; "
             f"updated {local_timestamp}"
         )
-

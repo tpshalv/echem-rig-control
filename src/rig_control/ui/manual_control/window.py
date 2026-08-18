@@ -30,6 +30,7 @@ from rig_control.ui.common.theme import (
     WARNING_BACKGROUND,
     WARNING_TEXT,
 )
+from rig_control.ui.common.widgets import VerticalScrolledFrame
 
 class ManualControlWindow:
     """Manual commissioning controls backed by the control service."""
@@ -67,7 +68,6 @@ class ManualControlWindow:
         main.grid(row=0, column=0, sticky="nsew")
         main.columnconfigure(0, weight=1)
         main.rowconfigure(2, weight=1)
-        main.rowconfigure(4, weight=1)
 
         simulation_label = tk.Label(
             main,
@@ -107,20 +107,30 @@ class ManualControlWindow:
         )
         self._mode_label.grid(row=0, column=1, sticky="e")
 
-        self._notebook = ttk.Notebook(main)
-        self._notebook.grid(
-            row=2,
-            column=0,
-            sticky="nsew",
+        adjustable_area = ttk.PanedWindow(
+            main,
+            orient="vertical",
         )
+        adjustable_area.grid(row=2, column=0, sticky="nsew")
 
+        controls_area = ttk.Frame(adjustable_area)
+        controls_area.columnconfigure(0, weight=1)
+        controls_area.rowconfigure(0, weight=1)
+
+        self._notebook = ttk.Notebook(controls_area)
+        self._notebook.grid(row=0, column=0, sticky="nsew")
+
+        self._mfc_scroll = VerticalScrolledFrame(self._notebook)
         self._mfc_panel = MfcPanel(
-            self._notebook,
+            self._mfc_scroll.content,
             self._view_model,
             self._set_mfc_flow,
         )
+        self._mfc_panel.grid(row=0, column=0, sticky="nsew")
+
+        self._supply_scroll = VerticalScrolledFrame(self._notebook)
         self._supply_panel = PowerSupplyPanel(
-            self._notebook,
+            self._supply_scroll.content,
             self._view_model,
             on_mode_change=self._request_supply_mode_change,
             on_set_voltage=self._set_supply_voltage,
@@ -128,20 +138,21 @@ class ManualControlWindow:
             on_enable_output=self._enable_supply_output,
             on_set_output=self._set_supply_output,
         )
+        self._supply_panel.grid(row=0, column=0, sticky="nsew")
 
         self._notebook.add(
-            self._mfc_panel,
+            self._mfc_scroll,
             text="Mass flow controllers",
         )
         self._notebook.add(
-            self._supply_panel,
+            self._supply_scroll,
             text="Power supplies",
         )
 
 
-        action_row = ttk.Frame(main)
+        action_row = ttk.Frame(controls_area)
         action_row.grid(
-            row=3,
+            row=1,
             column=0,
             sticky="ew",
             pady=(10, 5),
@@ -163,7 +174,7 @@ class ManualControlWindow:
 
         global_safe_button = tk.Button(
             action_row,
-            text="ENTER SAFE STATE â€” ALL DEVICES",
+            text="ENTER SAFE STATE — ALL DEVICES",
             command=self._enter_global_safe_state,
             foreground="white",
             background=DANGER_BUTTON_BACKGROUND,
@@ -181,14 +192,12 @@ class ManualControlWindow:
             sticky="e",
         )
 
-        log_frame = ttk.Frame(main)
-        log_frame.grid(
-            row=4,
-            column=0,
-            sticky="nsew",
-        )
+        log_frame = ttk.Frame(adjustable_area)
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
+
+        adjustable_area.add(controls_area, weight=3)
+        adjustable_area.add(log_frame, weight=1)
 
         self._log = tk.Text(
             log_frame,

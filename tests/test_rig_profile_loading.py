@@ -123,6 +123,32 @@ driver = "esp32_thermocouple"
     assert role.backend is DeviceBackend.REAL
     assert role.required is True
     assert role.enabled is True
+    assert role.poll_interval_seconds is None
+
+
+def test_optional_device_poll_interval_is_loaded(tmp_path: Path) -> None:
+    contents = VALID_PROFILE.replace(
+        "required = true",
+        "required = true\npoll_interval_seconds = 0.1",
+        1,
+    )
+
+    role = load_rig_profile(
+        write_profile(tmp_path, contents)
+    ).get_role("wet_co2_mfc")
+
+    assert role.poll_interval_seconds == 0.1
+
+
+def test_non_numeric_device_poll_interval_is_rejected(tmp_path: Path) -> None:
+    contents = VALID_PROFILE.replace(
+        "required = true",
+        'required = true\npoll_interval_seconds = "fast"',
+        1,
+    )
+
+    with pytest.raises(TypeError, match="poll_interval_seconds"):
+        load_rig_profile(write_profile(tmp_path, contents))
 
 
 def test_missing_file_has_informative_error(

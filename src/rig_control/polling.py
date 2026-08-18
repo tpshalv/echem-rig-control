@@ -1,8 +1,9 @@
+from collections.abc import Callable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
-from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from queue import Queue
+from math import isfinite
+from queue import Empty, Queue
 from threading import Event as ThreadEvent, Lock, Thread
 from time import monotonic
 
@@ -14,7 +15,7 @@ from rig_control.models import Event, EventSeverity, EventSink
 
 @dataclass(frozen=True, slots=True)
 class PollingFailure:
-    """Details of one device that could not be read in a polling cycle."""
+    """Details of one device that could not be read."""
 
     device_id: str
     operation: str
@@ -24,7 +25,7 @@ class PollingFailure:
 
 @dataclass(frozen=True, slots=True)
 class PollingBatch:
-    """All results produced by one polling cycle."""
+    """One published snapshot of the latest known device state."""
 
     started_at: datetime
     finished_at: datetime
@@ -33,29 +34,77 @@ class PollingBatch:
     events: tuple[Event, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class _CompletedRead:
+    device_id: str
+    started_at: float
+    future: Future[tuple[MeasurementRecord, ...]]
+
+
 class PollingService:
-    """Read measurement-capable devices without blocking the UI thread."""
+    """Read devices independently and publish cached snapshots."""
 
     def __init__(
         self,
         device_manager: DeviceManager,
         *,
         interval_seconds: float = 1.0,
-        max_workers: int = 4,
+        publish_interval_seconds: float | None = None,
+        device_intervals_seconds: Mapping[str, float] | None = None,
+        max_workers: int | None = None,
         batch_handler: Callable[[PollingBatch], None] | None = None,
         event_sink: EventSink | None = None,
     ) -> None:
-        if interval_seconds <= 0:
-            raise ValueError("Polling interval must be greater than zero")
-        if max_workers <= 0:
+        self._default_device_interval = self._validate_interval(
+            interval_seconds,
+            "Default device polling interval",
+        )
+        self._publish_interval = self._validate_interval(
+            interval_seconds
+            if publish_interval_seconds is None
+            else publish_interval_seconds,
+            "Polling publish interval",
+        )
+        if max_workers is not None and (
+            isinstance(max_workers, bool)
+            or not isinstance(max_workers, int)
+            or max_workers <= 0
+        ):
             raise ValueError("Polling worker count must be greater than zero")
 
         self._device_manager = device_manager
-        self._interval_seconds = float(interval_seconds)
-        self._max_workers = max_workers
+        self._source_ids = tuple(
+            device_id
+            for device_id in device_manager.device_ids
+            if isinstance(device_manager.get(device_id), MeasurementSource)
+        )
+        configured_intervals = dict(device_intervals_seconds or {})
+        unsupported_ids = set(configured_intervals) - set(self._source_ids)
+        if unsupported_ids:
+            listed = ", ".join(sorted(unsupported_ids))
+            raise ValueError(
+                "Polling intervals were supplied for devices that are not "
+                f"registered measurement sources: {listed}"
+            )
+        self._device_intervals = {
+            device_id: self._validate_interval(
+                configured_intervals.get(
+                    device_id,
+                    self._default_device_interval,
+                ),
+                f"Polling interval for device {device_id!r}",
+            )
+            for device_id in self._source_ids
+        }
+        # One worker per logical source prevents unrelated slow devices from
+        # exhausting a smaller shared pool. A supplied value can increase,
+        # but cannot weaken, that independence guarantee.
+        self._worker_count = max(max_workers or 1, len(self._source_ids), 1)
         self._batch_handler = batch_handler
         self._event_sink = event_sink
         self._results: Queue[PollingBatch] = Queue()
+        self._completed_reads: Queue[_CompletedRead] = Queue()
+        self._wake_scheduler = ThreadEvent()
         self._stop_requested = ThreadEvent()
         self._lifecycle_lock = Lock()
         self._thread: Thread | None = None
@@ -75,12 +124,14 @@ class PollingService:
         return thread is not None and thread.is_alive()
 
     def start(self) -> None:
-        """Start polling; calling start while running is an error."""
+        """Start independent device scheduling and snapshot publication."""
 
         with self._lifecycle_lock:
             if self.is_running:
                 raise RuntimeError("Polling service is already running")
             self._stop_requested.clear()
+            self._wake_scheduler.clear()
+            self._clear_queue(self._completed_reads)
             self._failed_device_ids.clear()
             self._batch_handler_failed = False
             self._event_sink_failed = False
@@ -92,13 +143,14 @@ class PollingService:
             self._thread.start()
 
     def stop(self, timeout: float | None = None) -> None:
-        """Request shutdown and wait for in-progress device calls."""
+        """Request shutdown and wait for in-progress driver calls."""
 
         with self._lifecycle_lock:
             thread = self._thread
             if thread is None:
                 return
             self._stop_requested.set()
+            self._wake_scheduler.set()
 
         thread.join(timeout)
         if thread.is_alive():
@@ -109,57 +161,161 @@ class PollingService:
                 self._thread = None
 
     def poll_once(self) -> PollingBatch:
-        """Poll all eligible devices once, primarily for tests and tools."""
+        """Synchronously poll all sources once for diagnostics and tests."""
 
+        if self.is_running:
+            raise RuntimeError("poll_once cannot run during background polling")
         with ThreadPoolExecutor(
-            max_workers=self._max_workers,
+            max_workers=self._worker_count,
             thread_name_prefix="rig-device-read",
         ) as executor:
-            batch = self._poll_with_executor(executor)
+            batch = self._poll_all_once(executor)
             batch = self._deliver_batch(batch)
             return self._publish_events(batch)
 
     def _run(self) -> None:
+        latest: dict[tuple[str, str], MeasurementRecord] = {}
+        active_failures: dict[str, PollingFailure] = {}
+        pending_events: list[Event] = []
+        now = monotonic()
+        next_due = {device_id: now for device_id in self._source_ids}
+        in_flight: set[str] = set()
+        next_publish = now + self._publish_interval
+
         with ThreadPoolExecutor(
-            max_workers=self._max_workers,
+            max_workers=self._worker_count,
             thread_name_prefix="rig-device-read",
         ) as executor:
             while not self._stop_requested.is_set():
-                cycle_started = monotonic()
-                batch = self._poll_with_executor(executor)
-                batch = self._deliver_batch(batch)
-                batch = self._publish_events(batch)
-                self._results.put(batch)
-                remaining = self._interval_seconds - (
-                    monotonic() - cycle_started
+                self._drain_completions(
+                    latest,
+                    active_failures,
+                    pending_events,
+                    next_due,
+                    in_flight,
                 )
-                if remaining > 0:
-                    self._stop_requested.wait(remaining)
+                now = monotonic()
 
-    def _poll_with_executor(
+                for device_id in self._source_ids:
+                    if device_id in in_flight or now < next_due[device_id]:
+                        continue
+                    started_at = now
+                    future = executor.submit(self._read_device, device_id)
+                    in_flight.add(device_id)
+                    future.add_done_callback(
+                        lambda completed,
+                        selected_id=device_id,
+                        selected_start=started_at: self._read_completed(
+                            selected_id,
+                            selected_start,
+                            completed,
+                        )
+                    )
+
+                now = monotonic()
+                if now >= next_publish:
+                    batch = PollingBatch(
+                        started_at=datetime.now(UTC),
+                        finished_at=datetime.now(UTC),
+                        measurements=tuple(
+                            latest[key] for key in sorted(latest)
+                        ),
+                        failures=tuple(
+                            active_failures[key]
+                            for key in sorted(active_failures)
+                        ),
+                        events=tuple(pending_events),
+                    )
+                    pending_events.clear()
+                    batch = self._deliver_batch(batch)
+                    batch = self._publish_events(batch)
+                    self._results.put(batch)
+                    while next_publish <= now:
+                        next_publish += self._publish_interval
+
+                deadlines = [next_publish]
+                deadlines.extend(
+                    next_due[device_id]
+                    for device_id in self._source_ids
+                    if device_id not in in_flight
+                )
+                wait_seconds = max(0.0, min(deadlines) - monotonic())
+                self._wake_scheduler.wait(wait_seconds)
+                self._wake_scheduler.clear()
+
+    def _read_completed(
+        self,
+        device_id: str,
+        started_at: float,
+        future: Future[tuple[MeasurementRecord, ...]],
+    ) -> None:
+        self._completed_reads.put(_CompletedRead(device_id, started_at, future))
+        self._wake_scheduler.set()
+
+    def _drain_completions(
+        self,
+        latest: dict[tuple[str, str], MeasurementRecord],
+        active_failures: dict[str, PollingFailure],
+        pending_events: list[Event],
+        next_due: dict[str, float],
+        in_flight: set[str],
+    ) -> None:
+        while True:
+            try:
+                completed = self._completed_reads.get_nowait()
+            except Empty:
+                return
+
+            device_id = completed.device_id
+            in_flight.discard(device_id)
+            completed_at = monotonic()
+            scheduled_next = (
+                completed.started_at + self._device_intervals[device_id]
+            )
+            next_due[device_id] = (
+                scheduled_next
+                if scheduled_next > completed_at
+                else completed_at + self._device_intervals[device_id]
+            )
+
+            try:
+                records = completed.future.result()
+            except Exception as error:
+                active_failures[device_id] = PollingFailure(
+                    device_id=device_id,
+                    operation="read measurements",
+                    error_type=type(error).__name__,
+                    message=str(error),
+                )
+                if device_id not in self._failed_device_ids:
+                    pending_events.append(self._failure_event(device_id, error))
+                self._failed_device_ids.add(device_id)
+                continue
+
+            for record in records:
+                latest[(record.device_id, record.channel)] = record
+            active_failures.pop(device_id, None)
+            if device_id in self._failed_device_ids:
+                pending_events.append(self._recovery_event(device_id))
+                self._failed_device_ids.remove(device_id)
+
+    def _poll_all_once(
         self,
         executor: ThreadPoolExecutor,
     ) -> PollingBatch:
         started_at = datetime.now(UTC)
-        futures: dict[Future[tuple[MeasurementRecord, ...]], str] = {}
-
-        for device_id in self._device_manager.device_ids:
-            device = self._device_manager.get(device_id)
-            if isinstance(device, MeasurementSource):
-                futures[executor.submit(self._read_device, device_id)] = (
-                    device_id
-                )
-
+        futures = {
+            executor.submit(self._read_device, device_id): device_id
+            for device_id in self._source_ids
+        }
         measurements: list[MeasurementRecord] = []
         failures: list[PollingFailure] = []
         events: list[Event] = []
-        successful_device_ids: set[str] = set()
 
         for future in as_completed(futures):
             device_id = futures[future]
             try:
                 measurements.extend(future.result())
-                successful_device_ids.add(device_id)
             except Exception as error:
                 failures.append(
                     PollingFailure(
@@ -170,30 +326,13 @@ class PollingService:
                     )
                 )
                 if device_id not in self._failed_device_ids:
-                    events.append(
-                        Event(
-                            source=device_id,
-                            severity=EventSeverity.ERROR,
-                            message=(
-                                "Device measurement polling failed: "
-                                f"{type(error).__name__}: {error}"
-                            ),
-                        )
-                    )
+                    events.append(self._failure_event(device_id, error))
+                self._failed_device_ids.add(device_id)
+                continue
 
-        for device_id in successful_device_ids & self._failed_device_ids:
-            events.append(
-                Event(
-                    source=device_id,
-                    severity=EventSeverity.INFO,
-                    message="Device measurement polling recovered.",
-                )
-            )
-
-        self._failed_device_ids.difference_update(successful_device_ids)
-        self._failed_device_ids.update(
-            failure.device_id for failure in failures
-        )
+            if device_id in self._failed_device_ids:
+                events.append(self._recovery_event(device_id))
+                self._failed_device_ids.remove(device_id)
 
         return PollingBatch(
             started_at=started_at,
@@ -213,20 +352,14 @@ class PollingService:
             if self._batch_handler_failed:
                 return batch
             self._batch_handler_failed = True
-            return PollingBatch(
-                started_at=batch.started_at,
-                finished_at=batch.finished_at,
-                measurements=batch.measurements,
-                failures=batch.failures,
-                events=batch.events
-                + (
-                    Event(
-                        source="polling_service",
-                        severity=EventSeverity.ERROR,
-                        message=(
-                            "Polling result handler failed: "
-                            f"{type(error).__name__}: {error}"
-                        ),
+            return self._with_event(
+                batch,
+                Event(
+                    source="polling_service",
+                    severity=EventSeverity.ERROR,
+                    message=(
+                        "Polling result handler failed: "
+                        f"{type(error).__name__}: {error}"
                     ),
                 ),
             )
@@ -235,17 +368,11 @@ class PollingService:
             return batch
 
         self._batch_handler_failed = False
-        return PollingBatch(
-            started_at=batch.started_at,
-            finished_at=batch.finished_at,
-            measurements=batch.measurements,
-            failures=batch.failures,
-            events=batch.events
-            + (
-                Event(
-                    source="polling_service",
-                    message="Polling result handler recovered.",
-                ),
+        return self._with_event(
+            batch,
+            Event(
+                source="polling_service",
+                message="Polling result handler recovered.",
             ),
         )
 
@@ -278,20 +405,14 @@ class PollingService:
             if self._event_sink_failed:
                 return batch
             self._event_sink_failed = True
-            return PollingBatch(
-                started_at=batch.started_at,
-                finished_at=batch.finished_at,
-                measurements=batch.measurements,
-                failures=batch.failures,
-                events=batch.events
-                + (
-                    Event(
-                        source="polling_service",
-                        severity=EventSeverity.ERROR,
-                        message=(
-                            "Technical event sink failed: "
-                            f"{type(error).__name__}: {error}"
-                        ),
+            return self._with_event(
+                batch,
+                Event(
+                    source="polling_service",
+                    severity=EventSeverity.ERROR,
+                    message=(
+                        "Technical event sink failed: "
+                        f"{type(error).__name__}: {error}"
                     ),
                 ),
             )
@@ -300,16 +421,55 @@ class PollingService:
             return batch
 
         self._event_sink_failed = False
+        return self._with_event(
+            batch,
+            Event(
+                source="polling_service",
+                message="Technical event sink recovered.",
+            ),
+        )
+
+    @staticmethod
+    def _failure_event(device_id: str, error: Exception) -> Event:
+        return Event(
+            source=device_id,
+            severity=EventSeverity.ERROR,
+            message=(
+                "Device measurement polling failed: "
+                f"{type(error).__name__}: {error}"
+            ),
+        )
+
+    @staticmethod
+    def _recovery_event(device_id: str) -> Event:
+        return Event(
+            source=device_id,
+            message="Device measurement polling recovered.",
+        )
+
+    @staticmethod
+    def _with_event(batch: PollingBatch, event: Event) -> PollingBatch:
         return PollingBatch(
             started_at=batch.started_at,
             finished_at=batch.finished_at,
             measurements=batch.measurements,
             failures=batch.failures,
-            events=batch.events
-            + (
-                Event(
-                    source="polling_service",
-                    message="Technical event sink recovered.",
-                ),
-            ),
+            events=batch.events + (event,),
         )
+
+    @staticmethod
+    def _validate_interval(value: float, name: str) -> float:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError(f"{name} must be an int or float")
+        interval = float(value)
+        if not isfinite(interval) or interval <= 0:
+            raise ValueError(f"{name} must be finite and greater than zero")
+        return interval
+
+    @staticmethod
+    def _clear_queue(queue: Queue[object]) -> None:
+        while True:
+            try:
+                queue.get_nowait()
+            except Empty:
+                return

@@ -78,6 +78,11 @@ def serialize_rig_profile(profile: RigProfile) -> str:
             lines.append(
                 f"connection_id = {_toml_value(role.connection_id)}"
             )
+        if role.poll_interval_seconds is not None:
+            lines.append(
+                "poll_interval_seconds = "
+                + _toml_value(role.poll_interval_seconds)
+            )
         if role.expected_identity is not None:
             identity = role.expected_identity
             values = {

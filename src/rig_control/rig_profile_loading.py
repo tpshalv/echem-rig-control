@@ -214,6 +214,12 @@ def _load_device_role(
             True,
             f"{setting_prefix}.enabled",
         ),
+        poll_interval_seconds=_optional_number(
+            data,
+            "poll_interval_seconds",
+            None,
+            f"{setting_prefix}.poll_interval_seconds",
+        ),
         expected_identity=identity,
         connection_id=_optional_nullable_text(
             data,
@@ -349,3 +355,20 @@ def _optional_boolean(
         )
 
     return value
+
+
+def _optional_number(
+    parent: dict[str, Any],
+    key: str,
+    default: float | None,
+    setting_name: str,
+) -> float | None:
+    if key not in parent:
+        return default
+
+    value = parent[key]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(
+            f"Configuration setting {setting_name} must be numeric"
+        )
+    return float(value)

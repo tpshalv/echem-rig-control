@@ -1,6 +1,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+from math import isfinite
 from types import MappingProxyType
 
 
@@ -103,6 +104,7 @@ class DeviceRole:
     backend: DeviceBackend = DeviceBackend.REAL
     required: bool = True
     enabled: bool = True
+    poll_interval_seconds: float | None = None
     expected_identity: ExpectedDeviceIdentity | None = None
     connection_id: str | None = None
     connection_parameters: Mapping[
@@ -142,6 +144,18 @@ class DeviceRole:
 
         if not isinstance(self.enabled, bool):
             raise TypeError("Device enabled setting must be Boolean")
+
+        if self.poll_interval_seconds is not None:
+            value = self.poll_interval_seconds
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(
+                    "Device poll interval must be an int, float or None"
+                )
+            if not isfinite(float(value)) or value <= 0:
+                raise ValueError(
+                    "Device poll interval must be finite and greater than zero"
+                )
+            object.__setattr__(self, "poll_interval_seconds", float(value))
 
         if (
             self.expected_identity is not None

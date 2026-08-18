@@ -149,6 +149,43 @@ def test_simulated_device_is_explicitly_identified() -> None:
     assert simulated.backend is DeviceBackend.SIMULATED
 
 
+def test_device_poll_interval_is_optional_and_validated() -> None:
+    inherited = make_mfc_role()
+    configured = DeviceRole(
+        device_id="fast_supply",
+        friendly_name="Fast supply",
+        capability=DeviceCapability.DC_POWER_SUPPLY,
+        driver="keithley_2260b",
+        poll_interval_seconds=0.1,
+    )
+
+    assert inherited.poll_interval_seconds is None
+    assert configured.poll_interval_seconds == 0.1
+
+
+@pytest.mark.parametrize("value", [0, -1, float("inf"), float("nan")])
+def test_invalid_device_poll_interval_is_rejected(value: float) -> None:
+    with pytest.raises(ValueError, match="poll interval"):
+        DeviceRole(
+            device_id="sensor",
+            friendly_name="Sensor",
+            capability=DeviceCapability.TEMPERATURE_SENSOR,
+            driver="sensor",
+            poll_interval_seconds=value,
+        )
+
+
+def test_boolean_device_poll_interval_is_rejected() -> None:
+    with pytest.raises(TypeError, match="poll interval"):
+        DeviceRole(
+            device_id="sensor",
+            friendly_name="Sensor",
+            capability=DeviceCapability.TEMPERATURE_SENSOR,
+            driver="sensor",
+            poll_interval_seconds=True,  # type: ignore[arg-type]
+        )
+
+
 def test_duplicate_device_role_ids_are_rejected() -> None:
     first = make_mfc_role("wet_co2_mfc")
     second = make_mfc_role("wet_co2_mfc")

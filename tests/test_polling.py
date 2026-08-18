@@ -1,5 +1,6 @@
 from queue import Empty
-from threading import Event, Thread
+from threading import Event, Lock, Thread
+from time import monotonic
 
 import pytest
 
@@ -29,6 +30,45 @@ class FailingMeasurementSource(SimulatedSensor):
 class NonDeviceMeasurementSource(MeasurementSource):
     def read_measurements(self) -> tuple[DeviceMeasurement, ...]:
         return ()
+
+
+class CountingSensor(SimulatedSensor):
+    def __init__(self, device_id: str) -> None:
+        super().__init__(device_id, 1.0, "V")
+        self._count_lock = Lock()
+        self.read_count = 0
+        self.active_reads = 0
+        self.maximum_active_reads = 0
+        self.read_delay_seconds = 0.0
+
+    def read_measurement(self) -> Measurement:
+        with self._count_lock:
+            self.read_count += 1
+            self.active_reads += 1
+            self.maximum_active_reads = max(
+                self.maximum_active_reads,
+                self.active_reads,
+            )
+        if self.read_delay_seconds:
+            Event().wait(self.read_delay_seconds)
+        try:
+            return super().read_measurement()
+        finally:
+            with self._count_lock:
+                self.active_reads -= 1
+
+
+class BlockingSensor(SimulatedSensor):
+    def __init__(self, device_id: str) -> None:
+        super().__init__(device_id, 2.0, "V")
+        self.read_started = Event()
+        self.release_read = Event()
+
+    def read_measurement(self) -> Measurement:
+        self.read_started.set()
+        if not self.release_read.wait(2.0):
+            raise TimeoutError("test did not release blocked read")
+        return super().read_measurement()
 
 
 def connected_sensor(
@@ -138,6 +178,118 @@ def test_invalid_polling_configuration_is_rejected() -> None:
         PollingService(DeviceManager(), interval_seconds=0)
     with pytest.raises(ValueError, match="worker"):
         PollingService(DeviceManager(), max_workers=0)
+
+
+def test_unknown_device_interval_is_rejected() -> None:
+    with pytest.raises(ValueError, match="not registered measurement"):
+        PollingService(
+            DeviceManager(),
+            device_intervals_seconds={"missing": 1.0},
+        )
+
+
+def test_devices_are_read_at_independent_configured_rates() -> None:
+    manager = DeviceManager()
+    fast = CountingSensor("fast")
+    slow = CountingSensor("slow")
+    fast.connect()
+    slow.connect()
+    manager.register(fast)
+    manager.register(slow)
+    service = PollingService(
+        manager,
+        publish_interval_seconds=0.02,
+        device_intervals_seconds={"fast": 0.01, "slow": 0.08},
+    )
+
+    service.start()
+    deadline = monotonic() + 1.0
+    try:
+        while fast.read_count < 8 and monotonic() < deadline:
+            Event().wait(0.005)
+    finally:
+        service.stop(timeout=1.0)
+
+    assert fast.read_count >= 8
+    assert slow.read_count >= 1
+    assert fast.read_count >= slow.read_count * 3
+
+
+def test_blocked_slow_device_does_not_delay_fast_reads_or_publish() -> None:
+    manager = DeviceManager()
+    blocked = BlockingSensor("blocked")
+    fast = CountingSensor("fast")
+    blocked.connect()
+    fast.connect()
+    manager.register(blocked)
+    manager.register(fast)
+    service = PollingService(
+        manager,
+        publish_interval_seconds=0.02,
+        device_intervals_seconds={"blocked": 1.0, "fast": 0.01},
+    )
+
+    service.start()
+    try:
+        assert blocked.read_started.wait(1.0)
+        batches = [service.results.get(timeout=0.3) for _ in range(3)]
+        assert fast.read_count >= 3
+        assert all(
+            any(
+                record.device_id == "fast"
+                for record in batch.measurements
+            )
+            for batch in batches
+        )
+    finally:
+        blocked.release_read.set()
+        service.stop(timeout=1.0)
+
+
+def test_same_device_never_has_overlapping_reads() -> None:
+    manager = DeviceManager()
+    sensor = CountingSensor("sensor")
+    sensor.read_delay_seconds = 0.03
+    sensor.connect()
+    manager.register(sensor)
+    service = PollingService(
+        manager,
+        publish_interval_seconds=0.02,
+        device_intervals_seconds={"sensor": 0.005},
+    )
+
+    service.start()
+    try:
+        Event().wait(0.12)
+    finally:
+        service.stop(timeout=1.0)
+
+    assert sensor.read_count >= 2
+    assert sensor.maximum_active_reads == 1
+
+
+def test_published_cache_preserves_original_measurement_timestamp() -> None:
+    manager = DeviceManager()
+    sensor = CountingSensor("slow")
+    sensor.connect()
+    manager.register(sensor)
+    service = PollingService(
+        manager,
+        publish_interval_seconds=0.02,
+        device_intervals_seconds={"slow": 1.0},
+    )
+
+    service.start()
+    try:
+        first = service.results.get(timeout=0.3)
+        second = service.results.get(timeout=0.3)
+    finally:
+        service.stop(timeout=1.0)
+
+    assert first.measurements[0].measurement.timestamp == (
+        second.measurements[0].measurement.timestamp
+    )
+    assert sensor.read_count == 1
 
 
 def test_polling_batch_handler_receives_results() -> None:

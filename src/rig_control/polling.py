@@ -1,4 +1,5 @@
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from queue import Queue
@@ -41,6 +42,7 @@ class PollingService:
         *,
         interval_seconds: float = 1.0,
         max_workers: int = 4,
+        batch_handler: Callable[[PollingBatch], None] | None = None,
     ) -> None:
         if interval_seconds <= 0:
             raise ValueError("Polling interval must be greater than zero")
@@ -50,11 +52,13 @@ class PollingService:
         self._device_manager = device_manager
         self._interval_seconds = float(interval_seconds)
         self._max_workers = max_workers
+        self._batch_handler = batch_handler
         self._results: Queue[PollingBatch] = Queue()
         self._stop_requested = ThreadEvent()
         self._lifecycle_lock = Lock()
         self._thread: Thread | None = None
         self._failed_device_ids: set[str] = set()
+        self._batch_handler_failed = False
 
     @property
     def results(self) -> Queue[PollingBatch]:
@@ -75,6 +79,7 @@ class PollingService:
                 raise RuntimeError("Polling service is already running")
             self._stop_requested.clear()
             self._failed_device_ids.clear()
+            self._batch_handler_failed = False
             self._thread = Thread(
                 target=self._run,
                 name="rig-device-polling",
@@ -106,7 +111,8 @@ class PollingService:
             max_workers=self._max_workers,
             thread_name_prefix="rig-device-read",
         ) as executor:
-            return self._poll_with_executor(executor)
+            batch = self._poll_with_executor(executor)
+            return self._deliver_batch(batch)
 
     def _run(self) -> None:
         with ThreadPoolExecutor(
@@ -115,7 +121,9 @@ class PollingService:
         ) as executor:
             while not self._stop_requested.is_set():
                 cycle_started = monotonic()
-                self._results.put(self._poll_with_executor(executor))
+                batch = self._poll_with_executor(executor)
+                batch = self._deliver_batch(batch)
+                self._results.put(batch)
                 remaining = self._interval_seconds - (
                     monotonic() - cycle_started
                 )
@@ -187,6 +195,52 @@ class PollingService:
             measurements=tuple(measurements),
             failures=tuple(failures),
             events=tuple(events),
+        )
+
+    def _deliver_batch(self, batch: PollingBatch) -> PollingBatch:
+        if self._batch_handler is None:
+            return batch
+
+        try:
+            self._batch_handler(batch)
+        except Exception as error:
+            if self._batch_handler_failed:
+                return batch
+            self._batch_handler_failed = True
+            return PollingBatch(
+                started_at=batch.started_at,
+                finished_at=batch.finished_at,
+                measurements=batch.measurements,
+                failures=batch.failures,
+                events=batch.events
+                + (
+                    Event(
+                        source="polling_service",
+                        severity=EventSeverity.ERROR,
+                        message=(
+                            "Polling result handler failed: "
+                            f"{type(error).__name__}: {error}"
+                        ),
+                    ),
+                ),
+            )
+
+        if not self._batch_handler_failed:
+            return batch
+
+        self._batch_handler_failed = False
+        return PollingBatch(
+            started_at=batch.started_at,
+            finished_at=batch.finished_at,
+            measurements=batch.measurements,
+            failures=batch.failures,
+            events=batch.events
+            + (
+                Event(
+                    source="polling_service",
+                    message="Polling result handler recovered.",
+                ),
+            ),
         )
 
     def _read_device(

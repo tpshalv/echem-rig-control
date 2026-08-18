@@ -140,6 +140,35 @@ def test_invalid_polling_configuration_is_rejected() -> None:
         PollingService(DeviceManager(), max_workers=0)
 
 
+def test_polling_batch_handler_receives_results() -> None:
+    manager = DeviceManager()
+    manager.register(connected_sensor("sensor"))
+    received = []
+    service = PollingService(manager, batch_handler=received.append)
+
+    returned = service.poll_once()
+
+    assert received == [returned]
+
+
+def test_batch_handler_failure_is_reported_without_losing_results() -> None:
+    manager = DeviceManager()
+    manager.register(connected_sensor("sensor"))
+
+    def fail(_batch: object) -> None:
+        raise OSError("simulated disk failure")
+
+    service = PollingService(manager, batch_handler=fail)
+
+    batch_with_failure = service.poll_once()
+    repeated_failure = service.poll_once()
+
+    assert len(batch_with_failure.measurements) == 1
+    assert len(batch_with_failure.events) == 1
+    assert "simulated disk failure" in batch_with_failure.events[0].message
+    assert repeated_failure.events == ()
+
+
 def test_device_operation_lock_serializes_access() -> None:
     manager = DeviceManager()
     manager.register(connected_sensor("sensor"))

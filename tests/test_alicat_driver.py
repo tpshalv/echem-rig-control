@@ -136,6 +136,36 @@ def test_current_state_exposes_all_supported_status_values() -> None:
     assert driver.current_state.gas == "N2"
 
 
+def test_polling_measurements_come_from_one_complete_state_read() -> None:
+    initial = state()
+    measured = state(mass_flow=42.5, quality=Quality.UNCERTAIN)
+    protocol = FakeAlicatProtocol([initial, measured])
+    driver = make_driver(protocol)
+    driver.connect()
+
+    readings = driver.read_measurements()
+
+    assert protocol.read_addresses == ["A", "A"]
+    assert {
+        reading.channel: (
+            reading.measurement.value,
+            reading.measurement.unit,
+        )
+        for reading in readings
+    } == {
+        "mass_flow": (42.5, "sccm"),
+        "volumetric_flow": (11.8, "sccm"),
+        "absolute_pressure": (14.7, "psia"),
+        "gas_temperature": (22.5, "degC"),
+        "setpoint": (15.0, "sccm"),
+    }
+    assert all(
+        reading.measurement.timestamp == measured.timestamp
+        and reading.measurement.quality is Quality.UNCERTAIN
+        for reading in readings
+    )
+
+
 def test_setting_flow_is_addressed_and_then_verified() -> None:
     protocol = FakeAlicatProtocol([state(), state(setpoint=25.0)])
     driver = make_driver(protocol)

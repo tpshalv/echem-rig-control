@@ -157,6 +157,15 @@ def test_manager_can_connect_named_device() -> None:
     assert supply.status is DeviceStatus.READY
 
 
+def test_device_operation_returns_registered_device() -> None:
+    manager = DeviceManager()
+    supply = make_supply("main_supply")
+    manager.register(supply)
+
+    with manager.operation("main_supply") as selected:
+        assert selected is supply
+
+
 def test_connection_failure_has_device_context() -> None:
     manager = DeviceManager()
     supply = FailingConnectSupply(

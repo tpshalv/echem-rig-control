@@ -192,7 +192,8 @@ class RigControlService:
         self._authorize(command)
 
         try:
-            message = self._dispatch(command)
+            with self._device_manager.operation(command.device_id):
+                message = self._dispatch(command)
         except ControlAccessError:
             raise
         except Exception as error:

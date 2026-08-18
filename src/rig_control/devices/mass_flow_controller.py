@@ -3,6 +3,10 @@ from dataclasses import dataclass
 from math import isfinite
 
 from rig_control.devices.base import Device
+from rig_control.devices.measurement_source import (
+    DeviceMeasurement,
+    MeasurementSource,
+)
 from rig_control.models import Measurement
 
 
@@ -33,7 +37,7 @@ class MassFlowControllerLimits:
             raise ValueError("Flow unit cannot be empty")
 
 
-class MassFlowController(Device):
+class MassFlowController(Device, MeasurementSource):
     """Common capability required from a mass flow controller."""
 
     @property
@@ -53,6 +57,9 @@ class MassFlowController(Device):
     @abstractmethod
     def measure_flow(self) -> Measurement:
         """Return the measured mass flow."""
+
+    def read_measurements(self) -> tuple[DeviceMeasurement, ...]:
+        return (DeviceMeasurement("mass_flow", self.measure_flow()),)
 
     @abstractmethod
     def enter_safe_state(self) -> None:

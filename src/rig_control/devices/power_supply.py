@@ -3,6 +3,10 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from rig_control.devices.base import Device
+from rig_control.devices.measurement_source import (
+    DeviceMeasurement,
+    MeasurementSource,
+)
 from rig_control.models import Measurement
 
 class PowerSupplyOperatingMode(StrEnum):
@@ -30,7 +34,7 @@ class PowerSupplyLimits:
             raise ValueError("Maximum power must be greater than zero")
 
 
-class PowerSupply(Device):
+class PowerSupply(Device, MeasurementSource):
     """Common capability required from a programmable DC supply."""
 
     @property
@@ -72,6 +76,12 @@ class PowerSupply(Device):
     @abstractmethod
     def measure_current(self) -> Measurement:
         """Return measured output current."""
+
+    def read_measurements(self) -> tuple[DeviceMeasurement, ...]:
+        return (
+            DeviceMeasurement("voltage", self.measure_voltage()),
+            DeviceMeasurement("current", self.measure_current()),
+        )
 
     @abstractmethod
     def enter_safe_state(self) -> None:

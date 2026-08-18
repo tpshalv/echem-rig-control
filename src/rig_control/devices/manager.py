@@ -1,4 +1,7 @@
 from dataclasses import dataclass
+from contextlib import contextmanager
+from collections.abc import Iterator
+from threading import RLock
 
 from rig_control.devices.base import Device
 from rig_control.models import DeviceStatus
@@ -22,6 +25,7 @@ class DeviceManager:
 
     def __init__(self) -> None:
         self._devices: dict[str, Device] = {}
+        self._operation_locks: dict[str, RLock] = {}
 
     @property
     def device_ids(self) -> tuple[str, ...]:
@@ -43,6 +47,16 @@ class DeviceManager:
             )
 
         self._devices[device.device_id] = device
+        self._operation_locks[device.device_id] = RLock()
+
+    @contextmanager
+    def operation(self, device_id: str) -> Iterator[Device]:
+        """Serialize communication with one device and yield it."""
+
+        device = self.get(device_id)
+        lock = self._operation_locks[device_id]
+        with lock:
+            yield device
 
     def get(self, device_id: str) -> Device:
         """Return a device by its stable ID."""
@@ -75,7 +89,8 @@ class DeviceManager:
         device = self.get(device_id)
 
         try:
-            device.connect()
+            with self.operation(device_id):
+                device.connect()
         except Exception as error:
             raise DeviceOperationError(
                 f"Could not connect device {device_id!r} "
@@ -89,7 +104,8 @@ class DeviceManager:
         device = self.get(device_id)
 
         try:
-            device.disconnect()
+            with self.operation(device_id):
+                device.disconnect()
         except Exception as error:
             raise DeviceOperationError(
                 f"Could not disconnect device {device_id!r} "

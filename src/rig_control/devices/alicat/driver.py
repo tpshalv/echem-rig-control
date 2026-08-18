@@ -9,6 +9,7 @@ from rig_control.devices.mass_flow_controller import (
     MassFlowController,
     MassFlowControllerLimits,
 )
+from rig_control.devices.measurement_source import DeviceMeasurement
 from rig_control.models import DeviceStatus, Measurement
 
 
@@ -110,6 +111,72 @@ class AlicatMassFlowController(MassFlowController):
             timestamp=state.timestamp,
             quality=state.quality,
         )
+
+    def read_measurements(self) -> tuple[DeviceMeasurement, ...]:
+        """Read one status frame and expose all numeric Alicat channels."""
+
+        self._require_ready()
+        state = self._refresh_state("read state")
+        values = [
+            DeviceMeasurement(
+                "mass_flow",
+                Measurement(
+                    state.mass_flow,
+                    state.mass_flow_unit,
+                    state.timestamp,
+                    state.quality,
+                ),
+            ),
+            DeviceMeasurement(
+                "volumetric_flow",
+                Measurement(
+                    state.volumetric_flow,
+                    state.volumetric_flow_unit,
+                    state.timestamp,
+                    state.quality,
+                ),
+            ),
+            DeviceMeasurement(
+                "absolute_pressure",
+                Measurement(
+                    state.absolute_pressure,
+                    state.pressure_unit,
+                    state.timestamp,
+                    state.quality,
+                ),
+            ),
+            DeviceMeasurement(
+                "gas_temperature",
+                Measurement(
+                    state.gas_temperature,
+                    state.temperature_unit,
+                    state.timestamp,
+                    state.quality,
+                ),
+            ),
+            DeviceMeasurement(
+                "setpoint",
+                Measurement(
+                    state.setpoint,
+                    state.setpoint_unit,
+                    state.timestamp,
+                    state.quality,
+                ),
+            ),
+        ]
+        if state.totalized_flow is not None:
+            values.append(
+                DeviceMeasurement(
+                    "totalized_flow",
+                    Measurement(
+                        state.totalized_flow,
+                        state.totalized_flow_unit or "",
+                        state.timestamp,
+                        state.quality,
+                    ),
+                )
+            )
+        return tuple(values)
 
     def enter_safe_state(self) -> None:
         if self.status is DeviceStatus.DISCONNECTED:

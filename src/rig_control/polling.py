@@ -9,7 +9,7 @@ from time import monotonic
 from rig_control.data.records import MeasurementRecord
 from rig_control.devices.manager import DeviceManager
 from rig_control.devices.measurement_source import MeasurementSource
-from rig_control.models import Event, EventSeverity
+from rig_control.models import Event, EventSeverity, EventSink
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +43,7 @@ class PollingService:
         interval_seconds: float = 1.0,
         max_workers: int = 4,
         batch_handler: Callable[[PollingBatch], None] | None = None,
+        event_sink: EventSink | None = None,
     ) -> None:
         if interval_seconds <= 0:
             raise ValueError("Polling interval must be greater than zero")
@@ -53,12 +54,14 @@ class PollingService:
         self._interval_seconds = float(interval_seconds)
         self._max_workers = max_workers
         self._batch_handler = batch_handler
+        self._event_sink = event_sink
         self._results: Queue[PollingBatch] = Queue()
         self._stop_requested = ThreadEvent()
         self._lifecycle_lock = Lock()
         self._thread: Thread | None = None
         self._failed_device_ids: set[str] = set()
         self._batch_handler_failed = False
+        self._event_sink_failed = False
 
     @property
     def results(self) -> Queue[PollingBatch]:
@@ -80,6 +83,7 @@ class PollingService:
             self._stop_requested.clear()
             self._failed_device_ids.clear()
             self._batch_handler_failed = False
+            self._event_sink_failed = False
             self._thread = Thread(
                 target=self._run,
                 name="rig-device-polling",
@@ -112,7 +116,8 @@ class PollingService:
             thread_name_prefix="rig-device-read",
         ) as executor:
             batch = self._poll_with_executor(executor)
-            return self._deliver_batch(batch)
+            batch = self._deliver_batch(batch)
+            return self._publish_events(batch)
 
     def _run(self) -> None:
         with ThreadPoolExecutor(
@@ -123,6 +128,7 @@ class PollingService:
                 cycle_started = monotonic()
                 batch = self._poll_with_executor(executor)
                 batch = self._deliver_batch(batch)
+                batch = self._publish_events(batch)
                 self._results.put(batch)
                 remaining = self._interval_seconds - (
                     monotonic() - cycle_started
@@ -259,4 +265,51 @@ class PollingService:
                 measurement=reading.measurement,
             )
             for reading in readings
+        )
+
+    def _publish_events(self, batch: PollingBatch) -> PollingBatch:
+        if self._event_sink is None:
+            return batch
+
+        try:
+            for event in batch.events:
+                self._event_sink(event, None)
+        except Exception as error:
+            if self._event_sink_failed:
+                return batch
+            self._event_sink_failed = True
+            return PollingBatch(
+                started_at=batch.started_at,
+                finished_at=batch.finished_at,
+                measurements=batch.measurements,
+                failures=batch.failures,
+                events=batch.events
+                + (
+                    Event(
+                        source="polling_service",
+                        severity=EventSeverity.ERROR,
+                        message=(
+                            "Technical event sink failed: "
+                            f"{type(error).__name__}: {error}"
+                        ),
+                    ),
+                ),
+            )
+
+        if not self._event_sink_failed:
+            return batch
+
+        self._event_sink_failed = False
+        return PollingBatch(
+            started_at=batch.started_at,
+            finished_at=batch.finished_at,
+            measurements=batch.measurements,
+            failures=batch.failures,
+            events=batch.events
+            + (
+                Event(
+                    source="polling_service",
+                    message="Technical event sink recovered.",
+                ),
+            ),
         )

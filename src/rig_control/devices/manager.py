@@ -2,9 +2,10 @@ from dataclasses import dataclass
 from contextlib import contextmanager
 from collections.abc import Iterator
 from threading import RLock
+from traceback import format_exc
 
 from rig_control.devices.base import Device
-from rig_control.models import DeviceStatus
+from rig_control.models import DeviceStatus, Event, EventSeverity, EventSink
 
 
 class DeviceOperationError(RuntimeError):
@@ -23,15 +24,23 @@ class DeviceSummary:
 class DeviceManager:
     """Registry and control point for all logical rig devices."""
 
-    def __init__(self) -> None:
+    def __init__(self, event_sink: EventSink | None = None) -> None:
         self._devices: dict[str, Device] = {}
         self._operation_locks: dict[str, RLock] = {}
+        self._event_sink = event_sink
+        self._event_sink_failures: list[str] = []
 
     @property
     def device_ids(self) -> tuple[str, ...]:
         """Return registered IDs in registration order."""
 
         return tuple(self._devices)
+
+    @property
+    def event_sink_failures(self) -> tuple[str, ...]:
+        """Return logging failures without masking device operations."""
+
+        return tuple(self._event_sink_failures)
 
     def register(self, device: Device) -> None:
         """Register one logical device."""
@@ -92,11 +101,29 @@ class DeviceManager:
             with self.operation(device_id):
                 device.connect()
         except Exception as error:
+            self._emit(
+                Event(
+                    source=device_id,
+                    severity=EventSeverity.ERROR,
+                    message=(
+                        "Device connection failed: "
+                        f"{type(error).__name__}: {error}"
+                    ),
+                ),
+                format_exc(),
+            )
             raise DeviceOperationError(
                 f"Could not connect device {device_id!r} "
                 f"({type(device).__name__}): "
                 f"{type(error).__name__}: {error}"
             ) from error
+
+        self._emit(
+            Event(
+                source=device_id,
+                message="Device connected successfully.",
+            )
+        )
 
     def disconnect(self, device_id: str) -> None:
         """Disconnect one named device with detailed error context."""
@@ -107,11 +134,29 @@ class DeviceManager:
             with self.operation(device_id):
                 device.disconnect()
         except Exception as error:
+            self._emit(
+                Event(
+                    source=device_id,
+                    severity=EventSeverity.ERROR,
+                    message=(
+                        "Device disconnection failed: "
+                        f"{type(error).__name__}: {error}"
+                    ),
+                ),
+                format_exc(),
+            )
             raise DeviceOperationError(
                 f"Could not disconnect device {device_id!r} "
                 f"({type(device).__name__}): "
                 f"{type(error).__name__}: {error}"
             ) from error
+
+        self._emit(
+            Event(
+                source=device_id,
+                message="Device disconnected successfully.",
+            )
+        )
 
     def disconnect_all(self) -> tuple[DeviceOperationError, ...]:
         """Disconnect every device, continuing after individual failures."""
@@ -127,3 +172,17 @@ class DeviceManager:
                 failures.append(error)
 
         return tuple(failures)
+
+    def _emit(
+        self,
+        event: Event,
+        technical_details: str | None = None,
+    ) -> None:
+        if self._event_sink is not None:
+            try:
+                self._event_sink(event, technical_details)
+            except Exception as error:
+                self._event_sink_failures.append(
+                    "Could not record device event for "
+                    f"{event.source!r}: {type(error).__name__}: {error}"
+                )

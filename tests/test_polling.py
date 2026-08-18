@@ -169,6 +169,40 @@ def test_batch_handler_failure_is_reported_without_losing_results() -> None:
     assert repeated_failure.events == ()
 
 
+def test_polling_events_are_published_to_event_sink() -> None:
+    manager = DeviceManager()
+    sensor = FailingMeasurementSource("sensor")
+    sensor.connect()
+    manager.register(sensor)
+    recorded = []
+    service = PollingService(
+        manager,
+        event_sink=lambda event, details: recorded.append((event, details)),
+    )
+
+    returned = service.poll_once()
+
+    assert recorded == [(returned.events[0], None)]
+
+
+def test_event_sink_failure_does_not_stop_polling_results() -> None:
+    manager = DeviceManager()
+    sensor = FailingMeasurementSource("sensor")
+    sensor.connect()
+    manager.register(sensor)
+
+    def fail_to_log(_event: object, _details: object) -> None:
+        raise OSError("log disk unavailable")
+
+    service = PollingService(manager, event_sink=fail_to_log)
+
+    returned = service.poll_once()
+
+    assert len(returned.failures) == 1
+    assert len(returned.events) == 2
+    assert "Technical event sink failed" in returned.events[1].message
+
+
 def test_device_operation_lock_serializes_access() -> None:
     manager = DeviceManager()
     manager.register(connected_sensor("sensor"))

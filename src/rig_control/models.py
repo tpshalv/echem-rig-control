@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
+from collections.abc import Callable
 
 
 class Quality(StrEnum):
@@ -47,3 +48,6 @@ class Event:
     message: str
     severity: EventSeverity = EventSeverity.INFO
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+
+EventSink = Callable[[Event, str | None], None]

@@ -157,6 +157,61 @@ def test_manager_can_connect_named_device() -> None:
     assert supply.status is DeviceStatus.READY
 
 
+def test_manager_publishes_connection_and_disconnection_events() -> None:
+    recorded = []
+    manager = DeviceManager(
+        event_sink=lambda event, details: recorded.append((event, details))
+    )
+    supply = make_supply("main_supply")
+    manager.register(supply)
+
+    manager.connect("main_supply")
+    manager.disconnect("main_supply")
+
+    assert [item[0].message for item in recorded] == [
+        "Device connected successfully.",
+        "Device disconnected successfully.",
+    ]
+    assert all(item[1] is None for item in recorded)
+
+
+def test_manager_publishes_connection_failure_with_details() -> None:
+    recorded = []
+    manager = DeviceManager(
+        event_sink=lambda event, details: recorded.append((event, details))
+    )
+    manager.register(
+        FailingConnectSupply(
+            "failing_supply",
+            PowerSupplyLimits(30.0, 108.0, 1080.0),
+        )
+    )
+
+    with pytest.raises(DeviceOperationError):
+        manager.connect("failing_supply")
+
+    assert len(recorded) == 1
+    assert recorded[0][0].severity.value == "error"
+    assert "simulated connection failure" in recorded[0][0].message
+    assert recorded[0][1] is not None
+    assert "Traceback" in recorded[0][1]
+
+
+def test_logging_failure_does_not_mask_successful_device_operation() -> None:
+    def fail_to_log(_event: object, _details: object) -> None:
+        raise OSError("disk unavailable")
+
+    manager = DeviceManager(event_sink=fail_to_log)
+    supply = make_supply("main_supply")
+    manager.register(supply)
+
+    manager.connect("main_supply")
+
+    assert supply.status is DeviceStatus.READY
+    assert len(manager.event_sink_failures) == 1
+    assert "disk unavailable" in manager.event_sink_failures[0]
+
+
 def test_device_operation_returns_registered_device() -> None:
     manager = DeviceManager()
     supply = make_supply("main_supply")

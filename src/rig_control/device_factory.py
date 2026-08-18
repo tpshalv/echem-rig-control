@@ -31,6 +31,7 @@ from rig_control.rig_profile import (
     DeviceRole,
     RigProfile,
 )
+from rig_control.models import EventSink
 from rig_control.transports.socket_scpi import SocketScpiTransport
 from rig_control.transports.pyserial_text import PySerialTextTransport
 from rig_control.transports.serial_text import SerialTextTransport
@@ -59,13 +60,14 @@ def create_device_manager(
     profile: RigProfile,
     *,
     alicat_transport_factory: AlicatTransportFactory | None = None,
+    event_sink: EventSink | None = None,
 ) -> DeviceManager:
     """Construct all enabled devices described by a rig profile."""
 
     if not isinstance(profile, RigProfile):
         raise TypeError("Profile must be a RigProfile")
 
-    manager = DeviceManager()
+    manager = DeviceManager(event_sink=event_sink)
     alicat_buses: dict[str, AlicatBus] = {}
     selected_alicat_transport_factory = (
         alicat_transport_factory or _create_pyserial_transport

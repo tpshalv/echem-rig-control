@@ -9,6 +9,7 @@ __pycache__/
 .pytest_cache/
 .coverage
 htmlcov/
+logs/
 
 # Editor settings
 .vscode/
@@ -16,6 +17,7 @@ htmlcov/
 # Local settings and secrets
 .env
 *.local.toml
+app-selection.toml
 
 # Generated Python package information
 *.egg-info/

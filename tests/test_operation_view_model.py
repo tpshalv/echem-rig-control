@@ -9,6 +9,7 @@ from rig_control.devices.simulated_sensor import SimulatedSensor
 from rig_control.experiment_recording import ExperimentRecorder
 from rig_control.models import Event, Measurement, Quality
 from rig_control.polling import PollingBatch, PollingFailure, PollingService
+from rig_control.control.service import RigControlService
 from rig_control.ui.operation.model import OperationViewModel
 
 
@@ -35,6 +36,7 @@ def make_model() -> tuple[
             manager,
             polling,
             recorder,
+            RigControlService(manager),
             profile_id="simulation",
         ),
         manager,
@@ -252,7 +254,7 @@ def test_device_warning_persists_until_a_successful_read() -> None:
     assert model.warnings() == ()
 
 
-def test_shutdown_stops_services_and_disconnects_devices() -> None:
+def test_shutdown_stops_feature_services_but_leaves_session_devices_connected() -> None:
     model, manager, _, _ = make_model()
     model.connect_all()
     model.start_monitoring()
@@ -261,4 +263,4 @@ def test_shutdown_stops_services_and_disconnects_devices() -> None:
 
     assert failures == ()
     assert model.is_monitoring is False
-    assert manager.summaries()[0].status.value == "disconnected"
+    assert manager.summaries()[0].status.value == "ready"

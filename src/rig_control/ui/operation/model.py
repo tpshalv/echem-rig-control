@@ -8,8 +8,10 @@ from traceback import format_exc
 from rig_control.data.experiment import ExperimentMetadata
 from rig_control.devices.manager import DeviceManager
 from rig_control.experiment_recording import ExperimentRecorder
-from rig_control.models import Event
+from rig_control.models import Event, Measurement, Quality
 from rig_control.polling import PollingService
+from rig_control.control.service import RigControlService
+from rig_control.ui.manual_control.model import ManualControlViewModel
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +39,7 @@ class OperationViewModel:
         device_manager: DeviceManager,
         polling_service: PollingService,
         experiment_recorder: ExperimentRecorder,
+        control_service: RigControlService,
         *,
         profile_id: str,
         history_limit: int = 120,
@@ -45,6 +48,11 @@ class OperationViewModel:
         self._device_manager = device_manager
         self._polling_service = polling_service
         self._experiment_recorder = experiment_recorder
+        self.manual_control = ManualControlViewModel(
+            device_manager,
+            control_service,
+            measurement_provider=self.latest_measurement,
+        )
         self._profile_id = profile_id
         self._measurements: dict[
             tuple[str, str], LiveMeasurementRow
@@ -85,6 +93,21 @@ class OperationViewModel:
     ) -> tuple[LiveMeasurementRow, ...]:
         return tuple(
             self._measurement_histories.get((device_id, channel), ())
+        )
+
+    def latest_measurement(
+        self,
+        device_id: str,
+        channel: str,
+    ) -> Measurement | None:
+        row = self._measurements.get((device_id, channel))
+        if row is None:
+            return None
+        return Measurement(
+            value=row.value,
+            unit=row.unit,
+            timestamp=row.timestamp,
+            quality=Quality(row.quality),
         )
 
     def set_history_limit(self, history_limit: int) -> None:
@@ -247,7 +270,6 @@ class OperationViewModel:
                 failures.append(
                     f"Could not stop monitoring: {type(error).__name__}: {error}"
                 )
-        failures.extend(str(error) for error in self._device_manager.disconnect_all())
         return tuple(failures)
 
     @staticmethod

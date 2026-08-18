@@ -1,12 +1,7 @@
-import argparse
 import tkinter as tk
-from collections.abc import Sequence
 from datetime import datetime
-from pathlib import Path
 from tkinter import messagebox, ttk
 
-from rig_control.rig_profile import RigProfile
-from rig_control.rig_profile_loading import load_rig_profile
 from rig_control.ui.common.theme import MONOSPACE_FONT, SECTION_FONT, TITLE_FONT
 from rig_control.ui.device_setup.model import (
     AddAlicatRequest,
@@ -481,52 +476,3 @@ class DeviceSetupWindow:
         self._log.delete("1.0", "end")
         self._log.insert("1.0", "\n\n".join(self._history))
         self._log.configure(state="disabled")
-
-
-def main(arguments: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Open device setup and readiness checks"
-    )
-    parser.add_argument(
-        "configuration",
-        nargs="?",
-        default="device-library.toml",
-        help="Hardware-library path (default: device-library.toml)",
-    )
-    parsed = parser.parse_args(arguments)
-
-    profile_path = Path(parsed.configuration)
-    try:
-        if profile_path.exists():
-            profile = load_rig_profile(profile_path)
-        elif profile_path == Path("device-library.toml"):
-            profile = RigProfile(
-                profile_id="device_library",
-                friendly_name="Local device library",
-                device_roles=(),
-            )
-        else:
-            profile = load_rig_profile(profile_path)
-    except Exception as error:
-        root = tk.Tk()
-        root.withdraw()
-        messagebox.showerror(
-            "Cannot open device setup",
-            f"Could not load {parsed.configuration!r}.\n\n"
-            f"{type(error).__name__}: {error}",
-            parent=root,
-        )
-        root.destroy()
-        return 1
-
-    root = tk.Tk()
-    DeviceSetupWindow(
-        root,
-        DeviceSetupViewModel(profile, profile_path=profile_path),
-    )
-    root.mainloop()
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

@@ -195,20 +195,26 @@ The UI displays device state and sends requests through the control layer.
 
 It should not communicate directly with serial ports, Ethernet sockets, or instrument protocols.
 
-Current UI areas include:
+The Home window is the single application entry point. It selects a rig profile
+and a named application-settings file, then opens one feature screen at a time:
 
-- Diagnostic window.
-- Manual-control window.
+- Device Setup.
+- Diagnostics.
+- Operation, containing monitoring, recording, trends, and manual controls.
 
-Planned areas include:
+One `ApplicationSession` owns the device manager, control service, polling
+service, experiment recorder, and technical logger. Diagnostics and Operation
+therefore see the same device objects and connection state. Device Setup is the
+exception: it temporarily closes that session while editing the profile, then
+Home rebuilds the session from the saved profile.
 
-- Rig Setup.
-- Experiment metadata entry.
-- Recipe editor and runner.
-- Live experiment overview.
-- Settings and help.
+Application-wide preferences are defined by a central settings registry and
+stored in swappable TOML files. Rig profiles continue to describe the hardware;
+application settings describe software behavior such as the screen publishing
+interval and technical-log location.
 
-The current manual-control files have become large and will be split into smaller MFC, power-supply, and window components without changing behavior.
+The installed command `echem-rig-control` starts Home. Feature windows do not
+provide separate application entry points.
 
 ## Diagnostics
 
@@ -382,10 +388,7 @@ The UI, data layer, and unrelated drivers should not require significant rewrite
 
 Before recipes are implemented:
 
-1. Replace the hard-coded simulated bootstrap with a profile-driven device factory.
-2. Keep shared connections single-instance.
-3. Split the large manual-control UI files by responsibility.
-4. Move power-supply operating mode out of the UI layer.
-5. Build the Rig Setup and identity-checking screen.
-6. Connect and verify real Keithley, Alicat, and ESP32 hardware.
-7. Then design and implement recipe execution.
+1. Connect and verify real Keithley, Alicat, and ESP32 hardware.
+2. Add a polling broadcast/snapshot boundary before allowing multiple live
+   feature screens to consume readings simultaneously.
+3. Design and implement recipe execution through the existing control service.

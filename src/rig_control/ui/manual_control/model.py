@@ -1,4 +1,5 @@
 from traceback import format_exc
+from collections.abc import Callable
 
 from rig_control.control.commands import (
     CommandSource,
@@ -40,9 +41,11 @@ class ManualControlViewModel:
         self,
         device_manager: DeviceManager,
         control_service: RigControlService,
+        measurement_provider: Callable[[str, str], Measurement | None] | None = None,
     ) -> None:
         self._device_manager = device_manager
         self._control_service = control_service
+        self._measurement_provider = measurement_provider
         self._read_failures: list[MeasurementReadFailure] = []
         self._events: list[Event] = []
         self._active_read_failures: set[
@@ -649,6 +652,9 @@ class ManualControlViewModel:
         if not is_available:
             return None
 
+        if self._measurement_provider is not None:
+            return self._measurement_provider(device.device_id, "mass_flow")
+
         try:
             measurement = device.measure_flow()
         except Exception as error:
@@ -674,6 +680,9 @@ class ManualControlViewModel:
         if not is_available:
             return None
 
+        if self._measurement_provider is not None:
+            return self._measurement_provider(device.device_id, "voltage")
+
         try:
             measurement = device.measure_voltage()
         except Exception as error:
@@ -698,6 +707,9 @@ class ManualControlViewModel:
     ) -> Measurement | None:
         if not is_available:
             return None
+
+        if self._measurement_provider is not None:
+            return self._measurement_provider(device.device_id, "current")
 
         try:
             measurement = device.measure_current()

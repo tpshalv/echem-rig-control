@@ -2,9 +2,6 @@ import tkinter as tk
 from tkinter import ttk
 from datetime import datetime
 
-from rig_control.device_factory import create_device_manager
-from rig_control.rig_profile_loading import load_rig_profile
-
 from rig_control.ui.diagnostics.model import (
     DiagnosticViewModel,
 )
@@ -319,20 +316,3 @@ class DiagnosticWindow:
         self._root.clipboard_clear()
         self._root.clipboard_append(text)
         self._root.update()
-
-
-
-def main() -> None:
-    root = tk.Tk()
-    profile = load_rig_profile(
-        "rig-profile.simulation.toml"
-    )
-    manager = create_device_manager(profile)    
-    view_model = DiagnosticViewModel(manager)
-
-    DiagnosticWindow(root, view_model)
-    root.mainloop()
-
-
-if __name__ == "__main__":
-    main()

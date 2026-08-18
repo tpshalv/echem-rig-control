@@ -2,9 +2,6 @@ import tkinter as tk
 from datetime import datetime
 from tkinter import messagebox, ttk
 
-from rig_control.device_factory import create_device_manager
-from rig_control.rig_profile_loading import load_rig_profile
-from rig_control.control.service import RigControlService
 from rig_control.ui.manual_control.model import (
     ManualControlViewModel,
 )
@@ -20,27 +17,25 @@ from rig_control.devices.power_supply import (
 )
 
 from rig_control.ui.common.theme import (
-    BANNER_FONT,
     DANGER_BUTTON_ACTIVE_BACKGROUND,
     DANGER_BUTTON_BACKGROUND,
     ERROR_TEXT,
     MONOSPACE_FONT,
     SECTION_FONT,
     TITLE_FONT,
-    WARNING_BACKGROUND,
-    WARNING_TEXT,
 )
 from rig_control.ui.common.widgets import VerticalScrolledFrame
 
-class ManualControlWindow:
-    """Manual commissioning controls backed by the control service."""
+class ManualControlPanel(ttk.Frame):
+    """Manual commissioning controls embedded in Operation."""
 
     def __init__(
         self,
-        root: tk.Tk,
+        parent: tk.Misc,
         view_model: ManualControlViewModel,
     ) -> None:
-        self._root = root
+        super().__init__(parent)
+        self._root = self.winfo_toplevel()
         self._view_model = view_model
         self._history: list[str] = []
         self._technical_details: list[str] = []
@@ -48,13 +43,8 @@ class ManualControlWindow:
         self._seen_event_count = 0
         self._seen_failure_count = 0
 
-        self._root.title(
-            "Echem Rig Control - Simulated Manual Control"
-        )
-        self._root.geometry("1000x760")
-        self._root.minsize(820, 600)
-        self._root.columnconfigure(0, weight=1)
-        self._root.rowconfigure(0, weight=1)
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
 
         self._create_widgets()
         self.refresh()
@@ -64,30 +54,14 @@ class ManualControlWindow:
             self._first_entry.selection_range(0, "end")
 
     def _create_widgets(self) -> None:
-        main = ttk.Frame(self._root, padding=12)
+        main = ttk.Frame(self, padding=12)
         main.grid(row=0, column=0, sticky="nsew")
         main.columnconfigure(0, weight=1)
-        main.rowconfigure(2, weight=1)
-
-        simulation_label = tk.Label(
-            main,
-            text="SIMULATION MODE - NO PHYSICAL HARDWARE",
-            foreground=WARNING_TEXT,
-            background=WARNING_BACKGROUND,
-            font=BANNER_FONT,
-            padx=10,
-            pady=7,
-        )
-        simulation_label.grid(
-            row=0,
-            column=0,
-            sticky="ew",
-            pady=(0, 10),
-        )
+        main.rowconfigure(1, weight=1)
 
         heading_row = ttk.Frame(main)
         heading_row.grid(
-            row=1,
+            row=0,
             column=0,
             sticky="ew",
             pady=(0, 8),
@@ -111,7 +85,7 @@ class ManualControlWindow:
             main,
             orient="vertical",
         )
-        adjustable_area.grid(row=2, column=0, sticky="nsew")
+        adjustable_area.grid(row=1, column=0, sticky="nsew")
 
         controls_area = ttk.Frame(adjustable_area)
         controls_area.columnconfigure(0, weight=1)
@@ -537,32 +511,3 @@ class ManualControlWindow:
             "\n\n".join(sections)
         )
         self._root.update()
-
-
-
-def main() -> None:
-    root = tk.Tk()
-    profile = load_rig_profile(
-        "rig-profile.simulation.toml"
-    )
-    manager = create_device_manager(profile)
-
-    # This program is explicitly simulation-only. Simulated devices are
-    # therefore connected automatically for manual-control testing.
-    for device_id in manager.device_ids:
-        manager.connect(device_id)
-
-    service = RigControlService(manager)
-    view_model = ManualControlViewModel(
-        manager,
-        service,
-    )
-
-    view_model.initialize_manual_power_supply_defaults()
-
-    ManualControlWindow(root, view_model)
-    root.mainloop()
-
-
-if __name__ == "__main__":
-    main()

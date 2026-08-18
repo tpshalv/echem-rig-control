@@ -1,0 +1,7 @@
+[settings]
+settings_id = "default"
+friendly_name = "Default application settings"
+
+[values]
+publish_interval_seconds = 1.0
+technical_log_path = "logs/rig-control.log"

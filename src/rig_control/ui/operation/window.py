@@ -1,16 +1,8 @@
-import argparse
 import tkinter as tk
-from collections.abc import Sequence
-from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from rig_control.device_factory import create_device_manager
-from rig_control.event_logging import TechnicalEventLogger
-from rig_control.experiment_recording import ExperimentRecorder
-from rig_control.models import Event
-from rig_control.polling import PollingService
-from rig_control.rig_profile_loading import load_rig_profile
 from rig_control.ui.common.theme import ERROR_TEXT, SECTION_FONT, TITLE_FONT
+from rig_control.ui.operation.manual_control_panel import ManualControlPanel
 from rig_control.ui.operation.model import OperationActionResult, OperationViewModel
 from rig_control.ui.operation.trend_window import TrendWindow
 
@@ -44,7 +36,7 @@ class OperationWindow:
         main = ttk.Frame(self._root, padding=12)
         main.grid(row=0, column=0, sticky="nsew")
         main.columnconfigure(0, weight=1)
-        main.rowconfigure(3, weight=1)
+        main.rowconfigure(2, weight=1)
 
         ttk.Label(main, text="Rig operation", font=TITLE_FONT).grid(
             row=0, column=0, sticky="w"
@@ -53,8 +45,16 @@ class OperationWindow:
             row=1, column=0, sticky="w", pady=(0, 10)
         )
 
-        controls = ttk.Frame(main)
-        controls.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        tabs = ttk.Notebook(main)
+        tabs.grid(row=2, column=0, sticky="nsew")
+
+        monitoring = ttk.Frame(tabs, padding=(0, 10, 0, 0))
+        monitoring.columnconfigure(0, weight=1)
+        monitoring.rowconfigure(1, weight=1)
+        tabs.add(monitoring, text="Monitoring and recording")
+
+        controls = ttk.Frame(monitoring)
+        controls.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         ttk.Button(
             controls,
             text="Connect configured devices",
@@ -88,8 +88,8 @@ class OperationWindow:
             command=self._apply_history_limit,
         ).grid(row=0, column=5)
 
-        body = ttk.PanedWindow(main, orient="vertical")
-        body.grid(row=3, column=0, sticky="nsew")
+        body = ttk.PanedWindow(monitoring, orient="vertical")
+        body.grid(row=1, column=0, sticky="nsew")
 
         live = ttk.LabelFrame(body, text="Live measurements", padding=8)
         live.columnconfigure(0, weight=1)
@@ -165,6 +165,12 @@ class OperationWindow:
             actions, text="Not recording", font=SECTION_FONT
         )
         self._recording_status.grid(row=0, column=1, padx=(12, 0))
+
+        self._manual_panel = ManualControlPanel(
+            tabs,
+            self._view_model.manual_control,
+        )
+        tabs.add(self._manual_panel, text="Manual control")
 
     def _connect_all(self) -> None:
         results = self._view_model.connect_all()
@@ -269,8 +275,10 @@ class OperationWindow:
         self._after_id = self._root.after(100, self._poll_ui_queue)
 
     def _poll_ui_queue(self) -> None:
-        self._view_model.collect_polling_results()
+        collected = self._view_model.collect_polling_results()
         self._update_display()
+        if collected:
+            self._manual_panel.refresh()
         self._schedule_update()
 
     def _update_display(self) -> None:
@@ -316,58 +324,3 @@ class OperationWindow:
             self._after_id = None
         for trend in tuple(self._trend_windows.values()):
             trend.close()
-
-
-def main(arguments: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Monitor and record a configured rig")
-    parser.add_argument("profile", nargs="?", default="rig-profile.simulation.toml")
-    parsed = parser.parse_args(arguments)
-    profile = load_rig_profile(parsed.profile)
-
-    technical_log = TechnicalEventLogger(Path("logs") / "rig-control.log")
-    technical_log.record(Event(source="application", message="Operation UI started."))
-    manager = create_device_manager(profile, event_sink=technical_log.record)
-    recorder = ExperimentRecorder()
-    polling = PollingService(
-        manager,
-        device_intervals_seconds={
-            role.device_id: role.poll_interval_seconds
-            for role in profile.enabled_roles
-            if role.poll_interval_seconds is not None
-        },
-        batch_handler=recorder.record_batch,
-        event_sink=technical_log.record,
-    )
-    view_model = OperationViewModel(
-        manager,
-        polling,
-        recorder,
-        profile_id=profile.profile_id,
-    )
-    root = tk.Tk()
-    window = OperationWindow(root, view_model, profile_name=profile.friendly_name)
-
-    def close() -> None:
-        window.cancel_updates()
-        failures = view_model.shutdown()
-        technical_log.record(
-            Event(
-                source="application",
-                message=(
-                    "Operation UI stopped cleanly."
-                    if not failures
-                    else "Operation UI stopped with shutdown problems: "
-                    + "; ".join(failures)
-                ),
-            )
-        )
-        technical_log.close()
-        root.destroy()
-
-    root.protocol("WM_DELETE_WINDOW", close)
-    root.mainloop()
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

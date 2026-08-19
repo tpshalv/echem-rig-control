@@ -1,7 +1,12 @@
 from dataclasses import dataclass
+from math import ceil
+from statistics import fmean
+from time import perf_counter
 from traceback import format_exc
 
+from rig_control.devices.measurement_source import MeasurementSource
 from rig_control.devices.manager import DeviceManager
+from rig_control.models import DeviceStatus
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,4 +103,87 @@ class DiagnosticViewModel:
                 f"{type(error).__name__}: {error}"
             ),
             technical_details=format_exc(),
+        )
+
+    def test_communication(
+        self,
+        device_id: str,
+        *,
+        attempts: int = 10,
+    ) -> DiagnosticActionResult:
+        """Measure safe, end-to-end request latency for real hardware."""
+
+        if attempts <= 0:
+            raise ValueError("Communication-test attempts must be positive")
+
+        try:
+            device = self._device_manager.get(device_id)
+            if "simulated" in type(device).__module__.lower():
+                raise TypeError(
+                    "Communication timing is only available for real devices"
+                )
+            if device.status not in (DeviceStatus.CONNECTED, DeviceStatus.READY):
+                raise RuntimeError("Connect the device before testing communication")
+
+            if isinstance(device, MeasurementSource):
+                probe_name = "read_measurements"
+                probe = device.read_measurements
+            else:
+                probe = getattr(device, "refresh_status", None)
+                probe_name = "refresh_status"
+                if not callable(probe):
+                    raise TypeError(
+                        "This device has no non-destructive communication probe"
+                    )
+        except Exception as error:
+            return self._failure_result(
+                operation="test communication with",
+                device_id=device_id,
+                error=error,
+            )
+
+        timings_ms: list[float] = []
+        failures: list[str] = []
+        consecutive_failures = 0
+        for attempt in range(1, attempts + 1):
+            started = perf_counter()
+            try:
+                with self._device_manager.operation(device_id):
+                    probe()
+            except Exception as error:
+                failures.append(
+                    f"Attempt {attempt}: {type(error).__name__}: {error}"
+                )
+                consecutive_failures += 1
+                if consecutive_failures >= 3:
+                    break
+            else:
+                timings_ms.append((perf_counter() - started) * 1000.0)
+                consecutive_failures = 0
+
+        attempted = len(timings_ms) + len(failures)
+        lines = [
+            f"Communication test for {device_id!r}: "
+            f"{len(timings_ms)}/{attempted} requests succeeded.",
+            f"Probe: {probe_name} (driver-to-device round trip).",
+        ]
+        if timings_ms:
+            ordered = sorted(timings_ms)
+            percentile_95 = ordered[ceil(0.95 * len(ordered)) - 1]
+            lines.append(
+                "Latency: "
+                f"min {ordered[0]:.1f} ms, "
+                f"average {fmean(ordered):.1f} ms, "
+                f"p95 {percentile_95:.1f} ms, "
+                f"max {ordered[-1]:.1f} ms."
+            )
+        if attempted < attempts:
+            lines.append("Stopped after 3 consecutive failures.")
+        if failures:
+            lines.append(f"Failures: {len(failures)}.")
+
+        return DiagnosticActionResult(
+            succeeded=not failures,
+            summary="\n".join(lines),
+            technical_details="\n".join(failures) if failures else None,
         )

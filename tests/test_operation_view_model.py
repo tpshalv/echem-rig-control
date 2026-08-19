@@ -226,6 +226,8 @@ def test_history_limit_rejects_boolean() -> None:
 
 def test_device_warning_persists_until_a_successful_read() -> None:
     model, _, polling, _ = make_model()
+    polling.results.put(measurement_batch())
+    model.collect_polling_results()
     polling.results.put(
         PollingBatch(
             started_at=FIXED_TIME,
@@ -247,6 +249,8 @@ def test_device_warning_persists_until_a_successful_read() -> None:
     assert model.warnings() == (
         ("temperature", "OSError: connection lost"),
     )
+    assert model.measurement_rows()[0].quality == "stale"
+    assert len(model.measurement_history("temperature", "temperature")) == 1
     assert len(model.events) == 1
 
     polling.results.put(measurement_batch())

@@ -162,3 +162,41 @@ def test_client_sends_identify_command() -> None:
 
     assert identity["controller_id"] == "rig_esp32"
     assert sent_request(transport).name == "identify"
+
+
+def test_client_reads_generic_sensor_channels() -> None:
+    transport, client = make_client()
+    original_receive = transport.receive
+    channels = [
+        {"name": "temperature", "value": 22.0, "unit": "degC", "quality": "good"},
+        {"name": "humidity", "value": 45.0, "unit": "%RH", "quality": "good"},
+    ]
+
+    def receive_sensors() -> str:
+        request = sent_request(transport)
+        queue_response(
+            transport,
+            reply_to=request.message_id,
+            payload={"channels": channels},
+        )
+        return original_receive()
+
+    transport.receive = receive_sensors  # type: ignore[method-assign]
+
+    assert client.read_sensors() == channels
+    assert sent_request(transport).name == "read_sensors"
+
+
+def test_client_rejects_sensor_response_without_channel_list() -> None:
+    transport, client = make_client()
+    original_receive = transport.receive
+
+    def receive_invalid_sensors() -> str:
+        request = sent_request(transport)
+        queue_response(transport, reply_to=request.message_id, payload={})
+        return original_receive()
+
+    transport.receive = receive_invalid_sensors  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="channel list"):
+        client.read_sensors()

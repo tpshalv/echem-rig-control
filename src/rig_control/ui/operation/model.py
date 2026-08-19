@@ -1,5 +1,5 @@
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from queue import Empty
@@ -250,6 +250,12 @@ class OperationViewModel:
                 self._warnings[failure.device_id] = (
                     f"{failure.error_type}: {failure.message}"
                 )
+                for key, row in tuple(self._measurements.items()):
+                    if row.device_id == failure.device_id:
+                        self._measurements[key] = replace(
+                            row,
+                            quality=Quality.STALE.value,
+                        )
             self._events.extend(batch.events)
 
     def shutdown(self) -> tuple[str, ...]:

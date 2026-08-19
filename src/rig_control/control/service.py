@@ -11,7 +11,10 @@ from rig_control.control.commands import (
     SetPowerSupplyCurrentLimit,
     SetPowerSupplyOutput,
     SetPowerSupplyVoltage,
+    SetControllerOutput,
+    RearmController,
 )
+from rig_control.devices.esp32_controller import Esp32Controller
 from rig_control.devices.manager import DeviceManager
 from rig_control.devices.mass_flow_controller import (
     MassFlowController,
@@ -299,6 +302,17 @@ class RigControlService:
                 f"output {state}."
             )
 
+        if isinstance(command, SetControllerOutput):
+            controller = self._require_esp32_controller(device, command.device_id)
+            controller.set_output(command.output_name, command.enabled)
+            state = "enabled" if command.enabled else "disabled"
+            return f"Controller {command.device_id!r} output {command.output_name!r} {state}."
+
+        if isinstance(command, RearmController):
+            controller = self._require_esp32_controller(device, command.device_id)
+            controller.rearm()
+            return f"Controller {command.device_id!r} watchdog rearmed."
+
         if isinstance(command, EnterDeviceSafeState):
             if not isinstance(device, SafeStateCapable):
                 raise TypeError(
@@ -331,6 +345,12 @@ class RigControlService:
         return device
 
     @staticmethod
+    def _require_esp32_controller(device: object, device_id: str) -> Esp32Controller:
+        if not isinstance(device, Esp32Controller):
+            raise TypeError(f"Device {device_id!r} is not an ESP32 controller")
+        return device
+
+    @staticmethod
     def _validate_command_type(command: object) -> None:
         supported_types = (
             SetMfcFlow,
@@ -338,6 +358,8 @@ class RigControlService:
             SetPowerSupplyCurrentLimit,
             SetPowerSupplyOutput,
             EnterDeviceSafeState,
+            SetControllerOutput,
+            RearmController,
         )
 
         if not isinstance(command, supported_types):

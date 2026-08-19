@@ -114,6 +114,9 @@ class ManualControlPanel(ttk.Frame):
         )
         self._supply_panel.grid(row=0, column=0, sticky="nsew")
 
+        self._controller_panel = ttk.Frame(self._notebook, padding=12)
+        self._controller_panel.columnconfigure(0, weight=1)
+
         self._notebook.add(
             self._mfc_scroll,
             text="Mass flow controllers",
@@ -122,6 +125,7 @@ class ManualControlPanel(ttk.Frame):
             self._supply_scroll,
             text="Power supplies",
         )
+        self._notebook.add(self._controller_panel, text="ESP32 controller")
 
 
         action_row = ttk.Frame(controls_area)
@@ -210,9 +214,37 @@ class ManualControlPanel(ttk.Frame):
         self._mfc_panel.refresh()
         self._first_entry = self._mfc_panel.first_entry
         self._supply_panel.refresh()
+        self._refresh_controllers()
         if self._first_entry is None:
             self._first_entry = self._supply_panel.first_entry
         self._collect_model_events()
+
+    def _refresh_controllers(self) -> None:
+        for child in self._controller_panel.winfo_children():
+            child.destroy()
+        rows = self._view_model.controller_rows()
+        if not rows:
+            ttk.Label(self._controller_panel, text="No ESP32 controller is configured.").grid(row=0, column=0, sticky="w")
+            return
+        for index, row in enumerate(rows):
+            frame = ttk.LabelFrame(self._controller_panel, text=row.device_id, padding=10)
+            frame.grid(row=index, column=0, sticky="ew", pady=(0, 8))
+            ttk.Label(frame, text=f"Connection: {row.status}").grid(row=0, column=0, sticky="w")
+            ttk.Label(frame, text=f"Watchdog: {'TRIPPED' if row.watchdog_tripped else 'armed'}").grid(row=1, column=0, sticky="w")
+            ttk.Label(frame, text=f"Safe state: {'active' if row.safe_state_active else 'inactive'}").grid(row=2, column=0, sticky="w")
+            ttk.Label(frame, text=f"LED: {'ON' if row.led_enabled else 'OFF'}").grid(row=3, column=0, sticky="w")
+            buttons = ttk.Frame(frame)
+            buttons.grid(row=0, column=1, rowspan=4, padx=(20, 0))
+            state = "normal" if row.is_available else "disabled"
+            ttk.Button(buttons, text="Rearm watchdog", state=state, command=lambda device_id=row.device_id: self._rearm_controller(device_id)).grid(row=0, column=0, columnspan=2, pady=(0, 6))
+            ttk.Button(buttons, text="LED ON", state=state, command=lambda device_id=row.device_id: self._set_controller_led(device_id, True)).grid(row=1, column=0, padx=(0, 6))
+            ttk.Button(buttons, text="LED OFF", state=state, command=lambda device_id=row.device_id: self._set_controller_led(device_id, False)).grid(row=1, column=1)
+
+    def _rearm_controller(self, device_id: str) -> None:
+        self._record_result(self._view_model.rearm_controller(device_id))
+
+    def _set_controller_led(self, device_id: str, enabled: bool) -> None:
+        self._record_result(self._view_model.set_controller_output(device_id, "led", enabled))
 
     def _request_supply_mode_change(
         self,

@@ -13,6 +13,10 @@ from rig_control.devices.keithley_2260b.configuration import (
 )
 from rig_control.devices.keithley_2260b.driver import Keithley2260B
 from rig_control.devices.manager import DeviceManager
+from rig_control.devices.esp32_controller import Esp32Controller
+from rig_control.devices.esp32_bus import Esp32Bus
+from rig_control.devices.esp32_dht11 import Esp32Dht11
+from rig_control.esp32.session import ControllerSession
 from rig_control.devices.mass_flow_controller import (
     MassFlowControllerLimits,
 )
@@ -30,17 +34,21 @@ from rig_control.rig_profile import (
     DeviceCapability,
     DeviceRole,
     RigProfile,
+    ConnectionDefinition,
 )
 from rig_control.models import EventSink
 from rig_control.transports.socket_scpi import SocketScpiTransport
 from rig_control.transports.pyserial_text import PySerialTextTransport
 from rig_control.transports.serial_text import SerialTextTransport
+from rig_control.transports.pyserial_duplex_text import PySerialDuplexTextTransport
+from rig_control.transports.duplex_text import DuplexTextTransport
 
 
 type AlicatTransportFactory = Callable[
     [AlicatSerialConfiguration],
     SerialTextTransport,
 ]
+type Esp32TransportFactory = Callable[[ConnectionDefinition], DuplexTextTransport]
 
 
 class DeviceFactoryError(RuntimeError):
@@ -60,6 +68,7 @@ def create_device_manager(
     profile: RigProfile,
     *,
     alicat_transport_factory: AlicatTransportFactory | None = None,
+    esp32_transport_factory: Esp32TransportFactory | None = None,
     event_sink: EventSink | None = None,
 ) -> DeviceManager:
     """Construct all enabled devices described by a rig profile."""
@@ -69,8 +78,12 @@ def create_device_manager(
 
     manager = DeviceManager(event_sink=event_sink)
     alicat_buses: dict[str, AlicatBus] = {}
+    esp32_buses: dict[str, Esp32Bus] = {}
     selected_alicat_transport_factory = (
         alicat_transport_factory or _create_pyserial_transport
+    )
+    selected_esp32_transport_factory = (
+        esp32_transport_factory or _create_esp32_transport
     )
 
     for role in profile.enabled_roles:
@@ -80,6 +93,8 @@ def create_device_manager(
                 role,
                 alicat_buses,
                 selected_alicat_transport_factory,
+                esp32_buses,
+                selected_esp32_transport_factory,
             )
         )
 
@@ -91,6 +106,8 @@ def _create_device(
     role: DeviceRole,
     alicat_buses: dict[str, AlicatBus],
     alicat_transport_factory: AlicatTransportFactory,
+    esp32_buses: dict[str, Esp32Bus],
+    esp32_transport_factory: Esp32TransportFactory,
 ) -> Device:
     if role.backend is DeviceBackend.REAL:
         if (
@@ -108,6 +125,36 @@ def _create_device(
                 role,
                 alicat_buses,
                 alicat_transport_factory,
+            )
+
+        if (
+            role.capability is DeviceCapability.REMOTE_CONTROLLER
+            and role.driver == "esp32_json"
+        ):
+            bus = _get_or_create_esp32_bus(
+                profile, role, esp32_buses, esp32_transport_factory
+            )
+            heartbeat_interval = _optional_number(
+                role.settings,
+                "heartbeat_interval_seconds",
+                5.0,
+                role.device_id,
+            )
+            return Esp32Controller(
+                role.device_id,
+                bus,
+                heartbeat_interval_seconds=heartbeat_interval,
+            )
+
+        if role.driver == "esp32_dht11" and role.capability in {
+            DeviceCapability.TEMPERATURE_SENSOR,
+            DeviceCapability.HUMIDITY_SENSOR,
+        }:
+            return Esp32Dht11(
+                role.device_id,
+                _get_or_create_esp32_bus(
+                    profile, role, esp32_buses, esp32_transport_factory
+                ),
             )
 
         raise DeviceFactoryError(
@@ -212,6 +259,61 @@ def _create_real_alicat(
             f"{role.device_id!r}: {type(error).__name__}: {error}. "
             "No connection was attempted."
         ) from error
+
+
+def _get_or_create_esp32_bus(
+    profile: RigProfile,
+    role: DeviceRole,
+    buses: dict[str, Esp32Bus],
+    transport_factory: Esp32TransportFactory,
+) -> Esp32Bus:
+    try:
+        if role.connection_id is None:
+            raise ValueError("ESP32 controller requires a connection_id")
+        connection = profile.get_connection(role.connection_id)
+        if connection.connection_type != "serial_json":
+            raise ValueError("ESP32 controller connection must use 'serial_json'")
+        existing = buses.get(connection.connection_id)
+        if existing is not None:
+            return existing
+        controller_id_value = connection.parameters.get(
+            "controller_id",
+            role.settings.get("controller_id", "esp32_main_controller"),
+        )
+        if not isinstance(controller_id_value, str) or not controller_id_value.strip():
+            raise TypeError("ESP32 controller_id must be non-empty text")
+        bus = Esp32Bus(
+            connection.connection_id,
+            ControllerSession(controller_id_value, transport_factory(connection)),
+        )
+        buses[connection.connection_id] = bus
+        return bus
+    except (KeyError, TypeError, ValueError) as error:
+        raise DeviceFactoryError(
+            f"Invalid settings for real ESP32 controller {role.device_id!r}: "
+            f"{type(error).__name__}: {error}. No connection was attempted."
+        ) from error
+
+
+def _create_esp32_transport(
+    connection: ConnectionDefinition,
+) -> PySerialDuplexTextTransport:
+    return PySerialDuplexTextTransport(
+        _require_text(connection.parameters, "port", connection.connection_id),
+        baud_rate=int(
+            _require_number(
+                connection.parameters,
+                "baud_rate",
+                connection.connection_id,
+            )
+        ),
+        timeout_seconds=_optional_number(
+            connection.parameters,
+            "timeout_seconds",
+            2.0,
+            connection.connection_id,
+        ),
+    )
 
 
 def _create_pyserial_transport(

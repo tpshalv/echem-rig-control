@@ -12,12 +12,14 @@ class SimulatedController:
         safe_outputs: dict[str, bool],
         watchdog_timeout_seconds: float,
         clock: Callable[[], float] = monotonic,
+        sensor_channels: list[dict[str, object]] | None = None,
     ) -> None:
         self._safe_outputs = safe_outputs.copy()
         self._outputs = safe_outputs.copy()
         self._watchdog = Watchdog(watchdog_timeout_seconds, clock)
         self._safe_state_active = True
         self._watchdog_tripped = False
+        self._sensor_channels = [dict(channel) for channel in (sensor_channels or [])]
 
     @property
     def outputs(self) -> dict[str, bool]:
@@ -37,6 +39,9 @@ class SimulatedController:
 
     def record_heartbeat(self) -> None:
         self._watchdog.record_heartbeat()
+
+    def read_sensors(self) -> list[dict[str, object]]:
+        return [dict(channel) for channel in self._sensor_channels]
 
     def set_output(self, name: str, enabled: bool) -> None:
         if name not in self._outputs:

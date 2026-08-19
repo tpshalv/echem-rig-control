@@ -1,8 +1,12 @@
 import tkinter as tk
+from collections.abc import Callable
 from tkinter import ttk
 from datetime import datetime
+from queue import Empty, Queue
+from threading import Thread
 
 from rig_control.ui.diagnostics.model import (
+    DiagnosticActionResult,
     DiagnosticViewModel,
 )
 from rig_control.ui.common.theme import (
@@ -33,10 +37,13 @@ class DiagnosticWindow:
         self._view_model = view_model
         self._history: list[str] = []
         self._technical_details: list[str] = []
+        self._action_results: Queue[DiagnosticActionResult] = Queue()
+        self._action_in_progress = False
 
         self._configure_window()
         self._create_widgets()
         self.refresh()
+        self._root.after(100, self._poll_action_results)
 
     def _configure_window(self) -> None:
         self._root.title("Echem Rig Control — Diagnostics")
@@ -143,23 +150,32 @@ class DiagnosticWindow:
             pady=10,
         )
 
-        ttk.Button(
+        self._connect_button = ttk.Button(
             buttons,
             text="Connect selected",
             command=self._connect_selected,
-        ).grid(row=0, column=0, padx=(0, 8))
+        )
+        self._connect_button.grid(row=0, column=0, padx=(0, 8))
 
-        ttk.Button(
+        self._disconnect_button = ttk.Button(
             buttons,
             text="Disconnect selected",
             command=self._disconnect_selected,
-        ).grid(row=0, column=1, padx=(0, 8))
+        )
+        self._disconnect_button.grid(row=0, column=1, padx=(0, 8))
+
+        self._test_button = ttk.Button(
+            buttons,
+            text="Test communication",
+            command=self._test_selected_communication,
+        )
+        self._test_button.grid(row=0, column=2, padx=(0, 8))
 
         ttk.Button(
             buttons,
             text="Refresh",
             command=self.refresh,
-        ).grid(row=0, column=2)
+        ).grid(row=0, column=3)
 
         details_label = ttk.Label(
             main,
@@ -231,9 +247,9 @@ class DiagnosticWindow:
         if device_id is None:
             return
 
-        result = self._view_model.connect_device(device_id)
-        self._display_result(result)
-        self.refresh()
+        self._start_device_action(
+            lambda: self._view_model.connect_device(device_id)
+        )
 
     def _disconnect_selected(self) -> None:
         device_id = self._require_selection()
@@ -241,9 +257,47 @@ class DiagnosticWindow:
         if device_id is None:
             return
 
-        result = self._view_model.disconnect_device(device_id)
-        self._display_result(result)
-        self.refresh()
+        self._start_device_action(
+            lambda: self._view_model.disconnect_device(device_id)
+        )
+
+    def _test_selected_communication(self) -> None:
+        device_id = self._require_selection()
+        if device_id is None:
+            return
+        self._start_device_action(
+            lambda: self._view_model.test_communication(device_id)
+        )
+
+    def _start_device_action(
+        self,
+        action: Callable[[], DiagnosticActionResult],
+    ) -> None:
+        if self._action_in_progress:
+            return
+        self._action_in_progress = True
+        self._connect_button.configure(state="disabled")
+        self._disconnect_button.configure(state="disabled")
+        self._test_button.configure(state="disabled")
+
+        def run() -> None:
+            self._action_results.put(action())
+
+        Thread(target=run, name="device-diagnostic-action", daemon=True).start()
+
+    def _poll_action_results(self) -> None:
+        try:
+            result = self._action_results.get_nowait()
+        except Empty:
+            pass
+        else:
+            self._action_in_progress = False
+            self._connect_button.configure(state="normal")
+            self._disconnect_button.configure(state="normal")
+            self._test_button.configure(state="normal")
+            self._display_result(result)
+            self.refresh()
+        self._root.after(100, self._poll_action_results)
 
     def _require_selection(self) -> str | None:
         device_id = self._selected_device_id()

@@ -1,5 +1,7 @@
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
+from queue import Empty, Queue
+from threading import Thread
 
 from rig_control.ui.common.theme import ERROR_TEXT, SECTION_FONT, TITLE_FONT
 from rig_control.ui.operation.manual_control_panel import ManualControlPanel
@@ -22,6 +24,8 @@ class OperationWindow:
         self._after_id: str | None = None
         self._measurement_keys: dict[str, tuple[str, str]] = {}
         self._trend_windows: dict[tuple[str, str], TrendWindow] = {}
+        self._connection_results: Queue[tuple[OperationActionResult, ...]] = Queue()
+        self._connection_in_progress = False
         self._root.title("Echem Rig Control — Operation")
         self._root.geometry("1050x760")
         self._root.minsize(850, 620)
@@ -55,11 +59,12 @@ class OperationWindow:
 
         controls = ttk.Frame(monitoring)
         controls.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        ttk.Button(
+        self._connect_button = ttk.Button(
             controls,
             text="Connect configured devices",
             command=self._connect_all,
-        ).grid(row=0, column=0, padx=(0, 8))
+        )
+        self._connect_button.grid(row=0, column=0, padx=(0, 8))
         self._monitor_button = ttk.Button(
             controls,
             text="Start monitoring",
@@ -129,8 +134,35 @@ class OperationWindow:
         warnings_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
         warnings_frame.columnconfigure(0, weight=1)
         warnings_frame.rowconfigure(0, weight=1)
-        self._warnings = tk.Listbox(warnings_frame, foreground=ERROR_TEXT)
+        self._warnings = tk.Listbox(
+            warnings_frame,
+            foreground=ERROR_TEXT,
+            exportselection=False,
+        )
         self._warnings.grid(row=0, column=0, sticky="nsew")
+        warning_vertical = ttk.Scrollbar(
+            warnings_frame,
+            orient="vertical",
+            command=self._warnings.yview,
+        )
+        warning_vertical.grid(row=0, column=1, sticky="ns")
+        warning_horizontal = ttk.Scrollbar(
+            warnings_frame,
+            orient="horizontal",
+            command=self._warnings.xview,
+        )
+        warning_horizontal.grid(row=1, column=0, sticky="ew")
+        self._warnings.configure(
+            yscrollcommand=warning_vertical.set,
+            xscrollcommand=warning_horizontal.set,
+        )
+        self._warnings.bind("<Control-c>", self._copy_warnings)
+        self._warnings.bind("<Double-1>", self._show_selected_warning)
+        ttk.Button(
+            warnings_frame,
+            text="Copy warnings",
+            command=self._copy_warnings,
+        ).grid(row=2, column=0, sticky="w", pady=(6, 0))
 
         recording = ttk.LabelFrame(lower, text="Experiment recording", padding=8)
         recording.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
@@ -173,7 +205,25 @@ class OperationWindow:
         tabs.add(self._manual_panel, text="Manual control")
 
     def _connect_all(self) -> None:
-        results = self._view_model.connect_all()
+        if self._connection_in_progress:
+            return
+        self._connection_in_progress = True
+        self._connect_button.configure(state="disabled")
+        Thread(
+            target=lambda: self._connection_results.put(
+                self._view_model.connect_all()
+            ),
+            name="connect-configured-devices",
+            daemon=True,
+        ).start()
+
+    def _finish_connect_all(
+        self,
+        results: tuple[OperationActionResult, ...],
+    ) -> None:
+        self._connection_in_progress = False
+        self._connect_button.configure(state="normal")
+        self._manual_panel.refresh()
         failures = [result.summary for result in results if not result.succeeded]
         if failures:
             messagebox.showerror(
@@ -271,10 +321,45 @@ class OperationWindow:
         if not result.succeeded:
             messagebox.showerror("Operation failed", result.summary, parent=self._root)
 
+    def _selected_warning(self) -> str | None:
+        selection = self._warnings.curselection()
+        if not selection:
+            return None
+        return str(self._warnings.get(selection[0]))
+
+    def _copy_warnings(self, _: tk.Event | None = None) -> str:
+        warning = self._selected_warning()
+        if warning is None:
+            warning = "\n".join(
+                str(self._warnings.get(index))
+                for index in range(self._warnings.size())
+            )
+        if warning:
+            self._root.clipboard_clear()
+            self._root.clipboard_append(warning)
+            self._root.update()
+        return "break"
+
+    def _show_selected_warning(self, _: tk.Event | None = None) -> str:
+        warning = self._selected_warning()
+        if warning is not None:
+            messagebox.showwarning(
+                "Persistent warning",
+                warning,
+                parent=self._root,
+            )
+        return "break"
+
     def _schedule_update(self) -> None:
         self._after_id = self._root.after(100, self._poll_ui_queue)
 
     def _poll_ui_queue(self) -> None:
+        try:
+            connection_results = self._connection_results.get_nowait()
+        except Empty:
+            pass
+        else:
+            self._finish_connect_all(connection_results)
         collected = self._view_model.collect_polling_results()
         self._update_display()
         if collected:

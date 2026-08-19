@@ -9,6 +9,8 @@ from rig_control.control.commands import (
     SetPowerSupplyCurrentLimit,
     SetPowerSupplyOutput,
     SetPowerSupplyVoltage,
+    SetControllerOutput,
+    RearmController,
 )
 from rig_control.control.service import RigControlService
 from rig_control.devices.manager import DeviceManager
@@ -19,6 +21,7 @@ from rig_control.devices.power_supply import (
     PowerSupply,
     PowerSupplyOperatingMode,
 )
+from rig_control.devices.esp32_controller import Esp32Controller
 from rig_control.models import (
     DeviceStatus,
     Event,
@@ -31,6 +34,7 @@ from rig_control.ui.manual_control.types import (
     MeasurementReadFailure,
     MfcControlRow,
     PowerSupplyControlRow,
+    ControllerControlRow,
 )
 
 
@@ -819,3 +823,28 @@ class ManualControlViewModel:
             succeeded=True,
             summary=result.message,
         )
+
+    def controller_rows(self) -> tuple[ControllerControlRow, ...]:
+        rows: list[ControllerControlRow] = []
+        for device_id in self._device_manager.device_ids:
+            device = self._device_manager.get(device_id)
+            if not isinstance(device, Esp32Controller):
+                continue
+            available = self._is_available(device.status)
+            status = device.controller_status
+            outputs = status.get("outputs", {})
+            rows.append(ControllerControlRow(
+                device_id=device.device_id,
+                status=device.status.value,
+                is_available=available,
+                led_enabled=bool(outputs.get("led", False)) if isinstance(outputs, dict) else False,
+                safe_state_active=status.get("safe_state_active") is True,
+                watchdog_tripped=status.get("watchdog_tripped") is True,
+            ))
+        return tuple(rows)
+
+    def set_controller_output(self, device_id: str, output_name: str, enabled: bool) -> ManualActionResult:
+        return self._execute(SetControllerOutput(device_id, output_name, enabled, CommandSource.MANUAL))
+
+    def rearm_controller(self, device_id: str) -> ManualActionResult:
+        return self._execute(RearmController(device_id, CommandSource.MANUAL))

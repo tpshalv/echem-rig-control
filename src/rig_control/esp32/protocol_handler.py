@@ -75,6 +75,9 @@ class ControllerProtocolHandler:
                 "watchdog_tripped": self._controller.watchdog_tripped,
             }
 
+        if message.name == "read_sensors":
+            return {"channels": self._controller.read_sensors()}
+
         raise ValueError(f"Unknown command: {message.name}")
 
     @staticmethod

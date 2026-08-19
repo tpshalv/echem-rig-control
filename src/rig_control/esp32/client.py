@@ -40,6 +40,15 @@ class ControllerClient:
     def get_status(self) -> dict[str, Any]:
         return self._request("status")
 
+    def read_sensors(self) -> list[dict[str, Any]]:
+        payload = self._request("read_sensors")
+        channels = payload.get("channels")
+        if not isinstance(channels, list):
+            raise RuntimeError("Controller sensor response has no channel list")
+        if not all(isinstance(channel, dict) for channel in channels):
+            raise RuntimeError("Controller sensor channels must be objects")
+        return channels
+
     def _request(
         self,
         name: str,

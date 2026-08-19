@@ -112,3 +112,20 @@ def test_identify_returns_controller_information() -> None:
     assert response.payload["controller_id"] == "rig_esp32"
     assert response.payload["firmware_version"] == "0.1.0"
     assert response.payload["protocol_version"] == 1
+
+
+def test_read_sensors_returns_generic_named_channels() -> None:
+    channels = [
+        {"name": "temperature", "value": 24.0, "unit": "degC", "quality": "good"},
+        {"name": "humidity", "value": 50.0, "unit": "%RH", "quality": "bad"},
+    ]
+    controller = SimulatedController(
+        safe_outputs={"pump": False},
+        watchdog_timeout_seconds=5,
+        sensor_channels=channels,
+    )
+
+    response = ControllerProtocolHandler(controller).handle(command("read_sensors"))
+
+    assert response.name == "ok"
+    assert response.payload["channels"] == channels

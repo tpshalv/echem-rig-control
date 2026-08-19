@@ -64,3 +64,13 @@ class PowerSupplyControlRow:
     maximum_voltage: float
     maximum_current: float
     maximum_power: float
+
+
+@dataclass(frozen=True, slots=True)
+class ControllerControlRow:
+    device_id: str
+    status: str
+    is_available: bool
+    led_enabled: bool
+    safe_state_active: bool
+    watchdog_tripped: bool

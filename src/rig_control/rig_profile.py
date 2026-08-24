@@ -114,6 +114,7 @@ class DeviceRole:
     settings: Mapping[str, ConfigurationValue] = field(
         default_factory=dict
     )
+    system: str | None = None
 
     def __post_init__(self) -> None:
         _require_non_empty_text(
@@ -174,6 +175,9 @@ class DeviceRole:
                 self.connection_id,
                 "Device connection ID",
             )
+
+        if self.system is not None:
+            _require_non_empty_text(self.system, "Device system")
 
         object.__setattr__(
             self,

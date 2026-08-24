@@ -5,6 +5,7 @@ from rig_control.devices.keithley_2260b.protocol import (
 from rig_control.devices.power_supply import PowerSupply, PowerSupplyLimits
 from rig_control.models import DeviceStatus, Measurement
 from rig_control.transports.scpi import ScpiTransport
+from rig_control.read_retry import retry_read
 
 
 class Keithley2260B(PowerSupply):
@@ -15,6 +16,9 @@ class Keithley2260B(PowerSupply):
         device_id: str,
         limits: PowerSupplyLimits,
         transport: ScpiTransport,
+        *,
+        read_attempts: int = 3,
+        read_retry_delay_seconds: float = 0.05,
     ) -> None:
         self._device_id = device_id
         self._limits = limits
@@ -24,6 +28,8 @@ class Keithley2260B(PowerSupply):
         self._voltage_setpoint = 0.0
         self._current_limit = 0.0
         self._output_enabled = False
+        self._read_attempts = read_attempts
+        self._read_retry_delay_seconds = read_retry_delay_seconds
 
     @property
     def device_id(self) -> str:
@@ -154,20 +160,26 @@ class Keithley2260B(PowerSupply):
     def measure_voltage(self) -> Measurement:
         self._require_ready()
 
-        response = self._transport.query(
-            Keithley2260BProtocol.MEASURE_VOLTAGE_QUERY
+        value = retry_read(
+            lambda: Keithley2260BProtocol.parse_number(self._transport.query(
+                Keithley2260BProtocol.MEASURE_VOLTAGE_QUERY
+            )),
+            attempts=self._read_attempts,
+            initial_delay_seconds=self._read_retry_delay_seconds,
         )
-        value = Keithley2260BProtocol.parse_number(response)
 
         return Measurement(value, "V")
 
     def measure_current(self) -> Measurement:
         self._require_ready()
 
-        response = self._transport.query(
-            Keithley2260BProtocol.MEASURE_CURRENT_QUERY
+        value = retry_read(
+            lambda: Keithley2260BProtocol.parse_number(self._transport.query(
+                Keithley2260BProtocol.MEASURE_CURRENT_QUERY
+            )),
+            attempts=self._read_attempts,
+            initial_delay_seconds=self._read_retry_delay_seconds,
         )
-        value = Keithley2260BProtocol.parse_number(response)
 
         return Measurement(value, "A")
 

@@ -824,6 +824,11 @@ class ManualControlViewModel:
             summary=result.message,
         )
 
+    def power_supply_mode(self, device_id: str) -> PowerSupplyOperatingMode:
+        return self._power_supply_modes.get(
+            device_id, PowerSupplyOperatingMode.CONSTANT_CURRENT
+        )
+
     def controller_rows(self) -> tuple[ControllerControlRow, ...]:
         rows: list[ControllerControlRow] = []
         for device_id in self._device_manager.device_ids:

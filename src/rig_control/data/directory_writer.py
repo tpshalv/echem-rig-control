@@ -1,4 +1,5 @@
 import json
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -216,6 +217,7 @@ class DirectoryExperimentWriter(ExperimentWriter):
         )
         file.write(f"{line}\n")
         file.flush()
+        os.fsync(file.fileno())
 
     @staticmethod
     def _write_json_atomically(
@@ -238,6 +240,7 @@ class DirectoryExperimentWriter(ExperimentWriter):
             )
             file.write("\n")
             file.flush()
+            os.fsync(file.fileno())
 
         for attempt in range(10):
             try:

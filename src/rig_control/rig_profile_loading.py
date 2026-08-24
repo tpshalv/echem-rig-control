@@ -236,6 +236,11 @@ def _load_device_role(
             "settings",
             f"{setting_prefix}.settings",
         ),
+        system=_optional_nullable_text(
+            data,
+            "system",
+            f"{setting_prefix}.system",
+        ),
     )
 
 def _load_expected_identity(

@@ -7,8 +7,11 @@ from traceback import format_exc
 
 from rig_control.models import Event, EventSeverity, EventSink
 from rig_control.ui.common.theme import ERROR_TEXT, SECTION_FONT, TITLE_FONT
-from rig_control.ui.operation.manual_control_panel import ManualControlPanel
-from rig_control.ui.operation.model import OperationActionResult, OperationViewModel
+from rig_control.ui.operation.model import (
+    OperationActionResult,
+    OperationChannelRow,
+    OperationViewModel,
+)
 from rig_control.ui.operation.trend_window import TrendWindow
 
 
@@ -41,6 +44,11 @@ class OperationWindow:
         self._measurement_rows_deleted = 0
         self._warning_display_rebuilds = 0
         self._trend_windows: dict[tuple[str, str], TrendWindow] = {}
+        self._channel_trees: dict[str | None, ttk.Treeview] = {}
+        self._tree_item_keys: dict[tuple[str | None, str], tuple[str, str]] = {}
+        self._channel_rows: dict[tuple[str, str], OperationChannelRow] = {}
+        self._editor: tk.Widget | None = None
+        self._editor_apply: ttk.Button | None = None
         self._connection_results: Queue[tuple[OperationActionResult, ...]] = Queue()
         self._connection_in_progress = False
         self._root.title("Echem Rig Control — Operation")
@@ -54,28 +62,40 @@ class OperationWindow:
         self._schedule_update()
 
     def _create_widgets(self, profile_name: str) -> None:
-        main = ttk.Frame(self._root, padding=12)
+        paper = "#EEF3F7"
+        ink = "#16253A"
+        style = ttk.Style(self._root)
+        style.configure("Blueprint.TFrame", background=paper)
+        style.configure("Blueprint.TLabel", background=paper, foreground=ink)
+        style.configure("Blueprint.Treeview", background=paper, fieldbackground=paper,
+                        foreground=ink, rowheight=25, font=("Segoe UI", 9))
+        style.configure("Blueprint.Treeview.Heading", background=paper,
+                        foreground=ink, font=("Segoe UI", 8, "bold"), relief="flat")
+        style.configure("Blueprint.TNotebook", background=paper, borderwidth=0)
+        style.configure("Blueprint.TNotebook.Tab", font=("Segoe UI", 8, "bold"),
+                        padding=(14, 7), foreground=ink)
+        self._root.configure(background=paper)
+        main = ttk.Frame(self._root, padding=16, style="Blueprint.TFrame")
         main.grid(row=0, column=0, sticky="nsew")
         main.columnconfigure(0, weight=1)
         main.rowconfigure(2, weight=1)
 
-        ttk.Label(main, text="Rig operation", font=TITLE_FONT).grid(
+        ttk.Label(main, text="Rig operation", font=TITLE_FONT,
+                  style="Blueprint.TLabel").grid(
             row=0, column=0, sticky="w"
         )
-        ttk.Label(main, text=f"Profile: {profile_name}").grid(
+        ttk.Label(main, text=f"Profile: {profile_name}",
+                  style="Blueprint.TLabel").grid(
             row=1, column=0, sticky="w", pady=(0, 10)
         )
+        body = ttk.Frame(main, style="Blueprint.TFrame")
+        body.grid(row=2, column=0, sticky="nsew")
+        body.columnconfigure(0, weight=4)
+        body.columnconfigure(1, weight=2)
+        body.rowconfigure(1, weight=1)
 
-        tabs = ttk.Notebook(main)
-        tabs.grid(row=2, column=0, sticky="nsew")
-
-        monitoring = ttk.Frame(tabs, padding=(0, 10, 0, 0))
-        monitoring.columnconfigure(0, weight=1)
-        monitoring.rowconfigure(1, weight=1)
-        tabs.add(monitoring, text="Monitoring and recording")
-
-        controls = ttk.Frame(monitoring)
-        controls.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        controls = ttk.Frame(body, style="Blueprint.TFrame")
+        controls.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
         self._connect_button = ttk.Button(
             controls,
             text="Connect configured devices",
@@ -88,73 +108,44 @@ class OperationWindow:
             command=self._toggle_monitoring,
         )
         self._monitor_button.grid(row=0, column=1)
-        ttk.Label(controls, text="Trend history:").grid(
-            row=0, column=2, padx=(20, 4)
-        )
-        self._history_limit = tk.StringVar(
-            value=str(self._view_model.history_limit)
-        )
-        ttk.Spinbox(
+        controls.columnconfigure(2, weight=1)
+        ttk.Label(
             controls,
-            from_=2,
-            to=10000,
-            width=7,
-            textvariable=self._history_limit,
-        ).grid(row=0, column=3)
-        ttk.Label(controls, text="readings").grid(
-            row=0, column=4, padx=(4, 4)
+            text=("■ SET: double-click VALUE, type, press Enter   •   "
+                  "double-click DEVICE/CHANNEL for trend"),
+            font=("Segoe UI", 9, "bold"),
+        ).grid(row=0, column=2, padx=18)
+        ttk.Button(controls, text="Enter safe state — all devices",
+                   command=self._enter_global_safe_state).grid(row=0, column=3)
+        self._action_status = ttk.Label(controls, text="Ready")
+        self._action_status.grid(
+            row=1, column=0, columnspan=4, sticky="w", pady=(6, 0)
         )
-        ttk.Button(
-            controls,
-            text="Apply",
-            command=self._apply_history_limit,
-        ).grid(row=0, column=5)
 
-        body = ttk.PanedWindow(monitoring, orient="vertical")
-        body.grid(row=1, column=0, sticky="nsew")
+        left = ttk.Frame(body, style="Blueprint.TFrame")
+        left.grid(row=1, column=0, sticky="nsew", padx=(0, 12))
+        left.columnconfigure(0, weight=1)
+        left.rowconfigure(0, weight=1)
+        tabs = ttk.Notebook(left, style="Blueprint.TNotebook")
+        tabs.grid(row=0, column=0, sticky="nsew")
+        for system, label in [(None, "OVERVIEW"), *[(value, value.upper()) for value in self._view_model.systems()]]:
+            frame = ttk.Frame(tabs, padding=(0, 8, 0, 0), style="Blueprint.TFrame")
+            frame.columnconfigure(0, weight=1)
+            frame.rowconfigure(0, weight=1)
+            tree = self._create_channel_tree(frame, system)
+            self._channel_trees[system] = tree
+            tabs.add(frame, text=label)
+        self._measurements = self._channel_trees[None]
 
-        live = ttk.LabelFrame(body, text="Live measurements", padding=8)
-        live.columnconfigure(0, weight=1)
-        live.rowconfigure(0, weight=1)
-        self._measurements = ttk.Treeview(
-            live,
-            columns=("device", "channel", "value", "unit", "quality", "time"),
-            show="headings",
-            height=10,
-        )
-        for column, heading, width in (
-            ("device", "Device", 170),
-            ("channel", "Measurement", 170),
-            ("value", "Value", 90),
-            ("unit", "Unit", 90),
-            ("quality", "Quality", 90),
-            ("time", "Updated", 210),
-        ):
-            self._measurements.heading(column, text=heading)
-            self._measurements.column(column, width=width, anchor="w")
-        self._measurements.grid(row=0, column=0, sticky="nsew")
-        measurement_scroll = ttk.Scrollbar(
-            live, orient="vertical", command=self._measurements.yview
-        )
-        measurement_scroll.grid(row=0, column=1, sticky="ns")
-        self._measurements.configure(yscrollcommand=measurement_scroll.set)
-        self._measurements.bind("<Double-1>", self._open_selected_trend)
-
-        lower = ttk.Frame(body)
-        lower.columnconfigure(0, weight=1)
-        lower.columnconfigure(1, weight=1)
-        lower.rowconfigure(0, weight=1)
-        body.add(live, weight=3)
-        body.add(lower, weight=2)
-
-        warnings_frame = ttk.LabelFrame(lower, text="Persistent warnings", padding=8)
-        warnings_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        warnings_frame = ttk.LabelFrame(left, text="PERSISTENT WARNINGS", padding=8)
+        warnings_frame.grid(row=1, column=0, sticky="ew", pady=(10, 0))
         warnings_frame.columnconfigure(0, weight=1)
-        warnings_frame.rowconfigure(0, weight=1)
         self._warnings = tk.Listbox(
             warnings_frame,
             foreground=ERROR_TEXT,
+            background=paper,
             exportselection=False,
+            height=3,
         )
         self._warnings.grid(row=0, column=0, sticky="nsew")
         warning_vertical = ttk.Scrollbar(
@@ -181,14 +172,14 @@ class OperationWindow:
             command=self._copy_warnings,
         ).grid(row=2, column=0, sticky="w", pady=(6, 0))
 
-        recording = ttk.LabelFrame(lower, text="Experiment recording", padding=8)
-        recording.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        recording = ttk.LabelFrame(body, text="EXPERIMENT RECORDING", padding=12)
+        recording.grid(row=1, column=1, sticky="nsew")
         recording.columnconfigure(1, weight=1)
         fields = (
             ("Experiment ID", "experiment_id"),
             ("Operator", "operator"),
             ("Output folder", "output"),
-            ("Sample interval (s)", "interval"),
+            ("Recording interval (s)", "interval"),
             ("Notes", "notes"),
         )
         self._entries: dict[str, ttk.Entry] = {}
@@ -214,12 +205,48 @@ class OperationWindow:
             actions, text="Not recording", font=SECTION_FONT
         )
         self._recording_status.grid(row=0, column=1, padx=(12, 0))
+        ttk.Label(
+            recording,
+            text=("Saved-snapshot interval only. Device polling intervals "
+                  "are configured independently in the rig profile."),
+            wraplength=280,
+        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(10, 0))
 
-        self._manual_panel = ManualControlPanel(
-            tabs,
-            self._view_model.manual_control,
+        for text, x, y, anchor in (("┌", 2, 2, "nw"), ("┐", 1, 2, "ne"),
+                                    ("└", 2, 1, "sw"), ("┘", 1, 1, "se")):
+            ttk.Label(main, text=text, style="Blueprint.TLabel").place(
+                relx=x if x == 1 else 0, rely=y if y == 1 else 0,
+                x=4 if x == 2 else -4, y=4 if y == 2 else -4, anchor=anchor)
+
+    def _create_channel_tree(self, parent: ttk.Frame, system: str | None) -> ttk.Treeview:
+        tree = ttk.Treeview(
+            parent,
+            columns=("device", "channel", "access", "value", "unit", "quality", "time"),
+            show="headings", height=14, style="Blueprint.Treeview",
         )
-        tabs.add(self._manual_panel, text="Manual control")
+        for column, heading, width, anchor in (
+            ("device", "DEVICE", 165, "w"),
+            ("channel", "CHANNEL", 180, "w"),
+            ("access", "ACCESS", 70, "w"),
+            ("value", "VALUE", 105, "e"),
+            ("unit", "UNIT", 75, "w"),
+            ("quality", "QUALITY", 75, "w"),
+            ("time", "LAST UPDATED", 165, "w"),
+        ):
+            tree.heading(column, text=heading)
+            tree.column(column, width=width, anchor=anchor)
+        tree.grid(row=0, column=0, sticky="nsew")
+        scroll = ttk.Scrollbar(parent, orient="vertical", command=tree.yview)
+        scroll.grid(row=0, column=1, sticky="ns")
+        horizontal = ttk.Scrollbar(parent, orient="horizontal", command=tree.xview)
+        horizontal.grid(row=1, column=0, sticky="ew")
+        tree.configure(yscrollcommand=scroll.set, xscrollcommand=horizontal.set)
+        tree.bind(
+            "<Double-1>",
+            lambda event, selected=system: self._handle_channel_double_click(event, selected),
+        )
+        tree.tag_configure("stale", foreground=ERROR_TEXT)
+        return tree
 
     def _connect_all(self) -> None:
         if self._connection_in_progress:
@@ -240,7 +267,6 @@ class OperationWindow:
     ) -> None:
         self._connection_in_progress = False
         self._connect_button.configure(state="normal")
-        self._manual_panel.refresh()
         failures = [result.summary for result in results if not result.succeeded]
         if failures:
             messagebox.showerror(
@@ -252,6 +278,7 @@ class OperationWindow:
                 "All configured devices connected successfully.",
                 parent=self._root,
             )
+        self._update_display()
 
     def _toggle_monitoring(self) -> None:
         result = (
@@ -270,8 +297,8 @@ class OperationWindow:
                 interval = float(self._entries["interval"].get().strip())
             except ValueError:
                 messagebox.showerror(
-                    "Invalid sample interval",
-                    "Sample interval must be a number of seconds.",
+                    "Invalid recording interval",
+                    "Recording interval must be a number of seconds.",
                     parent=self._root,
                 )
                 return
@@ -291,24 +318,31 @@ class OperationWindow:
             self._entries["output"].delete(0, "end")
             self._entries["output"].insert(0, selected)
 
-    def _apply_history_limit(self) -> None:
-        try:
-            value = int(self._history_limit.get().strip())
-            self._view_model.set_history_limit(value)
-        except (TypeError, ValueError) as error:
-            messagebox.showerror(
-                "Invalid trend history",
-                str(error),
-                parent=self._root,
-            )
-            self._history_limit.set(str(self._view_model.history_limit))
-            return
-        self._history_limit.set(str(self._view_model.history_limit))
+    def _handle_channel_double_click(self, event: tk.Event, system: str | None) -> str:
+        tree = self._channel_trees[system]
+        column = tree.identify_column(event.x)
+        item_id = tree.identify_row(event.y)
+        key = self._tree_item_keys.get((system, item_id))
+        row = self._channel_rows.get(key) if key is not None else None
+        if row is not None and getattr(row, "editor", None) == "action":
+            self._begin_cell_edit(event, system)
+            return "break"
+        if column == "#4" and row is not None and row.writable:
+            self._begin_cell_edit(event, system)
+            return "break"
+        if column in {"#1", "#2"} or (
+            column == "#4" and row is not None and not row.writable
+        ):
+            self._open_selected_trend(event, system)
+        return "break"
 
-    def _open_selected_trend(self, event: tk.Event) -> None:
-        item_id = self._measurements.identify_row(event.y)
-        key = self._measurement_keys.get(item_id)
+    def _open_selected_trend(self, event: tk.Event, system: str | None = None) -> None:
+        tree = self._channel_trees.get(system, self._measurements)
+        item_id = tree.identify_row(event.y)
+        key = self._tree_item_keys.get((system, item_id), self._measurement_keys.get(item_id))
         if key is None:
+            return
+        if not self._view_model.measurement_history(*key):
             return
 
         existing = self._trend_windows.get(key)
@@ -332,9 +366,110 @@ class OperationWindow:
                 selected_key,
                 None,
             ),
+            history_limit=self._view_model.history_limit,
         )
 
+    def _begin_cell_edit(self, event: tk.Event, system: str | None) -> None:
+        tree = self._channel_trees[system]
+        item_id = tree.identify_row(event.y)
+        key = self._tree_item_keys.get((system, item_id))
+        row = self._channel_rows.get(key) if key is not None else None
+        if row is None or not row.writable:
+            return
+        if row.editor == "action":
+            result = self._view_model.apply_channel_value(
+                row.device_id, row.channel, True
+            )
+            self._show_result(result)
+            self._update_display()
+            return
+        if tree.identify_column(event.x) != "#4":
+            self._cancel_cell_edit()
+            return
+        box = tree.bbox(item_id, "value")
+        if not box:
+            return
+        self._cancel_cell_edit()
+        x, y, width, height = box
+        if row.editor in {"boolean", "mode"}:
+            choices = (
+                ("On", "Off") if row.editor == "boolean"
+                else ("constant_voltage", "constant_current")
+            )
+            editor = ttk.Combobox(tree, values=choices, state="readonly")
+            if row.editor == "boolean":
+                editor.set("On" if row.value else "Off")
+            else:
+                editor.set(str(row.value))
+            editor.place(x=x, y=y, width=width, height=height)
+            editor.bind(
+                "<<ComboboxSelected>>",
+                lambda _event, selected=row, widget=editor:
+                self._commit_cell_edit(selected, widget),
+            )
+            editor.bind("<Escape>", lambda _event: self._cancel_cell_edit())
+            editor.focus_set()
+            self._editor = editor
+            self._editor_apply = None
+            return
+        else:
+            editor = ttk.Entry(tree, font=("Consolas", 9))
+            editor.insert(0, "" if row.value is None else format(float(row.value), ".6g"))
+            editor.selection_range(0, "end")
+        editor.place(x=x, y=y, width=width, height=height)
+        editor.bind("<Escape>", lambda _event: self._cancel_cell_edit())
+        editor.bind("<Return>", lambda _event, selected=row, widget=editor:
+                    self._commit_cell_edit(selected, widget))
+        editor.focus_set()
+        self._editor = editor
+        self._editor_apply = None
+
+    def _commit_cell_edit(self, row: OperationChannelRow, editor: tk.Widget) -> str:
+        text = str(editor.get()).strip()  # type: ignore[attr-defined]
+        try:
+            if row.editor == "boolean":
+                value: float | bool | str = text == "On"
+                if value and not messagebox.askyesno(
+                    "Confirm output enable",
+                    f"Enable output for {row.device_name!r}?\n\nConfirm wiring and limits are safe.",
+                    parent=self._root,
+                ):
+                    self._cancel_cell_edit()
+                    return "break"
+            elif row.editor == "mode":
+                value = text
+            else:
+                value = float(text)
+                if row.minimum is not None and value < row.minimum:
+                    raise ValueError(f"Value must be at least {row.minimum:g} {row.unit}")
+                if row.maximum is not None and value > row.maximum:
+                    raise ValueError(f"Value must not exceed {row.maximum:g} {row.unit}")
+        except ValueError as error:
+            messagebox.showerror("Invalid value", str(error), parent=self._root)
+            return "break"
+        result = self._view_model.apply_channel_value(row.device_id, row.channel, value)
+        self._cancel_cell_edit()
+        self._show_result(result)
+        self._update_display()
+        return "break"
+
+    def _cancel_cell_edit(self) -> str:
+        for widget in (self._editor, self._editor_apply):
+            if widget is not None:
+                widget.destroy()
+        self._editor = None
+        self._editor_apply = None
+        return "break"
+
+    def _enter_global_safe_state(self) -> None:
+        result = self._view_model.manual_control.enter_global_safe_state()
+        wrapped = OperationActionResult(result.succeeded, result.summary, result.technical_details)
+        self._show_result(wrapped)
+        self._update_display()
+
     def _show_result(self, result: OperationActionResult) -> None:
+        if hasattr(self, "_action_status"):
+            self._action_status.configure(text=result.summary)
         if not result.succeeded:
             messagebox.showerror("Operation failed", result.summary, parent=self._root)
 
@@ -382,7 +517,6 @@ class OperationWindow:
             collected = self._view_model.collect_polling_results()
             if collected:
                 self._update_display(refresh_trends=True)
-                self._manual_panel.refresh()
         except Exception as error:
             self._ui_tick_failure_count += 1
             if not self._refresh_failed:
@@ -424,38 +558,83 @@ class OperationWindow:
             pass
 
     def _update_display(self, *, refresh_trends: bool = False) -> None:
-        current_keys: set[tuple[str, str]] = set()
-        for row in self._view_model.measurement_rows():
-            key = (row.device_id, row.channel)
-            current_keys.add(key)
-            values = (
-                row.device_id,
-                row.channel.replace("_", " ").title(),
-                format(row.value, ".6g"),
-                row.unit,
-                row.quality.upper(),
-                row.timestamp.astimezone().isoformat(timespec="seconds"),
-            )
-            item_id = self._measurement_items.get(key)
-            if item_id is None:
-                item_id = f"measurement-{self._next_measurement_item}"
-                self._next_measurement_item += 1
-                self._measurement_items[key] = item_id
-                self._measurement_keys[item_id] = key
-                self._measurement_values[key] = values
-                self._measurements.insert("", "end", iid=item_id, values=values)
-                self._measurement_rows_created += 1
-            elif self._measurement_values.get(key) != values:
-                self._measurements.item(item_id, values=values)
-                self._measurement_values[key] = values
-                self._measurement_rows_updated += 1
+        channel_rows = (
+            self._view_model.channel_rows()
+            if hasattr(self._view_model, "channel_rows")
+            else self._view_model.measurement_rows()
+        )
+        self._channel_rows = {
+            (row.device_id, row.channel): row for row in channel_rows
+        }
+        if not hasattr(self, "_tree_item_keys"):
+            self._tree_item_keys = {}
+        trees = getattr(self, "_channel_trees", {None: self._measurements})
+        for system, tree in trees.items():
+            current_keys: set[tuple[str, str]] = set()
+            rows = channel_rows if system is None else self._view_model.channel_rows(system)
+            for row in rows:
+                key = (row.device_id, row.channel)
+                current_keys.add(key)
+                writable = getattr(row, "writable", False)
+                channel_name = getattr(row, "channel_name", row.channel.replace("_", " ").title())
+                value = row.value
+                if isinstance(value, bool):
+                    value_text = "On" if value else "Off"
+                elif isinstance(value, str):
+                    value_text = value.replace("_", " ").title()
+                elif value is None:
+                    value_text = "—"
+                else:
+                    value_text = format(value, ".6g")
+                timestamp = getattr(row, "timestamp", None)
+                values = (
+                    getattr(row, "device_name", row.device_id),
+                    ("■ " if writable else "") + channel_name,
+                    "ACTION" if getattr(row, "editor", "") == "action"
+                    else ("SET" if writable else "READ"),
+                    value_text,
+                    row.unit,
+                    row.quality.capitalize() if row.quality else "—",
+                    timestamp.astimezone().isoformat(timespec="seconds") if timestamp else "—",
+                )
+                scoped_key = key if system is None else (f"{system}:{key[0]}", key[1])
+                item_id = self._measurement_items.get(scoped_key)
+                if item_id is None:
+                    item_id = f"measurement-{self._next_measurement_item}"
+                    self._next_measurement_item += 1
+                    self._measurement_items[scoped_key] = item_id
+                    self._measurement_keys[item_id] = key
+                    self._tree_item_keys[(system, item_id)] = key
+                    self._measurement_values[scoped_key] = values
+                    try:
+                        tree.insert("", "end", iid=item_id, values=values,
+                                    tags=("stale",) if row.quality and row.quality != "good" else ())
+                    except TypeError:  # Lightweight test doubles.
+                        tree.insert("", "end", iid=item_id, values=values)
+                    self._measurement_rows_created += 1
+                elif self._measurement_values.get(scoped_key) != values:
+                    try:
+                        tree.item(item_id, values=values,
+                                  tags=("stale",) if row.quality and row.quality != "good" else ())
+                    except TypeError:  # Lightweight test doubles.
+                        tree.item(item_id, values=values)
+                    self._measurement_values[scoped_key] = values
+                    self._measurement_rows_updated += 1
 
-        for key in set(self._measurement_items) - current_keys:
-            item_id = self._measurement_items.pop(key)
-            self._measurements.delete(item_id)
-            self._measurement_keys.pop(item_id, None)
-            self._measurement_values.pop(key, None)
-            self._measurement_rows_deleted += 1
+            prefix = "" if system is None else f"{system}:"
+            existing = {
+                key for key in self._measurement_items
+                if (system is None and not str(key[0]).startswith(tuple(f"{s}:" for s in trees if s)))
+                or (system is not None and str(key[0]).startswith(prefix))
+            }
+            desired = current_keys if system is None else {(f"{system}:{key[0]}", key[1]) for key in current_keys}
+            for scoped_key in existing - desired:
+                item_id = self._measurement_items.pop(scoped_key)
+                tree.delete(item_id)
+                self._measurement_keys.pop(item_id, None)
+                self._tree_item_keys.pop((system, item_id), None)
+                self._measurement_values.pop(scoped_key, None)
+                self._measurement_rows_deleted += 1
 
         warnings = tuple(self._view_model.warnings())
         if warnings != self._displayed_warnings:

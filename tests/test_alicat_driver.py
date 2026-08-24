@@ -123,6 +123,27 @@ def test_measurement_preserves_instrument_time_quality_and_units() -> None:
     assert measurement.quality is Quality.UNCERTAIN
 
 
+def test_measurement_read_retries_a_temporary_transport_failure() -> None:
+    class FlakyProtocol(FakeAlicatProtocol):
+        failures_remaining = 0
+
+        def read_state(self, unit_address: str) -> AlicatInstrumentState:
+            if self.failures_remaining:
+                self.failures_remaining -= 1
+                self.read_addresses.append(unit_address)
+                raise OSError("temporary serial glitch")
+            return super().read_state(unit_address)
+
+    protocol = FlakyProtocol([state(), state(mass_flow=33)])
+    driver = make_driver(protocol)
+    driver._read_retry_delay_seconds = 0
+    driver.connect()
+    protocol.failures_remaining = 1
+
+    assert driver.measure_flow().value == 33
+    assert protocol.read_addresses == ["A", "A", "A"]
+
+
 def test_current_state_exposes_all_supported_status_values() -> None:
     instrument_state = state()
     driver = make_driver(FakeAlicatProtocol([instrument_state]))

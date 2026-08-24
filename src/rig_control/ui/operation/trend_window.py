@@ -1,9 +1,26 @@
+from __future__ import annotations
+
 import tkinter as tk
 from collections.abc import Callable
 from tkinter import ttk
 from typing import Protocol
 
 from rig_control.ui.common.theme import ERROR_TEXT, INFO_TEXT, MUTED_TEXT, TITLE_FONT
+
+
+MAX_RENDERED_POINTS = 2_000
+
+
+def subsample_readings(readings: tuple[TrendReading, ...], limit: int = MAX_RENDERED_POINTS):
+    """Thin display data evenly while preserving both endpoints."""
+
+    if len(readings) <= limit:
+        return readings
+    step = (len(readings) - 1) / (limit - 1)
+    indices = [round(index * step) for index in range(limit)]
+    indices[0] = 0
+    indices[-1] = len(readings) - 1
+    return tuple(readings[index] for index in indices)
 
 
 class TrendReading(Protocol):
@@ -40,7 +57,8 @@ class TrendChart(ttk.Frame):
         self._canvas.bind("<Configure>", lambda _event: self.refresh())
 
     def refresh(self) -> None:
-        readings = self._history_provider()
+        retained = self._history_provider()
+        readings = subsample_readings(retained)
         self._canvas.delete("all")
         width = max(self._canvas.winfo_width(), 100)
         height = max(self._canvas.winfo_height(), 100)
@@ -60,7 +78,8 @@ class TrendChart(ttk.Frame):
             text=(
                 f"Current: {latest.value:.6g} {latest.unit}  |  "
                 f"Quality: {latest.quality.upper()}  |  "
-                f"{len(readings)} retained readings"
+                f"{len(retained)} retained readings"
+                + (f"  |  {len(readings)} displayed" if len(readings) < len(retained) else "")
             )
         )
 
@@ -139,6 +158,7 @@ class TrendWindow:
         channel: str,
         history_provider: Callable[[], tuple[TrendReading, ...]],
         on_close: Callable[[], None],
+        history_limit: int = 120,
     ) -> None:
         self._on_close = on_close
         self._window = tk.Toplevel(parent)
@@ -160,14 +180,30 @@ class TrendWindow:
             text=f"{device_id} — {channel.replace('_', ' ').title()}",
             font=TITLE_FONT,
         ).grid(row=0, column=0, sticky="w")
+        ttk.Label(heading, text="History:").grid(row=0, column=1, padx=(12, 4))
+        self._history_limit = tk.StringVar(value=str(history_limit))
+        ttk.Spinbox(
+            heading, from_=2, to=max(history_limit, 2), width=7,
+            textvariable=self._history_limit, command=self.refresh,
+        ).grid(row=0, column=2)
+        ttk.Label(heading, text="readings").grid(row=0, column=3, padx=(4, 0))
+        self._history_provider = history_provider
         self._chart = TrendChart(
             self._window,
-            history_provider=history_provider,
+            history_provider=self._visible_history,
         )
         self._chart.grid(
             row=1, column=0, sticky="nsew", padx=12, pady=(4, 12)
         )
         self.refresh()
+
+    def _visible_history(self) -> tuple[TrendReading, ...]:
+        readings = self._history_provider()
+        try:
+            limit = max(2, int(self._history_limit.get()))
+        except ValueError:
+            limit = len(readings) or 2
+        return readings[-limit:]
 
     @property
     def exists(self) -> bool:

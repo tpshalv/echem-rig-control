@@ -1,5 +1,6 @@
 from collections import deque
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -7,11 +8,16 @@ from rig_control.data.in_memory_writer import InMemoryExperimentWriter
 from rig_control.data.records import MeasurementRecord
 from rig_control.devices.manager import DeviceManager
 from rig_control.devices.simulated_sensor import SimulatedSensor
+from rig_control.devices.simulated_mfc import SimulatedMassFlowController
+from rig_control.devices.simulated_power_supply import SimulatedPowerSupply
+from rig_control.devices.mass_flow_controller import MassFlowControllerLimits
+from rig_control.devices.power_supply import PowerSupplyLimits
 from rig_control.experiment_recording import ExperimentRecorder
 from rig_control.models import Event, Measurement, Quality
 from rig_control.polling import PollingBatch, PollingFailure, PollingService
 from rig_control.control.service import RigControlService
-from rig_control.ui.operation.model import OperationViewModel
+from rig_control.ui.operation.model import LiveMeasurementRow, OperationViewModel
+from rig_control.rig_profile import DeviceBackend, DeviceCapability, DeviceRole, RigProfile
 
 
 FIXED_TIME = datetime(2026, 8, 18, 15, 0, tzinfo=UTC)
@@ -291,3 +297,95 @@ def test_shutdown_stops_feature_services_but_leaves_session_devices_connected() 
     assert failures == ()
     assert model.is_monitoring is False
     assert manager.summaries()[0].status.value == "ready"
+
+
+def test_unified_channels_separate_measurements_from_limits_and_setpoints() -> None:
+    manager = DeviceManager()
+    manager.register(SimulatedPowerSupply("supply", PowerSupplyLimits(30, 5, 100)))
+    manager.register(SimulatedMassFlowController(
+        "mfc", MassFlowControllerLimits(2000, "sccm")
+    ))
+    writer = InMemoryExperimentWriter()
+    recorder = ExperimentRecorder(writer_factory=lambda _root: writer)
+    polling = PollingService(manager, interval_seconds=60, batch_handler=recorder.record_batch)
+    profile = RigProfile("rig", "Rig", (
+        DeviceRole("supply", "Main supply", DeviceCapability.DC_POWER_SUPPLY,
+                   "simulated", DeviceBackend.SIMULATED),
+        DeviceRole("mfc", "Hydrogen MFC", DeviceCapability.MASS_FLOW_CONTROLLER,
+                   "simulated", DeviceBackend.SIMULATED),
+    ))
+    model = OperationViewModel(
+        manager, polling, recorder, RigControlService(manager),
+        profile_id="rig", profile=profile,
+    )
+    model.connect_all()
+    model._measurements[("supply", "voltage")] = LiveMeasurementRow(
+        "supply", "voltage", 4.9, "V", "good", FIXED_TIME
+    )
+    model._measurements[("supply", "current")] = LiveMeasurementRow(
+        "supply", "current", 0.4, "A", "good", FIXED_TIME
+    )
+    model._measurements[("mfc", "mass_flow")] = LiveMeasurementRow(
+        "mfc", "mass_flow", 95, "sccm", "good", FIXED_TIME
+    )
+
+    rows = {(row.device_id, row.channel): row for row in model.channel_rows()}
+
+    assert model.systems() == ("Electrical", "Gas flow")
+    assert rows[("supply", "voltage")].writable is True
+    assert rows[("supply", "current")].writable is False
+    assert rows[("supply", "current_limit")].writable is True
+    assert rows[("mfc", "mass_flow")].writable is False
+    assert rows[("mfc", "setpoint")].writable is True
+def test_connected_device_channels_are_visible_before_monitoring_starts() -> None:
+    model, _, _, _ = make_model()
+
+    assert model.channel_rows() == ()
+    model.connect_all()
+    rows = model.channel_rows()
+
+    assert len(rows) == 1
+    assert rows[0].device_id == "temperature"
+    assert rows[0].channel == "measurement"
+    assert rows[0].value is None
+    assert rows[0].timestamp is None
+
+    model._measurements[("temperature", "measurement")] = LiveMeasurementRow(
+        "temperature", "measurement", 24.5, "degC", "good", FIXED_TIME
+    )
+    live_rows = model.channel_rows()
+
+    assert len(live_rows) == 1
+    assert live_rows[0].value == 24.5
+
+
+def test_explicit_profile_system_overrides_inferred_system() -> None:
+    model, manager, polling, _ = make_model()
+    profile = RigProfile("simulation", "Simulation", (
+        DeviceRole(
+            "temperature", "Chamber sensor", DeviceCapability.TEMPERATURE_SENSOR,
+            "simulated", DeviceBackend.SIMULATED, system="Environment",
+        ),
+    ))
+    overridden = OperationViewModel(
+        manager, polling, model._experiment_recorder,
+        RigControlService(manager), profile_id="simulation", profile=profile,
+    )
+
+    assert overridden.systems() == ("Environment",)
+
+
+def test_watchdog_rearm_uses_existing_manual_control_path() -> None:
+    model, _, _, _ = make_model()
+    calls = []
+    model.manual_control = SimpleNamespace(
+        rearm_controller=lambda device_id: (
+            calls.append(device_id)
+            or SimpleNamespace(succeeded=True, summary="Watchdog rearmed", technical_details=None)
+        )
+    )
+
+    result = model.apply_channel_value("esp32", "watchdog_rearm", True)
+
+    assert result.succeeded is True
+    assert calls == ["esp32"]

@@ -103,6 +103,21 @@ def test_supply_starts_disconnected() -> None:
     assert transport.is_open is False
 
 
+def test_measurement_read_retries_a_temporary_bad_reply() -> None:
+    transport = FakeScpiTransport()
+    queue_connection_responses(transport)
+    supply = Keithley2260B(
+        "main_power_supply", PowerSupplyLimits(30, 108, 1080), transport,
+        read_retry_delay_seconds=0,
+    )
+    supply.connect()
+    transport.queue_response(Keithley2260BProtocol.MEASURE_VOLTAGE_QUERY, "bad")
+    transport.queue_response(Keithley2260BProtocol.MEASURE_VOLTAGE_QUERY, "12.5")
+
+    assert supply.measure_voltage().value == pytest.approx(12.5)
+    assert transport.queries.count(Keithley2260BProtocol.MEASURE_VOLTAGE_QUERY) == 2
+
+
 def test_connect_reads_identity_and_current_instrument_state() -> None:
     transport = FakeScpiTransport()
     queue_connection_responses(

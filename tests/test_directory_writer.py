@@ -78,6 +78,19 @@ def read_json_lines(
     ]
 
 
+def test_writer_syncs_journals_to_disk(tmp_path: Path, monkeypatch) -> None:
+    syncs = []
+    monkeypatch.setattr("rig_control.data.directory_writer.os.fsync", syncs.append)
+    writer = DirectoryExperimentWriter(tmp_path)
+
+    writer.open_experiment(make_metadata())
+    writer.write_measurement(make_measurement_record())
+    writer.write_event(make_event())
+    writer.close_experiment()
+
+    assert len(syncs) >= 4
+
+
 def test_writer_starts_closed() -> None:
     writer = DirectoryExperimentWriter("unused")
 

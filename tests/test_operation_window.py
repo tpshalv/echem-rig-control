@@ -1,5 +1,6 @@
 from queue import Queue
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 from rig_control.ui.operation.model import LiveMeasurementRow
 from rig_control.ui.operation.window import OperationWindow
@@ -154,3 +155,55 @@ def test_measurement_display_updates_existing_rows_in_place() -> None:
     assert window._measurement_rows_created == 1
     assert window._measurement_rows_updated == 1
     assert window._measurement_rows_deleted == 1
+
+
+class InteractionTree:
+    def __init__(self, column: str) -> None:
+        self.column = column
+
+    def identify_column(self, _x) -> str:
+        return self.column
+
+    def identify_row(self, _y) -> str:
+        return "row"
+
+
+def test_double_click_on_set_value_edits_but_channel_opens_trend() -> None:
+    window = OperationWindow.__new__(OperationWindow)
+    tree = InteractionTree("#4")
+    window._channel_trees = {None: tree}
+    window._tree_item_keys = {(None, "row"): ("supply", "current_limit")}
+    window._channel_rows = {
+        ("supply", "current_limit"): SimpleNamespace(writable=True)
+    }
+    edited = []
+    trended = []
+    window._begin_cell_edit = lambda event, system: edited.append((event, system))
+    window._open_selected_trend = lambda event, system: trended.append((event, system))
+    event = SimpleNamespace(x=1, y=1)
+
+    window._handle_channel_double_click(event, None)
+    tree.column = "#2"
+    window._handle_channel_double_click(event, None)
+
+    assert len(edited) == 1
+    assert len(trended) == 1
+
+
+def test_watchdog_action_works_from_any_column() -> None:
+    window = OperationWindow.__new__(OperationWindow)
+    tree = InteractionTree("#1")
+    window._channel_trees = {None: tree}
+    window._tree_item_keys = {(None, "row"): ("esp32", "watchdog_rearm")}
+    window._channel_rows = {
+        ("esp32", "watchdog_rearm"): SimpleNamespace(
+            writable=True, editor="action"
+        )
+    }
+    actions = []
+    window._begin_cell_edit = lambda event, system: actions.append((event, system))
+    window._open_selected_trend = lambda event, system: None
+
+    window._handle_channel_double_click(SimpleNamespace(x=1, y=1), None)
+
+    assert len(actions) == 1

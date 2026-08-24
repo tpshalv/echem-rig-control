@@ -25,6 +25,14 @@ def _positive_number(value: object) -> AppSettingValue:
     return number
 
 
+def _history_limit(value: object) -> AppSettingValue:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("must be an integer")
+    if value < 2 or value > 100_000:
+        raise ValueError("must be between 2 and 100000")
+    return value
+
+
 def _non_empty_text(value: object) -> AppSettingValue:
     if not isinstance(value, str):
         raise TypeError("must be text")
@@ -34,6 +42,13 @@ def _non_empty_text(value: object) -> AppSettingValue:
 
 
 SETTING_DEFINITIONS = (
+    SettingDefinition(
+        key="trend_history_readings",
+        label="Default trend history (readings)",
+        description="Initial retained history for each newly opened trend chart.",
+        default=120,
+        validator=_history_limit,
+    ),
     SettingDefinition(
         key="publish_interval_seconds",
         label="Screen publish interval (seconds)",
@@ -95,6 +110,10 @@ class AppSettings:
     @property
     def technical_log_path(self) -> str:
         return str(self.values["technical_log_path"])
+
+    @property
+    def trend_history_readings(self) -> int:
+        return int(self.values["trend_history_readings"])
 
 
 def default_app_settings() -> AppSettings:

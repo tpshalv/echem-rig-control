@@ -200,3 +200,29 @@ def test_client_rejects_sensor_response_without_channel_list() -> None:
 
     with pytest.raises(RuntimeError, match="channel list"):
         client.read_sensors()
+
+
+def test_sensor_read_retries_a_temporary_receive_failure() -> None:
+    transport = SimulatedDuplexTextTransport()
+    transport.connect()
+    client = ControllerClient(transport, read_retry_delay_seconds=0)
+    original_receive = transport.receive
+    attempts = 0
+
+    def flaky_receive() -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("temporary USB glitch")
+        request = sent_request(transport)
+        queue_response(
+            transport, reply_to=request.message_id,
+            payload={"channels": []},
+        )
+        return original_receive()
+
+    transport.receive = flaky_receive  # type: ignore[method-assign]
+
+    assert client.read_sensors() == []
+    assert attempts == 2
+    assert len(transport.sent_messages) == 2

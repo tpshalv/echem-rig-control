@@ -5,7 +5,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from rig_control.app_selection import load_app_selection
-from rig_control.ui.common.theme import SECTION_FONT, TITLE_FONT
+from rig_control.ui.common.theme import SECTION_FONT, TITLE_FONT, apply_blueprint_theme
 from rig_control.ui.device_setup.model import DeviceSetupViewModel
 from rig_control.ui.device_setup.window import DeviceSetupWindow
 from rig_control.ui.diagnostics.model import DiagnosticViewModel
@@ -25,6 +25,7 @@ class HomeWindow:
     """Single launcher and owner-facing view for the rig application."""
 
     def __init__(self, root: tk.Tk, view_model: HomeViewModel) -> None:
+        apply_blueprint_theme(root)
         self._root = root
         self._view_model = view_model
         self._operation_child: tk.Toplevel | None = None
@@ -217,6 +218,8 @@ class HomeWindow:
             session.experiment_recorder,
             session.control_service,
             profile_id=session.profile.profile_id,
+            profile=session.profile,
+            history_limit=session.settings.trend_history_readings,
         )
         window = OperationWindow(
             child,

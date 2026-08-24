@@ -12,6 +12,7 @@ def test_defaults_are_safe_and_explicit() -> None:
 
     assert settings.publish_interval_seconds == 1.0
     assert settings.technical_log_path == "logs/rig-control.log"
+    assert settings.trend_history_readings == 120
 
 
 def test_default_settings_file_loads() -> None:

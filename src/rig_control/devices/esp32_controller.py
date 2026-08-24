@@ -93,6 +93,7 @@ class Esp32Controller(Device):
         with self._lock:
             self._bus.rearm()
             self._controller_status = self._bus.get_status()
+            self._controller_status = self._bus.get_status()
 
     def enter_safe_state(self) -> None:
         with self._lock:

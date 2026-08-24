@@ -64,6 +64,7 @@ def test_controller_rearms_controls_output_and_disconnects_safe() -> None:
 
     controller.connect()
     controller.rearm()
+    assert controller.controller_status["watchdog_tripped"] is False
     controller.set_output("led", True)
 
     assert controller.status is DeviceStatus.READY

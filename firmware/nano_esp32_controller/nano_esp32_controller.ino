@@ -128,6 +128,12 @@ void applySafeState() {
 // ============================================================
 
 bool watchdogCurrentlyExpired() {
+  // Startup is already physically safe. Communication supervision only
+  // becomes meaningful after the PC has established contact at least once.
+  if (!heartbeatReceived) {
+    return false;
+  }
+
   // Unsigned subtraction handles millis() rollover correctly.
   uint32_t elapsed = (uint32_t)(millis() - lastHeartbeatMs);
 
@@ -726,10 +732,9 @@ void setup() {
   inputLine.reserve(MAX_LINE_LENGTH);
 
 
-  // Watchdog timing starts immediately at boot.
-  //
-  // If no heartbeat is received within the configured timeout,
-  // watchdogTripped will latch.
+  // Keep a valid initial timestamp, but do not arm communication-loss
+  // supervision until the first heartbeat is received. Power-up is already
+  // safe, and outputs cannot be enabled before that first heartbeat.
   lastHeartbeatMs = millis();
 }
 

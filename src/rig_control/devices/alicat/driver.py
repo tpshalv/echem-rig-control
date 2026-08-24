@@ -11,6 +11,7 @@ from rig_control.devices.mass_flow_controller import (
 )
 from rig_control.devices.measurement_source import DeviceMeasurement
 from rig_control.models import DeviceStatus, Measurement
+from rig_control.read_retry import retry_read
 
 
 class AlicatMassFlowController(MassFlowController):
@@ -20,6 +21,9 @@ class AlicatMassFlowController(MassFlowController):
         self,
         configuration: AlicatMfcConfiguration,
         protocol: AlicatProtocolClient,
+        *,
+        read_attempts: int = 3,
+        read_retry_delay_seconds: float = 0.05,
     ) -> None:
         if not isinstance(configuration, AlicatMfcConfiguration):
             raise TypeError("configuration must be AlicatMfcConfiguration")
@@ -30,6 +34,8 @@ class AlicatMassFlowController(MassFlowController):
         self._protocol = protocol
         self._status = DeviceStatus.DISCONNECTED
         self._state: AlicatInstrumentState | None = None
+        self._read_attempts = read_attempts
+        self._read_retry_delay_seconds = read_retry_delay_seconds
 
     @property
     def device_id(self) -> str:
@@ -104,7 +110,7 @@ class AlicatMassFlowController(MassFlowController):
 
     def measure_flow(self) -> Measurement:
         self._require_ready()
-        state = self._refresh_state("read state")
+        state = self._refresh_state("read state", retry=True)
         return Measurement(
             value=state.mass_flow,
             unit=state.mass_flow_unit,
@@ -116,7 +122,7 @@ class AlicatMassFlowController(MassFlowController):
         """Read one status frame and expose all numeric Alicat channels."""
 
         self._require_ready()
-        state = self._refresh_state("read state")
+        state = self._refresh_state("read state", retry=True)
         values = [
             DeviceMeasurement(
                 "mass_flow",
@@ -183,9 +189,14 @@ class AlicatMassFlowController(MassFlowController):
             return
         self.set_flow_setpoint(0.0)
 
-    def _refresh_state(self, operation: str) -> AlicatInstrumentState:
+    def _refresh_state(self, operation: str, *, retry: bool = False) -> AlicatInstrumentState:
         try:
-            state = self._protocol.read_state(self.unit_address)
+            read = lambda: self._protocol.read_state(self.unit_address)
+            state = retry_read(
+                read,
+                attempts=self._read_attempts,
+                initial_delay_seconds=self._read_retry_delay_seconds,
+            ) if retry else read()
         except Exception as error:
             self._status = DeviceStatus.FAULTED
             raise self._operation_error(operation, error) from error

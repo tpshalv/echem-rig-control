@@ -2,6 +2,7 @@ from typing import Any
 
 from rig_control.esp32.protocol import Message, MessageType
 from rig_control.transports.duplex_text import DuplexTextTransport
+from rig_control.read_retry import retry_read
 
 
 class ControllerCommandError(RuntimeError):
@@ -11,8 +12,16 @@ class ControllerCommandError(RuntimeError):
 class ControllerClient:
     """PC-side interface for sending commands to a controller."""
 
-    def __init__(self, transport: DuplexTextTransport) -> None:
+    def __init__(
+        self,
+        transport: DuplexTextTransport,
+        *,
+        read_attempts: int = 3,
+        read_retry_delay_seconds: float = 0.05,
+    ) -> None:
         self._transport = transport
+        self._read_attempts = read_attempts
+        self._read_retry_delay_seconds = read_retry_delay_seconds
 
     def identify(self) -> dict[str, Any]:
         """Return the remote controller's identity information."""
@@ -41,7 +50,11 @@ class ControllerClient:
         return self._request("status")
 
     def read_sensors(self) -> list[dict[str, Any]]:
-        payload = self._request("read_sensors")
+        payload = retry_read(
+            lambda: self._request("read_sensors"),
+            attempts=self._read_attempts,
+            initial_delay_seconds=self._read_retry_delay_seconds,
+        )
         channels = payload.get("channels")
         if not isinstance(channels, list):
             raise RuntimeError("Controller sensor response has no channel list")

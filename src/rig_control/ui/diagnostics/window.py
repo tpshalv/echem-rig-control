@@ -39,16 +39,18 @@ class DiagnosticWindow:
         self._technical_details: list[str] = []
         self._action_results: Queue[DiagnosticActionResult] = Queue()
         self._action_in_progress = False
+        self._last_health_timestamp: datetime | None = None
+        self._after_id: str | None = None
 
         self._configure_window()
         self._create_widgets()
         self.refresh()
-        self._root.after(100, self._poll_action_results)
+        self._schedule_update()
 
     def _configure_window(self) -> None:
         self._root.title("Echem Rig Control — Diagnostics")
-        self._root.geometry("850x550")
-        self._root.minsize(700, 450)
+        self._root.geometry("950x780")
+        self._root.minsize(760, 620)
 
         self._root.columnconfigure(0, weight=1)
         self._root.rowconfigure(0, weight=1)
@@ -62,7 +64,7 @@ class DiagnosticWindow:
         )
         main.columnconfigure(0, weight=1)
         main.rowconfigure(1, weight=1)
-        main.rowconfigure(4, weight=1)
+        main.rowconfigure(6, weight=1)
 
         title = ttk.Label(
             main,
@@ -177,13 +179,23 @@ class DiagnosticWindow:
             command=self.refresh,
         ).grid(row=0, column=3)
 
+        health = ttk.LabelFrame(main, text="Runtime health", padding=8)
+        health.grid(row=3, column=0, sticky="ew", pady=(0, 10))
+        health.columnconfigure(0, weight=1)
+        self._health_summary = ttk.Label(
+            health,
+            text="Waiting for health sample",
+            justify="left",
+        )
+        self._health_summary.grid(row=0, column=0, sticky="w")
+
         details_label = ttk.Label(
             main,
             text="Diagnostic details",
             font=SECTION_FONT,
         )
         details_label.grid(
-            row=3,
+            row=5,
             column=0,
             sticky="w",
             pady=(6, 4),
@@ -196,7 +208,7 @@ class DiagnosticWindow:
             font=MONOSPACE_FONT,
         )
         self._details.grid(
-            row=4,
+            row=6,
             column=0,
             sticky="nsew",
         )
@@ -204,7 +216,7 @@ class DiagnosticWindow:
 
         details_buttons = ttk.Frame(main)
         details_buttons.grid(
-            row=5,
+            row=7,
             column=0,
             sticky="w",
             pady=(8, 0),
@@ -297,7 +309,63 @@ class DiagnosticWindow:
             self._test_button.configure(state="normal")
             self._display_result(result)
             self.refresh()
-        self._root.after(100, self._poll_action_results)
+        self._refresh_runtime_health()
+        self._schedule_update()
+
+    def _schedule_update(self) -> None:
+        self._after_id = self._root.after(100, self._poll_action_results)
+
+    def cancel_updates(self) -> None:
+        if self._after_id is None:
+            return
+        try:
+            self._root.after_cancel(self._after_id)
+        except tk.TclError:
+            pass
+        self._after_id = None
+
+    def _refresh_runtime_health(self) -> None:
+        latest = self._view_model.latest_runtime_health()
+        if latest is None:
+            return
+        if latest.timestamp == self._last_health_timestamp:
+            return
+        self._last_health_timestamp = latest.timestamp
+        history = self._view_model.runtime_health_history()
+        hour_ago = latest.timestamp.timestamp() - 3600
+        comparison = next(
+            (
+                point
+                for point in history
+                if point.timestamp.timestamp() >= hour_ago
+            ),
+            history[0],
+        )
+        memory_change = _format_memory_change(
+            latest.private_bytes,
+            comparison.private_bytes,
+        )
+        queue = _format_pair(
+            latest.results_queue_size,
+            latest.results_queue_capacity,
+        )
+        status = _health_status(latest)
+        self._health_summary.configure(
+            text=(
+                f"Status: {status}\n"
+                f"Memory: {_format_mb(latest.private_bytes)} "
+                f"({memory_change} over the last hour)  |  "
+                f"Python tracked: {_format_mb(latest.traced_python_bytes)}\n"
+                f"Queue: {queue}  |  "
+                f"Dropped display updates: "
+                f"{latest.dropped_results_batches or 0}  |  "
+                f"Threads: {latest.thread_count}  |  "
+                f"Retained events: "
+                f"{_format_optional(latest.retained_event_count)}\n"
+                "Latest sample: "
+                f"{latest.timestamp.astimezone().isoformat(timespec='seconds')}"
+            )
+        )
 
     def _require_selection(self) -> str | None:
         device_id = self._selected_device_id()
@@ -370,3 +438,34 @@ class DiagnosticWindow:
         self._root.clipboard_clear()
         self._root.clipboard_append(text)
         self._root.update()
+
+
+def _format_mb(value: int | None) -> str:
+    return "unavailable" if value is None else f"{value / 1_000_000:.1f} MB"
+
+
+def _format_optional(value: int | None) -> str:
+    return "n/a" if value is None else str(value)
+
+
+def _format_pair(first: int | None, second: int | None) -> str:
+    return f"{_format_optional(first)}/{_format_optional(second)}"
+
+
+def _format_memory_change(current: int | None, previous: int | None) -> str:
+    if current is None or previous is None:
+        return "change unavailable"
+    change_mb = (current - previous) / 1_000_000
+    return f"{change_mb:+.1f} MB"
+
+
+def _health_status(point) -> str:
+    if point.private_bytes is not None and point.private_bytes >= 1_000_000_000:
+        return "WARNING"
+    if (
+        point.results_queue_size is not None
+        and point.results_queue_capacity is not None
+        and point.results_queue_size >= point.results_queue_capacity * 0.8
+    ):
+        return "WARNING"
+    return "Healthy"

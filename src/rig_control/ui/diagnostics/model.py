@@ -7,6 +7,7 @@ from traceback import format_exc
 from rig_control.devices.measurement_source import MeasurementSource
 from rig_control.devices.manager import DeviceManager
 from rig_control.models import DeviceStatus
+from rig_control.runtime_diagnostics import RuntimeDiagnostics, RuntimeHealthPoint
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,8 +31,23 @@ class DiagnosticActionResult:
 class DiagnosticViewModel:
     """GUI-independent logic for the device diagnostic screen."""
 
-    def __init__(self, device_manager: DeviceManager) -> None:
+    def __init__(
+        self,
+        device_manager: DeviceManager,
+        runtime_diagnostics: RuntimeDiagnostics | None = None,
+    ) -> None:
         self._device_manager = device_manager
+        self._runtime_diagnostics = runtime_diagnostics
+
+    def runtime_health_history(self) -> tuple[RuntimeHealthPoint, ...]:
+        if self._runtime_diagnostics is None:
+            return ()
+        return self._runtime_diagnostics.health_history()
+
+    def latest_runtime_health(self) -> RuntimeHealthPoint | None:
+        if self._runtime_diagnostics is None:
+            return None
+        return self._runtime_diagnostics.latest_health_point()
 
     def device_rows(self) -> tuple[DiagnosticDeviceRow, ...]:
         """Return current device information for display."""

@@ -3,7 +3,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from math import isfinite
-from queue import Empty, Queue
+from queue import Empty, Full, Queue
 from threading import Event as ThreadEvent, Lock, Thread
 from time import monotonic
 
@@ -54,6 +54,7 @@ class PollingService:
         max_workers: int | None = None,
         batch_handler: Callable[[PollingBatch], None] | None = None,
         event_sink: EventSink | None = None,
+        results_queue_capacity: int = 120,
     ) -> None:
         self._default_device_interval = self._validate_interval(
             interval_seconds,
@@ -71,6 +72,12 @@ class PollingService:
             or max_workers <= 0
         ):
             raise ValueError("Polling worker count must be greater than zero")
+        if (
+            isinstance(results_queue_capacity, bool)
+            or not isinstance(results_queue_capacity, int)
+            or results_queue_capacity <= 0
+        ):
+            raise ValueError("Polling results queue capacity must be positive")
 
         self._device_manager = device_manager
         self._source_ids = tuple(
@@ -102,7 +109,12 @@ class PollingService:
         self._worker_count = max(max_workers or 1, len(self._source_ids), 1)
         self._batch_handler = batch_handler
         self._event_sink = event_sink
-        self._results: Queue[PollingBatch] = Queue()
+        self._results: Queue[PollingBatch] = Queue(
+            maxsize=results_queue_capacity
+        )
+        self._results_queue_capacity = results_queue_capacity
+        self._dropped_results_batches = 0
+        self._results_overflow_active = False
         self._completed_reads: Queue[_CompletedRead] = Queue()
         self._wake_scheduler = ThreadEvent()
         self._stop_requested = ThreadEvent()
@@ -122,6 +134,21 @@ class PollingService:
     def is_running(self) -> bool:
         thread = self._thread
         return thread is not None and thread.is_alive()
+
+    def diagnostic_metrics(self) -> dict[str, object]:
+        """Return a low-cost snapshot for runtime health logging."""
+
+        return {
+            "running": self.is_running,
+            "results_queue_size": self._results.qsize(),
+            "results_queue_capacity": self._results_queue_capacity,
+            "dropped_results_batches": self._dropped_results_batches,
+            "results_overflow_active": self._results_overflow_active,
+            "completed_reads_queue_size": self._completed_reads.qsize(),
+            "failed_device_count": len(self._failed_device_ids),
+            "worker_count": self._worker_count,
+            "source_count": len(self._source_ids),
+        }
 
     def start(self) -> None:
         """Start independent device scheduling and snapshot publication."""
@@ -229,7 +256,7 @@ class PollingService:
                     pending_events.clear()
                     batch = self._deliver_batch(batch)
                     batch = self._publish_events(batch)
-                    self._results.put(batch)
+                    self._enqueue_result(batch)
                     while next_publish <= now:
                         next_publish += self._publish_interval
 
@@ -242,6 +269,55 @@ class PollingService:
                 wait_seconds = max(0.0, min(deadlines) - monotonic())
                 self._wake_scheduler.wait(wait_seconds)
                 self._wake_scheduler.clear()
+
+    def _enqueue_result(self, batch: PollingBatch) -> None:
+        if (
+            self._results_overflow_active
+            and self._results.qsize() <= self._results_queue_capacity // 2
+        ):
+            self._results_overflow_active = False
+            recovered = Event(
+                source="polling_service",
+                message=(
+                    "Polling UI queue recovered after dropping "
+                    f"{self._dropped_results_batches} stale batches."
+                ),
+            )
+            batch = self._with_event(batch, recovered)
+            self._publish_single_event(recovered)
+        try:
+            self._results.put_nowait(batch)
+            return
+        except Full:
+            pass
+
+        try:
+            self._results.get_nowait()
+        except Empty:
+            pass
+        self._dropped_results_batches += 1
+        if not self._results_overflow_active:
+            self._results_overflow_active = True
+            warning = Event(
+                source="polling_service",
+                severity=EventSeverity.WARNING,
+                message=(
+                    "Polling UI queue filled; dropping the oldest unread "
+                    "display batch while experiment recording continues."
+                ),
+            )
+            batch = self._with_event(batch, warning)
+            self._publish_single_event(warning)
+        self._results.put_nowait(batch)
+
+    def _publish_single_event(self, event: Event) -> None:
+        if self._event_sink is None:
+            return
+        try:
+            self._event_sink(event, None)
+        except Exception:
+            # Queue containment must not be defeated by a failing logger.
+            pass
 
     def _read_completed(
         self,

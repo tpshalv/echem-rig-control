@@ -18,6 +18,13 @@ from rig_control.rig_profile_loading import load_rig_profile
 
 type SessionFactory = Callable[..., ApplicationSession]
 
+FEATURE_OPERATION = "operation"
+FEATURE_DIAGNOSTICS = "diagnostics"
+FEATURE_DEVICE_SETUP = "device_setup"
+_FEATURE_NAMES = frozenset(
+    {FEATURE_OPERATION, FEATURE_DIAGNOSTICS, FEATURE_DEVICE_SETUP}
+)
+
 
 @dataclass(frozen=True, slots=True)
 class HomeActionResult:
@@ -46,7 +53,7 @@ class HomeViewModel:
     ) -> None:
         self._selection_path = Path(selection_path)
         self._session_factory = session_factory
-        self._feature_active = False
+        self._active_features: set[str] = set()
         self._rig_profile_path = Path(rig_profile_path)
         self._settings_path = Path(settings_path)
         self._profile = load_rig_profile(self._rig_profile_path)
@@ -75,7 +82,19 @@ class HomeViewModel:
 
     @property
     def feature_active(self) -> bool:
-        return self._feature_active
+        return bool(self._active_features)
+
+    def is_feature_active(self, feature: str) -> bool:
+        self._validate_feature(feature)
+        return feature in self._active_features
+
+    def can_open_feature(self, feature: str) -> bool:
+        self._validate_feature(feature)
+        if feature in self._active_features:
+            return False
+        if FEATURE_DEVICE_SETUP in self._active_features:
+            return False
+        return feature != FEATURE_DEVICE_SETUP or not self._active_features
 
     def setting_rows(self) -> tuple[AppSettingRow, ...]:
         return tuple(
@@ -143,22 +162,31 @@ class HomeViewModel:
             return HomeActionResult(False, f"Could not load rig profile: {error}")
         return HomeActionResult(True, f"Loaded rig profile {profile.friendly_name!r}.")
 
-    def begin_feature(self) -> HomeActionResult:
-        if self.feature_active:
-            return HomeActionResult(False, "Another feature screen is already open.")
-        self._feature_active = True
-        return HomeActionResult(True, "Feature screen opened.")
+    def begin_feature(self, feature: str) -> HomeActionResult:
+        self._validate_feature(feature)
+        if feature in self._active_features:
+            return HomeActionResult(False, f"The {feature} screen is already open.")
+        if FEATURE_DEVICE_SETUP in self._active_features:
+            return HomeActionResult(False, "Device Setup must be closed first.")
+        if feature == FEATURE_DEVICE_SETUP and self._active_features:
+            return HomeActionResult(
+                False,
+                "Close Operation and Diagnostics before opening Device Setup.",
+            )
+        self._active_features.add(feature)
+        return HomeActionResult(True, f"{feature} screen opened.")
 
-    def end_feature(self) -> None:
-        self._feature_active = False
+    def end_feature(self, feature: str) -> None:
+        self._validate_feature(feature)
+        self._active_features.discard(feature)
 
     def suspend_for_device_setup(self) -> HomeActionResult:
-        result = self.begin_feature()
+        result = self.begin_feature(FEATURE_DEVICE_SETUP)
         if not result.succeeded:
             return result
         failures = self._session.close()
         if failures:
-            self._feature_active = False
+            self._active_features.discard(FEATURE_DEVICE_SETUP)
             return HomeActionResult(
                 False,
                 "Could not close the hardware session: " + "; ".join(failures),
@@ -170,9 +198,9 @@ class HomeViewModel:
             self._profile = load_rig_profile(self._rig_profile_path)
             self._session = self._build_session()
         except Exception as error:
-            self._feature_active = False
+            self._active_features.discard(FEATURE_DEVICE_SETUP)
             return HomeActionResult(False, f"Could not rebuild session: {error}")
-        self._feature_active = False
+        self._active_features.discard(FEATURE_DEVICE_SETUP)
         return HomeActionResult(True, "Hardware session rebuilt from saved profile.")
 
     def close(self) -> tuple[str, ...]:
@@ -224,3 +252,8 @@ class HomeViewModel:
             ),
             self._selection_path,
         )
+
+    @staticmethod
+    def _validate_feature(feature: str) -> None:
+        if feature not in _FEATURE_NAMES:
+            raise ValueError(f"Unknown feature screen {feature!r}")

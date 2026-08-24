@@ -178,6 +178,51 @@ def test_invalid_polling_configuration_is_rejected() -> None:
         PollingService(DeviceManager(), interval_seconds=0)
     with pytest.raises(ValueError, match="worker"):
         PollingService(DeviceManager(), max_workers=0)
+    with pytest.raises(ValueError, match="queue capacity"):
+        PollingService(DeviceManager(), results_queue_capacity=0)
+
+
+def test_full_results_queue_drops_oldest_and_reports_overflow() -> None:
+    recorded = []
+    service = PollingService(
+        DeviceManager(),
+        results_queue_capacity=2,
+        event_sink=lambda event, details: recorded.append((event, details)),
+    )
+    batches = [service.poll_once() for _ in range(3)]
+
+    for batch in batches:
+        service._enqueue_result(batch)
+
+    retained = [service.results.get_nowait() for _ in range(2)]
+    metrics = service.diagnostic_metrics()
+    assert retained[0] is batches[1]
+    assert retained[1].started_at == batches[2].started_at
+    assert len(retained[1].events) == 1
+    assert "dropping the oldest" in retained[1].events[0].message
+    assert metrics["dropped_results_batches"] == 1
+    assert metrics["results_queue_capacity"] == 2
+    assert metrics["results_overflow_active"] is True
+    assert len(recorded) == 1
+
+
+def test_results_queue_reports_recovery_after_consumer_catches_up() -> None:
+    recorded = []
+    service = PollingService(
+        DeviceManager(),
+        results_queue_capacity=4,
+        event_sink=lambda event, details: recorded.append((event, details)),
+    )
+    for _ in range(5):
+        service._enqueue_result(service.poll_once())
+    for _ in range(3):
+        service.results.get_nowait()
+
+    service._enqueue_result(service.poll_once())
+
+    assert service.diagnostic_metrics()["results_overflow_active"] is False
+    assert len(recorded) == 2
+    assert "recovered" in recorded[-1][0].message
 
 
 def test_unknown_device_interval_is_rejected() -> None:

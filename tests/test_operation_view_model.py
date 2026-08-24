@@ -1,3 +1,4 @@
+from collections import deque
 from datetime import UTC, datetime
 
 import pytest
@@ -167,7 +168,7 @@ def test_measurement_history_has_configurable_bounded_default() -> None:
 
     assert model.history_limit == 120
     for value in range(125):
-        polling.results.put(measurement_batch(float(value)))
+        polling._enqueue_result(measurement_batch(float(value)))
     model.collect_polling_results()
 
     history = model.measurement_history("temperature", "temperature")
@@ -256,6 +257,28 @@ def test_device_warning_persists_until_a_successful_read() -> None:
     polling.results.put(measurement_batch())
     model.collect_polling_results()
     assert model.warnings() == ()
+
+
+def test_retained_events_are_bounded() -> None:
+    model, _, polling, _ = make_model()
+    model._events = deque(maxlen=3)
+    for index in range(5):
+        polling.results.put(
+            PollingBatch(
+                started_at=FIXED_TIME,
+                finished_at=FIXED_TIME,
+                measurements=(),
+                failures=(),
+                events=(Event("test", f"event {index}"),),
+            )
+        )
+    model.collect_polling_results()
+
+    assert [event.message for event in model.events] == [
+        "event 2",
+        "event 3",
+        "event 4",
+    ]
 
 
 def test_shutdown_stops_feature_services_but_leaves_session_devices_connected() -> None:

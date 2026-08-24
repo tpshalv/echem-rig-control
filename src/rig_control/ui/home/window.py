@@ -10,7 +10,13 @@ from rig_control.ui.device_setup.model import DeviceSetupViewModel
 from rig_control.ui.device_setup.window import DeviceSetupWindow
 from rig_control.ui.diagnostics.model import DiagnosticViewModel
 from rig_control.ui.diagnostics.window import DiagnosticWindow
-from rig_control.ui.home.model import HomeActionResult, HomeViewModel
+from rig_control.ui.home.model import (
+    FEATURE_DEVICE_SETUP,
+    FEATURE_DIAGNOSTICS,
+    FEATURE_OPERATION,
+    HomeActionResult,
+    HomeViewModel,
+)
 from rig_control.ui.operation.model import OperationViewModel
 from rig_control.ui.operation.window import OperationWindow
 
@@ -21,7 +27,9 @@ class HomeWindow:
     def __init__(self, root: tk.Tk, view_model: HomeViewModel) -> None:
         self._root = root
         self._view_model = view_model
-        self._child: tk.Toplevel | None = None
+        self._operation_child: tk.Toplevel | None = None
+        self._diagnostics_child: tk.Toplevel | None = None
+        self._device_setup_child: tk.Toplevel | None = None
         self._setting_entries: dict[str, ttk.Entry] = {}
         root.title("Echem Rig Control")
         root.geometry("850x620")
@@ -91,12 +99,18 @@ class HomeWindow:
 
         launch = ttk.LabelFrame(main, text="Open feature", padding=10)
         launch.grid(row=3, column=0, sticky="ew")
-        self._launch_buttons = (
-            ttk.Button(launch, text="Device Setup", command=self._open_device_setup),
-            ttk.Button(launch, text="Diagnostics", command=self._open_diagnostics),
-            ttk.Button(launch, text="Operation", command=self._open_operation),
-        )
-        for column, button in enumerate(self._launch_buttons):
+        self._launch_buttons = {
+            FEATURE_DEVICE_SETUP: ttk.Button(
+                launch, text="Device Setup", command=self._open_device_setup
+            ),
+            FEATURE_DIAGNOSTICS: ttk.Button(
+                launch, text="Diagnostics", command=self._open_diagnostics
+            ),
+            FEATURE_OPERATION: ttk.Button(
+                launch, text="Operation", command=self._open_operation
+            ),
+        }
+        for column, button in enumerate(self._launch_buttons.values()):
             button.grid(row=0, column=column, padx=(0, 8))
 
         self._status = ttk.Label(main, text="", font=SECTION_FONT)
@@ -119,9 +133,14 @@ class HomeWindow:
             entry = self._setting_entries[row.key]
             entry.delete(0, "end")
             entry.insert(0, row.value)
-        state = "disabled" if self._view_model.feature_active else "normal"
-        for button in self._launch_buttons:
-            button.configure(state=state)
+        for feature, button in self._launch_buttons.items():
+            button.configure(
+                state=(
+                    "normal"
+                    if self._view_model.can_open_feature(feature)
+                    else "disabled"
+                )
+            )
 
     def _select_profile(self) -> None:
         selected = filedialog.askopenfilename(
@@ -168,19 +187,29 @@ class HomeWindow:
             self.refresh()
 
     def _open_diagnostics(self) -> None:
-        if not self._begin_child():
+        child = self._begin_child(FEATURE_DIAGNOSTICS)
+        if child is None:
             return
-        assert self._child is not None
-        DiagnosticWindow(
-            self._child,
-            DiagnosticViewModel(self._view_model.session.device_manager),
+        self._diagnostics_child = child
+        window = DiagnosticWindow(
+            child,
+            DiagnosticViewModel(
+                self._view_model.session.device_manager,
+                self._view_model.session.runtime_diagnostics,
+            ),
         )
-        self._child.protocol("WM_DELETE_WINDOW", self._close_regular_child)
+
+        def close() -> None:
+            window.cancel_updates()
+            self._close_diagnostics()
+
+        child.protocol("WM_DELETE_WINDOW", close)
 
     def _open_operation(self) -> None:
-        if not self._begin_child():
+        child = self._begin_child(FEATURE_OPERATION)
+        if child is None:
             return
-        assert self._child is not None
+        self._operation_child = child
         session = self._view_model.session
         model = OperationViewModel(
             session.device_manager,
@@ -189,55 +218,70 @@ class HomeWindow:
             session.control_service,
             profile_id=session.profile.profile_id,
         )
+        session.runtime_diagnostics.register_metric_provider(
+            "operation_ui",
+            model.diagnostic_metrics,
+        )
         window = OperationWindow(
-            self._child,
+            child,
             model,
             profile_name=session.profile.friendly_name,
+            event_sink=session.technical_log.record,
         )
 
         def close() -> None:
             window.cancel_updates()
             model.shutdown()
-            self._close_regular_child()
+            session.runtime_diagnostics.unregister_metric_provider("operation_ui")
+            self._close_operation()
 
-        self._child.protocol("WM_DELETE_WINDOW", close)
+        child.protocol("WM_DELETE_WINDOW", close)
 
     def _open_device_setup(self) -> None:
         result = self._view_model.suspend_for_device_setup()
         if not result.succeeded:
             self._show_result(result)
             return
-        self._child = tk.Toplevel(self._root)
+        self._device_setup_child = tk.Toplevel(self._root)
         DeviceSetupWindow(
-            self._child,
+            self._device_setup_child,
             DeviceSetupViewModel(
                 self._view_model.profile,
                 profile_path=self._view_model.rig_profile_path,
             ),
         )
-        self._child.protocol("WM_DELETE_WINDOW", self._close_device_setup)
+        self._device_setup_child.protocol(
+            "WM_DELETE_WINDOW", self._close_device_setup
+        )
         self.refresh()
 
-    def _begin_child(self) -> bool:
-        result = self._view_model.begin_feature()
+    def _begin_child(self, feature: str) -> tk.Toplevel | None:
+        result = self._view_model.begin_feature(feature)
         if not result.succeeded:
             self._show_result(result)
-            return False
-        self._child = tk.Toplevel(self._root)
+            return None
+        child = tk.Toplevel(self._root)
         self.refresh()
-        return True
+        return child
 
-    def _close_regular_child(self) -> None:
-        if self._child is not None:
-            self._child.destroy()
-            self._child = None
-        self._view_model.end_feature()
+    def _close_operation(self) -> None:
+        if self._operation_child is not None:
+            self._operation_child.destroy()
+            self._operation_child = None
+        self._view_model.end_feature(FEATURE_OPERATION)
+        self.refresh()
+
+    def _close_diagnostics(self) -> None:
+        if self._diagnostics_child is not None:
+            self._diagnostics_child.destroy()
+            self._diagnostics_child = None
+        self._view_model.end_feature(FEATURE_DIAGNOSTICS)
         self.refresh()
 
     def _close_device_setup(self) -> None:
-        if self._child is not None:
-            self._child.destroy()
-            self._child = None
+        if self._device_setup_child is not None:
+            self._device_setup_child.destroy()
+            self._device_setup_child = None
         self._show_result(self._view_model.resume_after_device_setup())
         self.refresh()
 

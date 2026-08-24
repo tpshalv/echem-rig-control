@@ -39,6 +39,20 @@ class ExperimentRecorder:
         with self._lock:
             return self._sample_interval_seconds
 
+    def diagnostic_metrics(self) -> dict[str, object]:
+        """Return recorder state without retaining measurement data."""
+
+        with self._lock:
+            writer = self._writer
+            directory = getattr(writer, "experiment_directory", None)
+            return {
+                "recording": writer is not None and writer.is_open,
+                "sample_interval_seconds": self._sample_interval_seconds,
+                "experiment_directory": (
+                    str(directory) if directory is not None else None
+                ),
+            }
+
     def start(
         self,
         *,

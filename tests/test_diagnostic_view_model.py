@@ -10,6 +10,7 @@ from rig_control.models import Measurement
 from rig_control.ui.diagnostics.model import (
     DiagnosticViewModel,
 )
+from rig_control.runtime_diagnostics import ProcessMemory, RuntimeDiagnostics
 
 def make_supply(
     device_id: str,
@@ -61,6 +62,18 @@ def test_empty_manager_produces_no_rows() -> None:
     model = DiagnosticViewModel(manager)
 
     assert model.device_rows() == ()
+
+
+def test_runtime_health_history_is_exposed(tmp_path) -> None:
+    diagnostics = RuntimeDiagnostics(
+        tmp_path / "health.jsonl",
+        process_sampler=lambda: ProcessMemory(1, 2, 3, 4, 5),
+    )
+    diagnostics.sample_now()
+    model = DiagnosticViewModel(DeviceManager(), diagnostics)
+
+    assert model.runtime_health_history() == diagnostics.health_history()
+    assert model.latest_runtime_health() is diagnostics.latest_health_point()
 
 
 def test_rows_show_device_type_and_status() -> None:

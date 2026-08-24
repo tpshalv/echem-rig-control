@@ -9,6 +9,7 @@ from rig_control.experiment_recording import ExperimentRecorder
 from rig_control.models import Event
 from rig_control.polling import PollingService
 from rig_control.rig_profile import RigProfile
+from rig_control.runtime_diagnostics import RuntimeDiagnostics
 
 
 class ApplicationSession:
@@ -47,6 +48,16 @@ class ApplicationSession:
             batch_handler=self.experiment_recorder.record_batch,
             event_sink=self.technical_log.record,
         )
+        diagnostic_path = log_path.with_name("runtime-health.jsonl")
+        self.runtime_diagnostics = RuntimeDiagnostics(
+            diagnostic_path,
+            metric_providers={
+                "polling": self.polling_service.diagnostic_metrics,
+                "recorder": self.experiment_recorder.diagnostic_metrics,
+            },
+            event_sink=self.technical_log.record,
+        )
+        self.runtime_diagnostics.start()
         self._closed = False
 
     @property
@@ -72,6 +83,10 @@ class ApplicationSession:
             return ()
         failures = list(self.stop_feature_services())
         failures.extend(str(error) for error in self.device_manager.disconnect_all())
+        try:
+            self.runtime_diagnostics.stop()
+        except Exception as error:
+            failures.append(f"Could not stop runtime diagnostics: {error}")
         self.technical_log.record(
             Event(
                 source="application",

@@ -43,8 +43,10 @@ class OperationViewModel:
         *,
         profile_id: str,
         history_limit: int = 120,
+        event_limit: int = 1_000,
     ) -> None:
         self._validate_history_limit(history_limit)
+        self._validate_event_limit(event_limit)
         self._device_manager = device_manager
         self._polling_service = polling_service
         self._experiment_recorder = experiment_recorder
@@ -62,7 +64,7 @@ class OperationViewModel:
             tuple[str, str], deque[LiveMeasurementRow]
         ] = {}
         self._warnings: dict[str, str] = {}
-        self._events: list[Event] = []
+        self._events: deque[Event] = deque(maxlen=event_limit)
 
     @property
     def is_monitoring(self) -> bool:
@@ -125,6 +127,21 @@ class OperationViewModel:
 
     def warnings(self) -> tuple[tuple[str, str], ...]:
         return tuple(sorted(self._warnings.items()))
+
+    def diagnostic_metrics(self) -> dict[str, object]:
+        """Describe UI-retained state for the runtime health journal."""
+
+        return {
+            "latest_measurement_count": len(self._measurements),
+            "history_channel_count": len(self._measurement_histories),
+            "history_point_count": sum(
+                len(history) for history in self._measurement_histories.values()
+            ),
+            "history_limit_per_channel": self._history_limit,
+            "warning_count": len(self._warnings),
+            "retained_event_count": len(self._events),
+            "event_limit": self._events.maxlen,
+        }
 
     def connect_all(self) -> tuple[OperationActionResult, ...]:
         results: list[OperationActionResult] = []
@@ -292,3 +309,10 @@ class OperationViewModel:
             raise TypeError("Trend history limit must be an integer")
         if value < 2:
             raise ValueError("Trend history limit must be at least 2")
+
+    @staticmethod
+    def _validate_event_limit(value: int) -> None:
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise TypeError("Event history limit must be an integer")
+        if value <= 0:
+            raise ValueError("Event history limit must be positive")

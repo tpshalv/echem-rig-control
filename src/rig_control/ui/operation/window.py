@@ -2,7 +2,9 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from queue import Empty, Queue
 from threading import Thread
+from traceback import format_exc
 
+from rig_control.models import Event, EventSeverity, EventSink
 from rig_control.ui.common.theme import ERROR_TEXT, SECTION_FONT, TITLE_FONT
 from rig_control.ui.operation.manual_control_panel import ManualControlPanel
 from rig_control.ui.operation.model import OperationActionResult, OperationViewModel
@@ -18,9 +20,12 @@ class OperationWindow:
         view_model: OperationViewModel,
         *,
         profile_name: str,
+        event_sink: EventSink | None = None,
     ) -> None:
         self._root = root
         self._view_model = view_model
+        self._event_sink = event_sink
+        self._refresh_failed = False
         self._after_id: str | None = None
         self._measurement_keys: dict[str, tuple[str, str]] = {}
         self._trend_windows: dict[tuple[str, str], TrendWindow] = {}
@@ -355,16 +360,53 @@ class OperationWindow:
 
     def _poll_ui_queue(self) -> None:
         try:
-            connection_results = self._connection_results.get_nowait()
-        except Empty:
-            pass
+            try:
+                connection_results = self._connection_results.get_nowait()
+            except Empty:
+                pass
+            else:
+                self._finish_connect_all(connection_results)
+            collected = self._view_model.collect_polling_results()
+            self._update_display()
+            if collected:
+                self._manual_panel.refresh()
+        except Exception as error:
+            if not self._refresh_failed:
+                self._record_refresh_event(
+                    Event(
+                        source="operation_ui",
+                        severity=EventSeverity.ERROR,
+                        message=(
+                            "Operation display refresh failed: "
+                            f"{type(error).__name__}: {error}"
+                        ),
+                    ),
+                    format_exc(),
+                )
+            self._refresh_failed = True
         else:
-            self._finish_connect_all(connection_results)
-        collected = self._view_model.collect_polling_results()
-        self._update_display()
-        if collected:
-            self._manual_panel.refresh()
-        self._schedule_update()
+            if self._refresh_failed:
+                self._record_refresh_event(
+                    Event(
+                        source="operation_ui",
+                        message="Operation display refresh recovered.",
+                    )
+                )
+            self._refresh_failed = False
+        finally:
+            self._schedule_update()
+
+    def _record_refresh_event(
+        self,
+        event: Event,
+        technical_details: str | None = None,
+    ) -> None:
+        if self._event_sink is None:
+            return
+        try:
+            self._event_sink(event, technical_details)
+        except Exception:
+            pass
 
     def _update_display(self) -> None:
         self._measurements.delete(*self._measurements.get_children())

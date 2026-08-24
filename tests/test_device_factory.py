@@ -8,6 +8,7 @@ from rig_control.device_factory import (
 )
 from rig_control.devices.keithley_2260b.driver import Keithley2260B
 from rig_control.devices.alicat.driver import AlicatMassFlowController
+from rig_control.devices.alicat.meter import AlicatMassFlowMeter
 from rig_control.devices.alicat.configuration import AlicatSerialConfiguration
 from rig_control.devices.simulated_mfc import (
     SimulatedMassFlowController,
@@ -215,6 +216,40 @@ def test_real_keithley_is_constructed_without_connecting() -> None:
     assert device.limits.maximum_voltage == 30.0
     assert device.limits.maximum_current == 108.0
     assert device.limits.maximum_power == 1080.0
+
+
+def test_real_alicat_meter_is_constructed_as_read_only_measurement_source() -> None:
+    connection = ConnectionDefinition(
+        connection_id="alicat_bus",
+        connection_type="serial_text",
+        parameters={"port": "COM5", "baud_rate": 19200, "timeout_seconds": 1.0},
+    )
+    role = DeviceRole(
+        device_id="flow_meter_b",
+        friendly_name="Flow meter B",
+        capability=DeviceCapability.MASS_FLOW_METER,
+        driver="alicat",
+        backend=DeviceBackend.REAL,
+        connection_id="alicat_bus",
+        connection_parameters={"address": "B"},
+        settings={
+            "maximum_flow": 2.0,
+            "flow_unit": "SLPM",
+            "volumetric_flow_unit": "LPM",
+            "pressure_unit": "psia",
+            "temperature_unit": "degC",
+            "frame_fields": (
+                "absolute_pressure,gas_temperature,volumetric_flow,mass_flow,gas"
+            ),
+        },
+    )
+
+    manager = create_device_manager(
+        make_profile(role, connections=(connection,)),
+        alicat_transport_factory=lambda _: SimulatedSerialTextTransport(),
+    )
+
+    assert isinstance(manager.get("flow_meter_b"), AlicatMassFlowMeter)
 
 
 def make_real_alicat_role(device_id: str, address: str) -> DeviceRole:

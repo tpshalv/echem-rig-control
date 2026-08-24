@@ -7,6 +7,7 @@ from rig_control.devices.alicat.configuration import (
     configuration_from_profile as alicat_configuration_from_profile,
 )
 from rig_control.devices.alicat.driver import AlicatMassFlowController
+from rig_control.devices.alicat.meter import AlicatMassFlowMeter
 from rig_control.devices.alicat.protocol import AlicatAsciiProtocolClient
 from rig_control.devices.keithley_2260b.configuration import (
     configuration_from_profile as keithley_configuration_from_profile,
@@ -119,7 +120,10 @@ def _create_device(
             return _create_real_keithley(profile, role)
 
         if (
-            role.capability is DeviceCapability.MASS_FLOW_CONTROLLER
+            role.capability in {
+                DeviceCapability.MASS_FLOW_CONTROLLER,
+                DeviceCapability.MASS_FLOW_METER,
+            }
             and role.driver == "alicat"
         ):
             return _create_real_alicat(
@@ -239,7 +243,7 @@ def _create_real_alicat(
     role: DeviceRole,
     buses: dict[str, AlicatBus],
     transport_factory: AlicatTransportFactory,
-) -> AlicatMassFlowController:
+) -> AlicatMassFlowController | AlicatMassFlowMeter:
     """Construct a disconnected Alicat on its profile's shared bus."""
 
     try:
@@ -260,8 +264,11 @@ def _create_real_alicat(
             bus,
             configuration.frame_fields,
             configuration.engineering_units,
+            requires_setpoint=configuration.is_controller,
         )
-        return AlicatMassFlowController(configuration, protocol)
+        if configuration.is_controller:
+            return AlicatMassFlowController(configuration, protocol)
+        return AlicatMassFlowMeter(configuration, protocol)
     except (KeyError, TypeError, ValueError) as error:
         raise DeviceFactoryError(
             f"Invalid settings for real Alicat device "

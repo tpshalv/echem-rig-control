@@ -183,6 +183,8 @@ class AlicatAsciiProtocolClient(AlicatProtocolClient):
         bus: AlicatBus,
         frame_fields: tuple[AlicatFrameField, ...],
         units: AlicatEngineeringUnits,
+        *,
+        requires_setpoint: bool = True,
     ) -> None:
         if not isinstance(bus, AlicatBus):
             raise TypeError("bus must be an AlicatBus")
@@ -200,8 +202,9 @@ class AlicatAsciiProtocolClient(AlicatProtocolClient):
             AlicatFrameField.GAS_TEMPERATURE,
             AlicatFrameField.VOLUMETRIC_FLOW,
             AlicatFrameField.MASS_FLOW,
-            AlicatFrameField.SETPOINT,
         }
+        if requires_setpoint:
+            required.add(AlicatFrameField.SETPOINT)
         missing = required.difference(frame_fields)
         if missing:
             names = ", ".join(sorted(item.value for item in missing))
@@ -219,6 +222,7 @@ class AlicatAsciiProtocolClient(AlicatProtocolClient):
         self._bus = bus
         self._frame_fields = frame_fields
         self._units = units
+        self._requires_setpoint = requires_setpoint
         self._connected = False
 
     def connect(self) -> None:
@@ -320,7 +324,7 @@ class AlicatAsciiProtocolClient(AlicatProtocolClient):
                 values[AlicatFrameField.GAS_TEMPERATURE]
             ),
             temperature_unit=self._units.gas_temperature,
-            setpoint=float(values[AlicatFrameField.SETPOINT]),
+            setpoint=float(values.get(AlicatFrameField.SETPOINT, 0.0)),
             setpoint_unit=self._units.setpoint,
             gas=(
                 str(values[AlicatFrameField.GAS])

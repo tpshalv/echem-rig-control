@@ -172,3 +172,36 @@ def test_totalizer_field_requires_an_explicit_unit() -> None:
 
     with pytest.raises(ValueError, match="requires its configured unit"):
         make_protocol(fields)
+
+
+def test_meter_frame_does_not_require_or_invent_a_setpoint_field() -> None:
+    fields = (
+        AlicatFrameField.ABSOLUTE_PRESSURE,
+        AlicatFrameField.GAS_TEMPERATURE,
+        AlicatFrameField.VOLUMETRIC_FLOW,
+        AlicatFrameField.MASS_FLOW,
+        AlicatFrameField.GAS,
+    )
+    transport = SimulatedSerialTextTransport()
+    bus = AlicatBus("alicat_bus", transport)
+    bus.connect()
+    protocol = AlicatAsciiProtocolClient(
+        bus,
+        fields,
+        AlicatEngineeringUnits(
+            mass_flow="SLPM",
+            volumetric_flow="LPM",
+            absolute_pressure="psia",
+            gas_temperature="degC",
+            setpoint="SLPM",
+        ),
+        requires_setpoint=False,
+    )
+    transport.queue_response("B", "B 14.7 22.5 1.8 1.9 Air")
+
+    state = protocol.read_state("B")
+
+    assert state.mass_flow == 1.9
+    assert state.mass_flow_unit == "SLPM"
+    assert state.setpoint == 0.0
+    assert state.gas == "Air"

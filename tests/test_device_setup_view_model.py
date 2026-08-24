@@ -1,17 +1,21 @@
 from dataclasses import replace
 
 from rig_control.devices.alicat.configuration import AlicatMfcConfiguration
-from rig_control.devices.alicat.protocol import AlicatInstrumentState
+from rig_control.devices.alicat.protocol import (
+    AlicatFrameField,
+    AlicatInstrumentState,
+)
 from rig_control.devices.keithley_2260b.configuration import (
     Keithley2260BConfiguration,
 )
 from rig_control.devices.keithley_2260b.protocol import KeithleyIdentity
-from rig_control.diagnostics.alicat import AlicatDiagnosticResult
-from rig_control.rig_profile import DeviceBackend
+from rig_control.diagnostics.alicat import AlicatDiagnosticResult, DiscoveredAlicat
+from rig_control.rig_profile import DeviceBackend, DeviceCapability
 from rig_control.rig_profile_loading import load_rig_profile
 from rig_control.ui.device_setup.model import (
     AddAlicatRequest,
     AddKeithleyRequest,
+    AlicatScanRow,
     DeviceSetupViewModel,
     SerialPortInfo,
 )
@@ -22,6 +26,7 @@ def make_model(
     serial_ports: tuple[SerialPortInfo, ...] = (),
     alicat_checker=None,
     keithley_checker=None,
+    alicat_scanner=None,
 ) -> DeviceSetupViewModel:
     arguments = {
         "serial_port_provider": lambda: serial_ports,
@@ -30,6 +35,8 @@ def make_model(
         arguments["alicat_checker"] = alicat_checker
     if keithley_checker is not None:
         arguments["keithley_checker"] = keithley_checker
+    if alicat_scanner is not None:
+        arguments["alicat_scanner"] = alicat_scanner
     return DeviceSetupViewModel(
         load_rig_profile("rig-profile.example.toml"),
         **arguments,
@@ -69,6 +76,38 @@ def test_serial_port_discovery_error_is_reported_without_crashing() -> None:
 
     assert model.serial_ports() == ()
     assert "PermissionError: enumeration blocked" == model.serial_port_error
+
+
+def test_alicat_scan_passes_selected_port_and_baud_rate() -> None:
+    calls = []
+    discovered = (DiscoveredAlicat("B", "B 14.7 22.5 0 0 Air"),)
+    model = make_model(
+        alicat_scanner=lambda port, baud: (
+            calls.append((port, baud)) or discovered
+        )
+    )
+
+    found = model.scan_alicats(" COM5 ", 19200)
+
+    assert found == (
+        AlicatScanRow("B", "B 14.7 22.5 0 0 Air"),
+    )
+    assert calls == [("COM5", 19200)]
+
+
+def test_alicat_scan_marks_matching_profile_device_as_already_added() -> None:
+    model = DeviceSetupViewModel(
+        load_rig_profile("rig-profile.example.toml"),
+        alicat_scanner=lambda port, baud: (
+            DiscoveredAlicat("A", "A 14.7 22.5 0 0 0 N2"),
+        ),
+    )
+
+    found = model.scan_alicats("CHANGE_ME", 19200)
+
+    assert found[0].configuration_status == "Already added"
+    assert found[0].configured_device_id == "nitrogen_mfc"
+    assert found[0].configured_kind == "Controller"
 
 
 def test_alicat_check_uses_read_only_diagnostic_and_updates_readiness() -> None:
@@ -207,7 +246,8 @@ def test_checked_alicat_is_saved_to_new_local_profile(tmp_path) -> None:
     role = saved.get_role("mfc_a")
     assert role.friendly_name == "MFC A"
     assert role.settings["purpose_label"] == "Nitrogen"
-    assert role.settings["maximum_flow"] == 200.0
+    assert role.settings["maximum_flow"] == 2000.0
+    assert role.settings["flow_unit"] == "SCCM"
     assert role.connection_parameters["address"] == "A"
     assert saved.get_connection(role.connection_id).parameters["port"] == "COM5"
 
@@ -372,6 +412,52 @@ def test_failed_keithley_identity_does_not_write_profile(tmp_path) -> None:
     assert result.succeeded is False
     assert "ConnectionError" in result.technical_details
     assert not profile_path.exists()
+
+
+def test_read_only_alicat_meter_is_saved_without_setpoint_field(tmp_path) -> None:
+    profile_path = tmp_path / "rig-profile.toml"
+    empty_profile = replace(
+        load_rig_profile("rig-profile.example.toml"),
+        connections=(),
+        device_roles=(),
+    )
+
+    def check(configuration: AlicatMfcConfiguration) -> AlicatDiagnosticResult:
+        assert configuration.is_controller is False
+        assert AlicatFrameField.SETPOINT not in configuration.frame_fields
+        return AlicatDiagnosticResult(
+            "B 14.7 22.5 1.8 1.9 Air",
+            AlicatInstrumentState(
+                1.9, "SLPM", 1.8, "LPM", 14.7, "psia", 22.5, "degC",
+                0.0, "SLPM", "Air",
+            ),
+        )
+
+    model = DeviceSetupViewModel(
+        empty_profile,
+        profile_path=profile_path,
+        alicat_checker=check,
+    )
+    result = model.add_alicat_and_check(
+        AddAlicatRequest(
+            "flow_meter_b",
+            "Flow meter B",
+            "Outlet measurement",
+            "COM5",
+            "B",
+            maximum_flow=2.0,
+            device_kind="meter",
+            flow_unit="SLPM",
+        )
+    )
+
+    assert result.succeeded is True
+    saved = load_rig_profile(profile_path)
+    role = saved.get_role("flow_meter_b")
+    assert role.capability is DeviceCapability.MASS_FLOW_METER
+    assert role.settings["maximum_flow"] == 2.0
+    assert role.settings["flow_unit"] == "SLPM"
+    assert "setpoint" not in role.settings["frame_fields"]
 
 
 def test_identified_visa_keithley_is_saved_to_local_profile(tmp_path) -> None:

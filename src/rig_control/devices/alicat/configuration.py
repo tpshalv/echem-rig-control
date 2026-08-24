@@ -64,6 +64,7 @@ class AlicatMfcConfiguration:
     limits: MassFlowControllerLimits
     frame_fields: tuple[AlicatFrameField, ...]
     engineering_units: AlicatEngineeringUnits
+    is_controller: bool = True
 
     def __post_init__(self) -> None:
         _validate_text(self.device_id, "Alicat device ID")
@@ -99,6 +100,8 @@ class AlicatMfcConfiguration:
             raise TypeError(
                 "Alicat engineering units must be AlicatEngineeringUnits"
             )
+        if not isinstance(self.is_controller, bool):
+            raise TypeError("Alicat is_controller must be Boolean")
 
 
 def configuration_from_profile(
@@ -143,6 +146,7 @@ def configuration_from_profile(
         f"devices.{role.device_id}.settings.flow_unit",
     )
 
+    is_controller = role.capability is DeviceCapability.MASS_FLOW_CONTROLLER
     return AlicatMfcConfiguration(
         device_id=role.device_id,
         friendly_name=role.friendly_name,
@@ -207,6 +211,7 @@ def configuration_from_profile(
                 f"devices.{role.device_id}.settings.totalized_flow_unit",
             ),
         ),
+        is_controller=is_controller,
     )
 
 
@@ -241,10 +246,13 @@ def _validate_alicat_role(role: DeviceRole) -> None:
             f"Alicat device role {role.device_id!r} is simulated"
         )
 
-    if role.capability is not DeviceCapability.MASS_FLOW_CONTROLLER:
+    if role.capability not in {
+        DeviceCapability.MASS_FLOW_CONTROLLER,
+        DeviceCapability.MASS_FLOW_METER,
+    }:
         raise ValueError(
             f"Device role {role.device_id!r} is not configured as a "
-            "mass flow controller"
+            "mass flow controller or meter"
         )
 
     if role.driver != "alicat":

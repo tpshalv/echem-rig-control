@@ -24,6 +24,45 @@ class AlicatDiagnosticResult:
     state: AlicatInstrumentState
 
 
+@dataclass(frozen=True, slots=True)
+class DiscoveredAlicat:
+    """One address that returned a valid addressed frame during a scan."""
+
+    address: str
+    raw_response: str
+
+
+def scan_alicat_bus(
+    port: str,
+    baud_rate: int = 19200,
+    *,
+    timeout_seconds: float = 0.2,
+    transport: SerialTextTransport | None = None,
+) -> tuple[DiscoveredAlicat, ...]:
+    """Read-only scan of polling addresses A-Z on one Alicat bus."""
+
+    selected_transport = transport or PySerialTextTransport(
+        port=port,
+        baud_rate=baud_rate,
+        timeout_seconds=timeout_seconds,
+    )
+    found: list[DiscoveredAlicat] = []
+    try:
+        selected_transport.open()
+        for code in range(ord("A"), ord("Z") + 1):
+            address = chr(code)
+            try:
+                response = selected_transport.request(address)
+            except TimeoutError:
+                continue
+            if response.split(maxsplit=1)[0].upper() != address:
+                continue
+            found.append(DiscoveredAlicat(address, response))
+    finally:
+        selected_transport.close()
+    return tuple(found)
+
+
 def read_alicat_state(
     configuration: AlicatMfcConfiguration,
     transport: SerialTextTransport | None = None,
@@ -49,6 +88,7 @@ def read_alicat_state(
         bus,
         configuration.frame_fields,
         configuration.engineering_units,
+        requires_setpoint=configuration.is_controller,
     )
 
     try:

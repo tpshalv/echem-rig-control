@@ -11,6 +11,31 @@ from rig_control.rig_profile_loading import load_rig_profile
 from rig_control.transports.simulated_serial_text import (
     SimulatedSerialTextTransport,
 )
+from rig_control.transports.serial_text import SerialTextTransport
+
+
+class ScanTransport(SerialTextTransport):
+    def __init__(self) -> None:
+        self._open = False
+        self.requests = []
+
+    @property
+    def is_open(self) -> bool:
+        return self._open
+
+    def open(self) -> None:
+        self._open = True
+
+    def close(self) -> None:
+        self._open = False
+
+    def request(self, message: str) -> str:
+        self.requests.append(message)
+        if message == "A":
+            return "A 14.7 22.5 0 0 0 Air"
+        if message == "B":
+            return "B 14.7 22.5 0 0 Air"
+        raise TimeoutError("no device")
 
 
 def write_configuration(path: Path, port: str = "COM5") -> Path:
@@ -94,6 +119,17 @@ def test_transport_closes_after_poll_failure() -> None:
     with pytest.raises(RuntimeError, match="simulated timeout"):
         diagnostic.read_alicat_state(configuration, transport)
 
+    assert transport.is_open is False
+
+
+def test_bus_scan_finds_addressed_devices_without_sending_commands() -> None:
+    transport = ScanTransport()
+
+    found = diagnostic.scan_alicat_bus("COM5", transport=transport)
+
+    assert [device.address for device in found] == ["A", "B"]
+    assert found[1].raw_response == "B 14.7 22.5 0 0 Air"
+    assert transport.requests == [chr(code) for code in range(ord("A"), ord("Z") + 1)]
     assert transport.is_open is False
 
 

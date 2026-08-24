@@ -14,7 +14,9 @@ from rig_control.devices.keithley_2260b.configuration import (
 )
 from rig_control.diagnostics.alicat import (
     AlicatDiagnosticResult,
+    DiscoveredAlicat,
     read_alicat_state,
+    scan_alicat_bus,
 )
 from rig_control.diagnostics.keithley import identify_keithley
 from rig_control.devices.keithley_2260b.protocol import KeithleyIdentity
@@ -53,13 +55,27 @@ class ReadinessCheckResult:
 
 
 @dataclass(frozen=True, slots=True)
+class AlicatScanRow:
+    address: str
+    raw_response: str
+    configured_device_id: str | None = None
+    configured_kind: str | None = None
+
+    @property
+    def configuration_status(self) -> str:
+        return "Already added" if self.configured_device_id else "New device"
+
+
+@dataclass(frozen=True, slots=True)
 class AddAlicatRequest:
     device_id: str
     hardware_label: str
     purpose_label: str
     port: str
     unit_address: str
-    maximum_flow: float = 200.0
+    maximum_flow: float = 2000.0
+    device_kind: str = "controller"
+    flow_unit: str = "SCCM"
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +99,7 @@ type AlicatChecker = Callable[
     [AlicatMfcConfiguration],
     AlicatDiagnosticResult,
 ]
+type AlicatScanner = Callable[[str, int], tuple[DiscoveredAlicat, ...]]
 type KeithleyChecker = Callable[
     [Keithley2260BConfiguration],
     KeithleyIdentity,
@@ -100,6 +117,7 @@ class DeviceSetupViewModel:
         profile_path: str | Path = "device-library.toml",
         serial_port_provider: SerialPortProvider | None = None,
         alicat_checker: AlicatChecker = read_alicat_state,
+        alicat_scanner: AlicatScanner = scan_alicat_bus,
         keithley_checker: KeithleyChecker = identify_keithley,
         profile_writer: ProfileWriter = write_rig_profile,
     ) -> None:
@@ -111,6 +129,7 @@ class DeviceSetupViewModel:
             serial_port_provider or _list_windows_serial_ports
         )
         self._alicat_checker = alicat_checker
+        self._alicat_scanner = alicat_scanner
         self._keithley_checker = keithley_checker
         self._profile_writer = profile_writer
         self._readiness: dict[str, str] = {}
@@ -156,6 +175,47 @@ class DeviceSetupViewModel:
 
         self._serial_port_error = ""
         return ports
+
+    def scan_alicats(
+        self,
+        port: str,
+        baud_rate: int = 19200,
+    ) -> tuple[AlicatScanRow, ...]:
+        """Find uniquely addressed Alicats without changing device state."""
+
+        if not isinstance(port, str) or not port.strip():
+            raise ValueError("Select or enter an Alicat COM port")
+        if not isinstance(baud_rate, int) or isinstance(baud_rate, bool):
+            raise TypeError("Alicat baud rate must be an integer")
+        if baud_rate <= 0:
+            raise ValueError("Alicat baud rate must be greater than zero")
+        selected_port = port.strip()
+        configured: dict[str, tuple[str, str]] = {}
+        for role in self._profile.enabled_roles:
+            if role.driver != "alicat" or role.connection_id is None:
+                continue
+            connection = self._profile.get_connection(role.connection_id)
+            configured_port = connection.parameters.get("port")
+            address = role.connection_parameters.get("address")
+            if (
+                isinstance(configured_port, str)
+                and configured_port.casefold() == selected_port.casefold()
+                and isinstance(address, str)
+            ):
+                kind = (
+                    "Controller"
+                    if role.capability is DeviceCapability.MASS_FLOW_CONTROLLER
+                    else "Meter"
+                )
+                configured[address.strip().upper()] = (role.device_id, kind)
+        return tuple(
+            AlicatScanRow(
+                device.address,
+                device.raw_response,
+                *(configured.get(device.address, (None, None))),
+            )
+            for device in self._alicat_scanner(selected_port, baud_rate)
+        )
 
     def check_device(self, device_id: str) -> ReadinessCheckResult:
         try:
@@ -293,6 +353,12 @@ class DeviceSetupViewModel:
             raise TypeError("Maximum flow must be numeric")
         if request.maximum_flow <= 0:
             raise ValueError("Maximum flow must be greater than zero")
+        device_kind = request.device_kind.strip().casefold()
+        if device_kind not in {"controller", "meter"}:
+            raise ValueError("Alicat device kind must be controller or meter")
+        flow_unit = request.flow_unit.strip()
+        if not flow_unit:
+            raise ValueError("Alicat flow unit cannot be empty")
 
         connection = self._find_alicat_connection(port)
         connections = self._profile.connections
@@ -326,13 +392,16 @@ class DeviceSetupViewModel:
 
         settings = {
             "maximum_flow": float(request.maximum_flow),
-            "flow_unit": "sccm",
-            "volumetric_flow_unit": "sccm",
+            "flow_unit": flow_unit,
+            "volumetric_flow_unit": (
+                "LPM" if flow_unit.casefold() == "slpm" else flow_unit
+            ),
             "pressure_unit": "psia",
             "temperature_unit": "degC",
             "frame_fields": (
-                "absolute_pressure,gas_temperature,volumetric_flow,"
-                "mass_flow,setpoint,gas"
+                "absolute_pressure,gas_temperature,volumetric_flow,mass_flow,"
+                + ("setpoint," if device_kind == "controller" else "")
+                + "gas"
             ),
             "hardware_label": hardware_label,
         }
@@ -343,7 +412,11 @@ class DeviceSetupViewModel:
         role = DeviceRole(
             device_id=device_id,
             friendly_name=hardware_label,
-            capability=DeviceCapability.MASS_FLOW_CONTROLLER,
+            capability=(
+                DeviceCapability.MASS_FLOW_CONTROLLER
+                if device_kind == "controller"
+                else DeviceCapability.MASS_FLOW_METER
+            ),
             driver="alicat",
             backend=DeviceBackend.REAL,
             required=True,

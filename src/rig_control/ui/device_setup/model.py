@@ -9,6 +9,7 @@ from rig_control.devices.alicat.configuration import (
 )
 from rig_control.devices.keithley_2260b.configuration import (
     Keithley2260BConfiguration,
+    VisaScpiConfiguration,
     configuration_from_profile as keithley_configuration_from_profile,
 )
 from rig_control.diagnostics.alicat import (
@@ -72,6 +73,9 @@ class AddKeithleyRequest:
     maximum_voltage: float = 30.0
     maximum_current: float = 108.0
     maximum_power: float = 1080.0
+    connection_method: str = "ethernet"
+    resource_name: str = ""
+    visa_baud_rate: int = 9600
 
 
 type SerialPortProvider = Callable[[], tuple[SerialPortInfo, ...]]
@@ -248,12 +252,17 @@ class DeviceSetupViewModel:
         backup_text = (
             f" Previous profile backed up to {backup}." if backup else ""
         )
+        connection_target = (
+            configuration.connection.resource_name
+            if isinstance(configuration.connection, VisaScpiConfiguration)
+            else f"{configuration.connection.host}:"
+            f"{configuration.connection.port}"
+        )
         return ReadinessCheckResult(
             True,
             f"Added {request.hardware_label.strip()!r} as "
             f"{configuration.device_id!r} at "
-            f"{configuration.connection.host}:"
-            f"{configuration.connection.port}. Read-only identity "
+            f"{connection_target}. Read-only identity "
             f"confirmed model {identity.model}, serial "
             f"{identity.serial_number}."
             + backup_text,
@@ -362,13 +371,21 @@ class DeviceSetupViewModel:
             request.device_id,
             request.hardware_label,
         )
+        method = request.connection_method.strip().casefold()
+        if method not in {"ethernet", "visa"}:
+            raise ValueError("Keithley connection method must be Ethernet or VISA")
         host = request.host.strip()
-        if not host:
-            raise ValueError("Keithley host name or IP address cannot be empty")
-        if not isinstance(request.port, int) or isinstance(request.port, bool):
-            raise TypeError("Keithley port must be an integer")
-        if not 1 <= request.port <= 65535:
-            raise ValueError("Keithley port must be between 1 and 65535")
+        resource_name = request.resource_name.strip()
+        if method == "visa":
+            if not resource_name:
+                raise ValueError("Keithley VISA resource name cannot be empty")
+        else:
+            if not host:
+                raise ValueError("Keithley host name or IP address cannot be empty")
+            if not isinstance(request.port, int) or isinstance(request.port, bool):
+                raise TypeError("Keithley port must be an integer")
+            if not 1 <= request.port <= 65535:
+                raise ValueError("Keithley port must be between 1 and 65535")
 
         numeric_limits = {
             "timeout": request.timeout_seconds,
@@ -376,6 +393,12 @@ class DeviceSetupViewModel:
             "maximum current": request.maximum_current,
             "maximum power": request.maximum_power,
         }
+        if not isinstance(request.visa_baud_rate, int) or isinstance(
+            request.visa_baud_rate, bool
+        ):
+            raise TypeError("Keithley VISA baud rate must be an integer")
+        if request.visa_baud_rate <= 0:
+            raise ValueError("Keithley VISA baud rate must be greater than zero")
         for name, value in numeric_limits.items():
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise TypeError(f"Keithley {name} must be numeric")
@@ -386,33 +409,52 @@ class DeviceSetupViewModel:
             if role.driver != "keithley_2260b" or role.connection_id is None:
                 continue
             connection = self._profile.get_connection(role.connection_id)
+            existing_resource = connection.parameters.get("resource_name")
             existing_host = connection.parameters.get("host")
             existing_port = connection.parameters.get("port")
-            if (
+            duplicate = (
+                method == "visa"
+                and isinstance(existing_resource, str)
+                and existing_resource.casefold() == resource_name.casefold()
+            ) or (
+                method == "ethernet"
+                and
                 isinstance(existing_host, str)
                 and existing_host.casefold() == host.casefold()
                 and existing_port == request.port
-            ):
+            )
+            if duplicate:
                 raise ValueError(
-                    f"Keithley target {host}:{request.port} is already used "
+                    f"Keithley target "
+                    f"{resource_name if method == 'visa' else f'{host}:{request.port}'} "
+                    "is already used "
                     f"by {role.device_id!r}"
                 )
 
+        target = resource_name if method == "visa" else host
         connection_id = self._unique_connection_id(
-            "keithley_ethernet_" + re.sub(
+            f"keithley_{method}_" + re.sub(
                 r"[^a-z0-9]+",
                 "_",
-                host.casefold(),
+                target.casefold(),
             ).strip("_")
         )
         connection = ConnectionDefinition(
             connection_id=connection_id,
-            connection_type="socket_scpi",
-            parameters={
-                "host": host,
-                "port": request.port,
-                "timeout_seconds": float(request.timeout_seconds),
-            },
+            connection_type=("visa_scpi" if method == "visa" else "socket_scpi"),
+            parameters=(
+                {
+                    "resource_name": resource_name,
+                    "baud_rate": request.visa_baud_rate,
+                    "timeout_seconds": float(request.timeout_seconds),
+                }
+                if method == "visa"
+                else {
+                    "host": host,
+                    "port": request.port,
+                    "timeout_seconds": float(request.timeout_seconds),
+                }
+            ),
         )
         settings = {
             "maximum_voltage": float(request.maximum_voltage),
@@ -548,6 +590,8 @@ class DeviceSetupViewModel:
             host = parameters.get("host", "not configured")
             port = parameters.get("port", "not configured")
             return f"{host}:{port}"
+        if connection.connection_type == "visa_scpi":
+            return str(parameters.get("resource_name", "not configured"))
         return connection.connection_id
 
 

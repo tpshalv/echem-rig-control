@@ -218,7 +218,7 @@ class DeviceSetupWindow:
             ("Alicat address", "A"),
             ("Maximum flow (SCCM)", "200"),
         )
-        entries: dict[str, ttk.Entry] = {}
+        entries: dict[str, ttk.Entry | ttk.Combobox] = {}
         for row_index, (label, default) in enumerate(fields):
             ttk.Label(form, text=label).grid(
                 row=row_index,
@@ -227,8 +227,17 @@ class DeviceSetupWindow:
                 padx=(0, 10),
                 pady=4,
             )
-            entry = ttk.Entry(form, width=32)
-            entry.insert(0, default)
+            if label == "Connection method (Ethernet or VISA)":
+                entry = ttk.Combobox(
+                    form,
+                    width=29,
+                    values=("VISA", "Ethernet"),
+                    state="readonly",
+                )
+                entry.set(default)
+            else:
+                entry = ttk.Entry(form, width=32)
+                entry.insert(0, default)
             entry.grid(row=row_index, column=1, sticky="ew", pady=4)
             entries[label] = entry
 
@@ -352,6 +361,9 @@ class DeviceSetupWindow:
             ("Device ID", "main_power_supply"),
             ("Hardware label", "Main power supply"),
             ("Purpose (optional)", "Electrolysis supply"),
+            ("Connection method (Ethernet or VISA)", "VISA"),
+            ("VISA resource", "ASRL4::INSTR"),
+            ("VISA baud rate", "9600"),
             ("IP address or host name", ""),
             ("SCPI port", "2268"),
             ("Timeout (seconds)", "5"),
@@ -417,6 +429,11 @@ class DeviceSetupWindow:
                     maximum_power=float(
                         entries["Maximum power (W)"].get().strip()
                     ),
+                    connection_method=entries[
+                        "Connection method (Ethernet or VISA)"
+                    ].get(),
+                    resource_name=entries["VISA resource"].get(),
+                    visa_baud_rate=int(entries["VISA baud rate"].get().strip()),
                 )
             except ValueError:
                 messagebox.showerror(
@@ -428,7 +445,7 @@ class DeviceSetupWindow:
 
             confirmed = messagebox.askyesno(
                 "Run read-only identification",
-                "Connect to the entered Ethernet target and send *IDN? "
+                "Connect to the entered target and send *IDN? "
                 "once?\n\nNo output or setpoint command will be sent.",
                 parent=dialog,
             )

@@ -3,6 +3,7 @@ from collections.abc import Sequence
 
 from rig_control.devices.keithley_2260b.configuration import (
     Keithley2260BConfiguration,
+    VisaScpiConfiguration,
     configuration_from_profile,
 )
 
@@ -14,6 +15,7 @@ from rig_control.devices.keithley_2260b.protocol import (
 )
 from rig_control.transports.scpi import ScpiTransport
 from rig_control.transports.socket_scpi import SocketScpiTransport
+from rig_control.transports.pyvisa_scpi import PyVisaScpiTransport
 
 
 def identify_keithley(
@@ -25,18 +27,25 @@ def identify_keithley(
     connection = configuration.connection
 
     if transport is None:
-        if connection.host.strip().upper() == "CHANGE_ME":
+        if isinstance(connection, VisaScpiConfiguration):
+            transport = PyVisaScpiTransport(
+                connection.resource_name,
+                timeout_seconds=connection.timeout_seconds,
+                baud_rate=connection.baud_rate,
+            )
+        elif connection.host.strip().upper() == "CHANGE_ME":
             raise ValueError(
                 "The Keithley IP address has not been configured. "
                 "Copy rig-profile.example.toml to rig-profile.toml and "
                 "replace CHANGE_ME with the instrument's IP address."
             )
 
-        transport = SocketScpiTransport(
-            host=connection.host,
-            port=connection.port,
-            timeout_seconds=connection.timeout_seconds,
-        )
+        else:
+            transport = SocketScpiTransport(
+                host=connection.host,
+                port=connection.port,
+                timeout_seconds=connection.timeout_seconds,
+            )
 
     try:
         transport.open()
@@ -91,9 +100,12 @@ def main(arguments: Sequence[str] | None = None) -> int:
 
         print("Keithley 2260B read-only diagnostic")
         print(f"Device ID: {configuration.device_id}")
-        print(
-            f"Target: {connection.host}:{connection.port}"
+        target = (
+            connection.resource_name
+            if isinstance(connection, VisaScpiConfiguration)
+            else f"{connection.host}:{connection.port}"
         )
+        print(f"Target: {target}")
         print(
             f"Timeout: {connection.timeout_seconds} seconds"
         )

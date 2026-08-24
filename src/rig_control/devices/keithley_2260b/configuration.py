@@ -48,11 +48,34 @@ class SocketScpiConfiguration:
 
 
 @dataclass(frozen=True, slots=True)
+class VisaScpiConfiguration:
+    """Settings for a VISA message-based SCPI instrument."""
+
+    resource_name: str
+    timeout_seconds: float = 5.0
+    baud_rate: int = 9600
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.resource_name, str) or not self.resource_name.strip():
+            raise ValueError("VISA resource name cannot be empty")
+        if isinstance(self.timeout_seconds, bool) or not isinstance(
+            self.timeout_seconds, (int, float)
+        ):
+            raise TypeError("VISA timeout must be an int or float")
+        if self.timeout_seconds <= 0:
+            raise ValueError("VISA timeout must be greater than zero")
+        if not isinstance(self.baud_rate, int) or isinstance(self.baud_rate, bool):
+            raise TypeError("VISA baud rate must be an integer")
+        if self.baud_rate <= 0:
+            raise ValueError("VISA baud rate must be greater than zero")
+
+
+@dataclass(frozen=True, slots=True)
 class Keithley2260BConfiguration:
     """Validated settings needed to construct one Keithley 2260B."""
 
     device_id: str
-    connection: SocketScpiConfiguration
+    connection: SocketScpiConfiguration | VisaScpiConfiguration
     limits: PowerSupplyLimits
 
     def __post_init__(self) -> None:
@@ -64,11 +87,11 @@ class Keithley2260BConfiguration:
 
         if not isinstance(
             self.connection,
-            SocketScpiConfiguration,
+            (SocketScpiConfiguration, VisaScpiConfiguration),
         ):
             raise TypeError(
                 "Keithley connection must be a "
-                "SocketScpiConfiguration"
+                "SocketScpiConfiguration or VisaScpiConfiguration"
             )
 
         if not isinstance(self.limits, PowerSupplyLimits):
@@ -113,15 +136,30 @@ def configuration_from_profile(
 
     connection = profile.get_connection(role.connection_id)
 
-    if connection.connection_type != "socket_scpi":
+    if connection.connection_type not in {"socket_scpi", "visa_scpi"}:
         raise ValueError(
             f"Keithley connection {connection.connection_id!r} "
-            "must use connection type 'socket_scpi'"
+            "must use connection type 'socket_scpi' or 'visa_scpi'"
         )
 
     return Keithley2260BConfiguration(
         device_id=role.device_id,
-        connection=SocketScpiConfiguration(
+        connection=(VisaScpiConfiguration(
+            resource_name=_require_text(
+                connection.parameters,
+                "resource_name",
+                f"connections.{connection.connection_id}.parameters.resource_name",
+            ),
+            timeout_seconds=_optional_number(
+                connection.parameters, "timeout_seconds", 5.0,
+                f"connections.{connection.connection_id}.parameters.timeout_seconds",
+            ),
+            baud_rate=_require_integer(
+                connection.parameters,
+                "baud_rate",
+                f"connections.{connection.connection_id}.parameters.baud_rate",
+            ),
+        ) if connection.connection_type == "visa_scpi" else SocketScpiConfiguration(
             host=_require_text(
                 connection.parameters,
                 "host",
@@ -142,7 +180,7 @@ def configuration_from_profile(
                 f"{connection.connection_id}."
                 "parameters.timeout_seconds",
             ),
-        ),
+        )),
         limits=PowerSupplyLimits(
             maximum_voltage=_require_number(
                 role.settings,

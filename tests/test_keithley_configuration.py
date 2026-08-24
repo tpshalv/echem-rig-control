@@ -3,6 +3,7 @@ import pytest
 from rig_control.devices.keithley_2260b.configuration import (
     Keithley2260BConfiguration,
     SocketScpiConfiguration,
+    VisaScpiConfiguration,
 )
 
 from rig_control.devices.power_supply import PowerSupplyLimits
@@ -30,6 +31,14 @@ def test_socket_configuration_stores_values() -> None:
     assert configuration.host == "192.168.1.50"
     assert configuration.port == 2268
     assert configuration.timeout_seconds == 5.0
+
+
+def test_visa_configuration_stores_resource_name() -> None:
+    configuration = VisaScpiConfiguration("ASRL4::INSTR", 5.0, 9600)
+
+    assert configuration.resource_name == "ASRL4::INSTR"
+    assert configuration.timeout_seconds == 5.0
+    assert configuration.baud_rate == 9600
 
 
 def test_socket_configuration_has_default_timeout() -> None:

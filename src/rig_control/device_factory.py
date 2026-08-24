@@ -38,6 +38,8 @@ from rig_control.rig_profile import (
 )
 from rig_control.models import EventSink
 from rig_control.transports.socket_scpi import SocketScpiTransport
+from rig_control.transports.pyvisa_scpi import PyVisaScpiTransport
+from rig_control.devices.keithley_2260b.configuration import VisaScpiConfiguration
 from rig_control.transports.pyserial_text import PySerialTextTransport
 from rig_control.transports.serial_text import SerialTextTransport
 from rig_control.transports.pyserial_duplex_text import PySerialDuplexTextTransport
@@ -207,11 +209,18 @@ def _create_real_keithley(
             role.device_id,
         )
         connection = configuration.connection
-        transport = SocketScpiTransport(
-            host=connection.host,
-            port=connection.port,
-            timeout_seconds=connection.timeout_seconds,
-        )
+        if isinstance(connection, VisaScpiConfiguration):
+            transport = PyVisaScpiTransport(
+                connection.resource_name,
+                timeout_seconds=connection.timeout_seconds,
+                baud_rate=connection.baud_rate,
+            )
+        else:
+            transport = SocketScpiTransport(
+                host=connection.host,
+                port=connection.port,
+                timeout_seconds=connection.timeout_seconds,
+            )
         return Keithley2260B(
             device_id=configuration.device_id,
             limits=configuration.limits,

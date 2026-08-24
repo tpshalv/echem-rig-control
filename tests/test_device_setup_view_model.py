@@ -374,6 +374,46 @@ def test_failed_keithley_identity_does_not_write_profile(tmp_path) -> None:
     assert not profile_path.exists()
 
 
+def test_identified_visa_keithley_is_saved_to_local_profile(tmp_path) -> None:
+    profile_path = tmp_path / "rig-profile.toml"
+    empty_profile = replace(
+        load_rig_profile("rig-profile.example.toml"),
+        connections=(),
+        device_roles=(),
+    )
+
+    def identify(configuration: Keithley2260BConfiguration) -> KeithleyIdentity:
+        assert configuration.connection.resource_name == "ASRL4::INSTR"
+        return KeithleyIdentity(
+            "Keithley Instruments", "2260B-30-108", "7654321", "1.00"
+        )
+
+    model = DeviceSetupViewModel(
+        empty_profile,
+        profile_path=profile_path,
+        keithley_checker=identify,
+    )
+    result = model.add_keithley_and_check(
+        AddKeithleyRequest(
+            "main_power_supply",
+            "Main power supply",
+            "Electrolysis supply",
+            "",
+            connection_method="visa",
+            resource_name="ASRL4::INSTR",
+        )
+    )
+
+    assert result.succeeded is True
+    assert "ASRL4::INSTR" in result.summary
+    saved = load_rig_profile(profile_path)
+    role = saved.get_role("main_power_supply")
+    connection = saved.get_connection(role.connection_id)
+    assert connection.connection_type == "visa_scpi"
+    assert connection.parameters["resource_name"] == "ASRL4::INSTR"
+    assert connection.parameters["baud_rate"] == 9600
+
+
 def test_duplicate_keithley_network_target_is_rejected_before_check() -> None:
     calls = 0
 

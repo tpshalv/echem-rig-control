@@ -362,6 +362,12 @@ class DiagnosticWindow:
                 f"Threads: {latest.thread_count}  |  "
                 f"Retained events: "
                 f"{_format_optional(latest.retained_event_count)}\n"
+                f"Windows GDI objects: "
+                f"{_format_optional(latest.gdi_object_count)}  |  "
+                f"USER objects: {_format_optional(latest.user_object_count)}\n"
+                f"UI ticks: {_format_optional(latest.ui_tick_count)}  |  "
+                f"UI tick failures: "
+                f"{_format_optional(latest.ui_tick_failure_count)}\n"
                 "Latest sample: "
                 f"{latest.timestamp.astimezone().isoformat(timespec='seconds')}"
             )

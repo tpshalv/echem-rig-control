@@ -21,6 +21,8 @@ def test_sample_records_process_python_and_application_metrics(
         "virtual_bytes": 30,
         "peak_resident_bytes": 40,
         "handle_count": 5,
+        "gdi_object_count": None,
+        "user_object_count": None,
         "thread_count": record["process"]["thread_count"],
     }
     assert record["application"] == {"queue": {"size": 7}}
@@ -106,7 +108,7 @@ def test_display_history_is_bounded_and_contains_live_counters(
             },
             "operation_ui": lambda: {"retained_event_count": 9},
         },
-        process_sampler=lambda: ProcessMemory(10, 20_000_000, 30, 40, 5),
+        process_sampler=lambda: ProcessMemory(10, 20_000_000, 30, 40, 5, 6, 7),
     )
 
     diagnostics.sample_now()
@@ -120,4 +122,6 @@ def test_display_history_is_bounded_and_contains_live_counters(
     assert history[-1].results_queue_capacity == 120
     assert history[-1].dropped_results_batches == 3
     assert history[-1].retained_event_count == 9
+    assert history[-1].gdi_object_count == 6
+    assert history[-1].user_object_count == 7
     assert diagnostics.latest_health_point() is history[-1]

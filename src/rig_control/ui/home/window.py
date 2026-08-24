@@ -218,15 +218,15 @@ class HomeWindow:
             session.control_service,
             profile_id=session.profile.profile_id,
         )
-        session.runtime_diagnostics.register_metric_provider(
-            "operation_ui",
-            model.diagnostic_metrics,
-        )
         window = OperationWindow(
             child,
             model,
             profile_name=session.profile.friendly_name,
             event_sink=session.technical_log.record,
+        )
+        session.runtime_diagnostics.register_metric_provider(
+            "operation_ui",
+            window.diagnostic_metrics,
         )
 
         def close() -> None:

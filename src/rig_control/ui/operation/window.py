@@ -1,4 +1,5 @@
 import tkinter as tk
+from datetime import UTC, datetime
 from tkinter import filedialog, messagebox, ttk
 from queue import Empty, Queue
 from threading import Thread
@@ -28,6 +29,17 @@ class OperationWindow:
         self._refresh_failed = False
         self._after_id: str | None = None
         self._measurement_keys: dict[str, tuple[str, str]] = {}
+        self._measurement_items: dict[tuple[str, str], str] = {}
+        self._measurement_values: dict[tuple[str, str], tuple[str, ...]] = {}
+        self._next_measurement_item = 0
+        self._displayed_warnings: tuple[tuple[str, str], ...] = ()
+        self._ui_tick_count = 0
+        self._ui_tick_failure_count = 0
+        self._last_successful_ui_tick: datetime | None = None
+        self._measurement_rows_created = 0
+        self._measurement_rows_updated = 0
+        self._measurement_rows_deleted = 0
+        self._warning_display_rebuilds = 0
         self._trend_windows: dict[tuple[str, str], TrendWindow] = {}
         self._connection_results: Queue[tuple[OperationActionResult, ...]] = Queue()
         self._connection_in_progress = False
@@ -359,6 +371,7 @@ class OperationWindow:
         self._after_id = self._root.after(100, self._poll_ui_queue)
 
     def _poll_ui_queue(self) -> None:
+        self._ui_tick_count += 1
         try:
             try:
                 connection_results = self._connection_results.get_nowait()
@@ -367,10 +380,11 @@ class OperationWindow:
             else:
                 self._finish_connect_all(connection_results)
             collected = self._view_model.collect_polling_results()
-            self._update_display()
             if collected:
+                self._update_display(refresh_trends=True)
                 self._manual_panel.refresh()
         except Exception as error:
+            self._ui_tick_failure_count += 1
             if not self._refresh_failed:
                 self._record_refresh_event(
                     Event(
@@ -385,6 +399,7 @@ class OperationWindow:
                 )
             self._refresh_failed = True
         else:
+            self._last_successful_ui_tick = datetime.now(UTC)
             if self._refresh_failed:
                 self._record_refresh_event(
                     Event(
@@ -408,28 +423,47 @@ class OperationWindow:
         except Exception:
             pass
 
-    def _update_display(self) -> None:
-        self._measurements.delete(*self._measurements.get_children())
-        self._measurement_keys.clear()
-        for index, row in enumerate(self._view_model.measurement_rows()):
-            item_id = f"measurement-{index}"
-            self._measurement_keys[item_id] = (row.device_id, row.channel)
-            self._measurements.insert(
-                "",
-                "end",
-                iid=item_id,
-                values=(
-                    row.device_id,
-                    row.channel.replace("_", " ").title(),
-                    format(row.value, ".6g"),
-                    row.unit,
-                    row.quality.upper(),
-                    row.timestamp.astimezone().isoformat(timespec="seconds"),
-                ),
+    def _update_display(self, *, refresh_trends: bool = False) -> None:
+        current_keys: set[tuple[str, str]] = set()
+        for row in self._view_model.measurement_rows():
+            key = (row.device_id, row.channel)
+            current_keys.add(key)
+            values = (
+                row.device_id,
+                row.channel.replace("_", " ").title(),
+                format(row.value, ".6g"),
+                row.unit,
+                row.quality.upper(),
+                row.timestamp.astimezone().isoformat(timespec="seconds"),
             )
-        self._warnings.delete(0, "end")
-        for device_id, warning in self._view_model.warnings():
-            self._warnings.insert("end", f"{device_id}: {warning}")
+            item_id = self._measurement_items.get(key)
+            if item_id is None:
+                item_id = f"measurement-{self._next_measurement_item}"
+                self._next_measurement_item += 1
+                self._measurement_items[key] = item_id
+                self._measurement_keys[item_id] = key
+                self._measurement_values[key] = values
+                self._measurements.insert("", "end", iid=item_id, values=values)
+                self._measurement_rows_created += 1
+            elif self._measurement_values.get(key) != values:
+                self._measurements.item(item_id, values=values)
+                self._measurement_values[key] = values
+                self._measurement_rows_updated += 1
+
+        for key in set(self._measurement_items) - current_keys:
+            item_id = self._measurement_items.pop(key)
+            self._measurements.delete(item_id)
+            self._measurement_keys.pop(item_id, None)
+            self._measurement_values.pop(key, None)
+            self._measurement_rows_deleted += 1
+
+        warnings = tuple(self._view_model.warnings())
+        if warnings != self._displayed_warnings:
+            self._warnings.delete(0, "end")
+            for device_id, warning in warnings:
+                self._warnings.insert("end", f"{device_id}: {warning}")
+            self._displayed_warnings = warnings
+            self._warning_display_rebuilds += 1
 
         monitoring = self._view_model.is_monitoring
         recording = self._view_model.is_recording
@@ -442,8 +476,28 @@ class OperationWindow:
         self._recording_status.configure(
             text="RECORDING" if recording else "Not recording"
         )
-        for trend in tuple(self._trend_windows.values()):
-            trend.refresh()
+        if refresh_trends:
+            for trend in tuple(self._trend_windows.values()):
+                trend.refresh()
+
+    def diagnostic_metrics(self) -> dict[str, object]:
+        metrics = dict(self._view_model.diagnostic_metrics())
+        metrics.update(
+            {
+                "ui_tick_count": self._ui_tick_count,
+                "ui_tick_failure_count": self._ui_tick_failure_count,
+                "last_successful_ui_tick": (
+                    self._last_successful_ui_tick.isoformat()
+                    if self._last_successful_ui_tick is not None
+                    else None
+                ),
+                "measurement_rows_created": self._measurement_rows_created,
+                "measurement_rows_updated": self._measurement_rows_updated,
+                "measurement_rows_deleted": self._measurement_rows_deleted,
+                "warning_display_rebuilds": self._warning_display_rebuilds,
+            }
+        )
+        return metrics
 
     def cancel_updates(self) -> None:
         if self._after_id is not None:

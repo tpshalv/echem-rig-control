@@ -24,6 +24,8 @@ class ProcessMemory:
     virtual_bytes: int | None
     peak_resident_bytes: int | None
     handle_count: int | None
+    gdi_object_count: int | None = None
+    user_object_count: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +39,10 @@ class RuntimeHealthPoint:
     results_queue_capacity: int | None
     dropped_results_batches: int | None
     retained_event_count: int | None
+    gdi_object_count: int | None
+    user_object_count: int | None
+    ui_tick_count: int | None
+    ui_tick_failure_count: int | None
 
     @property
     def value(self) -> float:
@@ -224,6 +230,8 @@ class RuntimeDiagnostics:
                 "virtual_bytes": memory.virtual_bytes,
                 "peak_resident_bytes": memory.peak_resident_bytes,
                 "handle_count": memory.handle_count,
+                "gdi_object_count": memory.gdi_object_count,
+                "user_object_count": memory.user_object_count,
                 "thread_count": active_count(),
             },
             "python": {
@@ -273,6 +281,12 @@ class RuntimeDiagnostics:
             ),
             retained_event_count=_optional_int(
                 operation_ui.get("retained_event_count")
+            ),
+            gdi_object_count=memory.gdi_object_count,
+            user_object_count=memory.user_object_count,
+            ui_tick_count=_optional_int(operation_ui.get("ui_tick_count")),
+            ui_tick_failure_count=_optional_int(
+                operation_ui.get("ui_tick_failure_count")
             ),
         )
         with self._display_history_lock:
@@ -414,6 +428,7 @@ def _sample_windows_process_memory() -> ProcessMemory:
 
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     psapi = ctypes.WinDLL("psapi", use_last_error=True)
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
     kernel32.GetCurrentProcess.restype = wintypes.HANDLE
     kernel32.GetProcessHandleCount.argtypes = [
         wintypes.HANDLE,
@@ -426,6 +441,8 @@ def _sample_windows_process_memory() -> ProcessMemory:
         wintypes.DWORD,
     ]
     psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+    user32.GetGuiResources.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    user32.GetGuiResources.restype = wintypes.DWORD
     process = kernel32.GetCurrentProcess()
     counters = ProcessMemoryCountersEx()
     counters.cb = ctypes.sizeof(counters)
@@ -444,6 +461,8 @@ def _sample_windows_process_memory() -> ProcessMemory:
         virtual_bytes=int(counters.PagefileUsage),
         peak_resident_bytes=int(counters.PeakWorkingSetSize),
         handle_count=handles,
+        gdi_object_count=int(user32.GetGuiResources(process, 0)),
+        user_object_count=int(user32.GetGuiResources(process, 1)),
     )
 
 

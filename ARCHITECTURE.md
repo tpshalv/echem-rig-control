@@ -2,6 +2,11 @@
 
 This document explains the main structure of the rig-control software and where future functionality should be added.
 
+For *why* a given piece of it is shaped the way it is — including
+alternatives that were considered and rejected — see `decisions/`, a
+retrospective log kept separate from this document so reasoning that gets
+superseded stays readable rather than being overwritten.
+
 ## Main objective
 
 The program controls and monitors an electrochemistry rig while keeping the user interface, hardware drivers, safety logic, experiment data, and recipes separate.

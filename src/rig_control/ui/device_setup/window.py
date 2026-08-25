@@ -7,6 +7,7 @@ from threading import Thread
 from tkinter import filedialog, messagebox, ttk
 
 from rig_control.ui.common.theme import MONOSPACE_FONT, SECTION_FONT, TITLE_FONT
+from rig_control.ui.common.widgets import VerticalScrolledFrame
 from rig_control.ui.device_setup.model import (
     AddAlicatRequest,
     AddEsp32Request,
@@ -420,21 +421,10 @@ class DeviceSetupWindow:
         dialog.geometry("720x720")
         dialog.columnconfigure(0, weight=1)
         dialog.rowconfigure(0, weight=1)
-        canvas = tk.Canvas(dialog, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(dialog, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=scrollbar.set)
-        canvas.grid(row=0, column=0, sticky="nsew")
-        scrollbar.grid(row=0, column=1, sticky="ns")
-        frame = ttk.Frame(canvas, padding=14)
-        window_id = canvas.create_window((0, 0), window=frame, anchor="nw")
-        frame.bind(
-            "<Configure>",
-            lambda _event: canvas.configure(scrollregion=canvas.bbox("all")),
-        )
-        canvas.bind(
-            "<Configure>",
-            lambda event: canvas.itemconfigure(window_id, width=event.width),
-        )
+        scroll = VerticalScrolledFrame(dialog)
+        scroll.grid(row=0, column=0, sticky="nsew")
+        frame = ttk.Frame(scroll.content, padding=14)
+        frame.grid(row=0, column=0, sticky="nsew")
         frame.columnconfigure(1, weight=1)
         friendly_name = tk.StringVar(value=original.friendly_name)
         enabled = tk.BooleanVar(value=original.enabled)

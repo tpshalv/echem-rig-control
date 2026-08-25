@@ -3,6 +3,8 @@ from dataclasses import dataclass, field
 from math import isfinite
 from types import MappingProxyType
 
+from rig_control.app_paths import experiments_directory, logs_directory
+
 
 type AppSettingValue = str | int | float | bool
 
@@ -69,14 +71,14 @@ SETTING_DEFINITIONS = (
         key="default_output_directory",
         label="Default recording output folder",
         description="Folder initially offered when starting an experiment recording.",
-        default="experiments",
+        default=str(experiments_directory()),
         validator=_non_empty_text,
     ),
     SettingDefinition(
         key="technical_log_path",
         label="Technical log file",
         description="Rotating application event-log location.",
-        default="logs/rig-control.log",
+        default=str(logs_directory() / "rig-control.log"),
         validator=_non_empty_text,
     ),
     SettingDefinition(

@@ -3,15 +3,37 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from rig_control.ui.common.theme import SECTION_FONT, TITLE_FONT
+from rig_control.ui.common.widgets import VerticalScrolledFrame
 from rig_control.ui.home.model import HomeActionResult, HomeViewModel
 
 
 class SettingsWindow:
     """Editor for application-wide preferences and their settings file."""
 
-    _ADVANCED_KEYS = frozenset({"technical_log_path"})
     _HIGH_CURRENT_MODE_KEY = "power_supply_high_current_mode"
     _CEILING_KEY = "power_supply_wiring_current_ceiling_amps"
+
+    # Ordered (category label, setting keys) - one section per category,
+    # picked from the sidebar. Add a new category here, or add a key to an
+    # existing one, to grow the settings screen without needing to touch
+    # its layout code.
+    _CATEGORIES: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("General", ("publish_interval_seconds",)),
+        (
+            "File save locations",
+            ("default_output_directory", "technical_log_path"),
+        ),
+        ("Graphical", ("trend_history_readings",)),
+        (
+            "Power supply safety",
+            (
+                _HIGH_CURRENT_MODE_KEY,
+                _CEILING_KEY,
+                "power_supply_default_current_amps",
+                "power_supply_default_voltage_volts",
+            ),
+        ),
+    )
 
     def __init__(
         self,
@@ -24,11 +46,11 @@ class SettingsWindow:
         self._view_model = view_model
         self._on_change = on_change
         self._entries: dict[str, ttk.Entry] = {}
-        self._advanced_visible = False
+        self._category_frames: dict[str, ttk.Frame] = {}
         self._high_current_var = tk.BooleanVar(value=False)
         root.title("Application Settings")
-        root.geometry("820x540")
-        root.minsize(680, 430)
+        root.geometry("820x560")
+        root.minsize(700, 420)
         root.columnconfigure(0, weight=1)
         root.rowconfigure(0, weight=1)
         self._create_widgets()
@@ -38,6 +60,7 @@ class SettingsWindow:
         main = ttk.Frame(self._root, padding=16)
         main.grid(row=0, column=0, sticky="nsew")
         main.columnconfigure(0, weight=1)
+        main.rowconfigure(2, weight=1)
 
         ttk.Label(main, text="Application settings", font=TITLE_FONT).grid(
             row=0, column=0, sticky="w", pady=(0, 12)
@@ -54,53 +77,45 @@ class SettingsWindow:
             row=0, column=2
         )
 
-        ordinary = ttk.LabelFrame(main, text="General", padding=10)
-        ordinary.grid(row=2, column=0, sticky="ew", pady=(0, 10))
-        ordinary.columnconfigure(1, weight=1)
+        body = ttk.Frame(main)
+        body.grid(row=2, column=0, sticky="nsew")
+        body.columnconfigure(1, weight=1)
+        body.rowconfigure(0, weight=1)
+
+        sidebar = ttk.Treeview(
+            body,
+            columns=(),
+            show="tree",
+            selectmode="browse",
+            height=len(self._CATEGORIES),
+        )
+        sidebar.column("#0", width=170, stretch=False)
+        sidebar.grid(row=0, column=0, sticky="ns", padx=(0, 12))
+        for category, _keys in self._CATEGORIES:
+            sidebar.insert("", "end", iid=category, text=category)
+        sidebar.bind("<<TreeviewSelect>>", self._on_category_selected)
+        self._sidebar = sidebar
+
+        detail_scroll = VerticalScrolledFrame(body)
+        detail_scroll.grid(row=0, column=1, sticky="nsew")
+        detail_scroll.content.columnconfigure(0, weight=1)
+
         rows = self._view_model.setting_rows()
-        excluded_keys = self._ADVANCED_KEYS | {
-            self._HIGH_CURRENT_MODE_KEY,
-            self._CEILING_KEY,
-        }
-        general_rows = [row for row in rows if row.key not in excluded_keys]
-        for index, row in enumerate(general_rows):
-            self._add_setting_row(ordinary, index, row)
+        rows_by_key = {row.key: row for row in rows}
+        for category, keys in self._CATEGORIES:
+            frame = ttk.Frame(detail_scroll.content, padding=(4, 0))
+            frame.grid(row=0, column=0, sticky="new")
+            frame.columnconfigure(1, weight=1)
+            self._category_frames[category] = frame
+            self._build_category(frame, [rows_by_key[key] for key in keys])
 
-        power_supply = ttk.LabelFrame(
-            main, text="Power supply safety", padding=10
-        )
-        power_supply.grid(row=3, column=0, sticky="ew", pady=(0, 10))
-        power_supply.columnconfigure(1, weight=1)
-        high_current_row = next(
-            row for row in rows if row.key == self._HIGH_CURRENT_MODE_KEY
-        )
-        ttk.Checkbutton(
-            power_supply,
-            text=high_current_row.label,
-            variable=self._high_current_var,
-            command=self._on_high_current_mode_toggled,
-        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=4)
-        ttk.Label(
-            power_supply, text=high_current_row.description, wraplength=560
-        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 4))
-        self._ceiling_frame = ttk.Frame(power_supply)
-        self._ceiling_frame.columnconfigure(1, weight=1)
-        ceiling_row = next(row for row in rows if row.key == self._CEILING_KEY)
-        self._add_setting_row(self._ceiling_frame, 0, ceiling_row)
-        self._ceiling_frame.grid(row=2, column=0, columnspan=2, sticky="ew")
-
-        self._advanced_button = ttk.Button(
-            main, text="Show advanced / technical settings", command=self._toggle_advanced
-        )
-        self._advanced_button.grid(row=4, column=0, sticky="w")
-        self._advanced = ttk.LabelFrame(main, text="Advanced / technical", padding=10)
-        self._advanced.columnconfigure(1, weight=1)
-        advanced_rows = [row for row in rows if row.key in self._ADVANCED_KEYS]
-        for index, row in enumerate(advanced_rows):
-            self._add_setting_row(self._advanced, index, row)
+        sidebar.selection_set(self._CATEGORIES[0][0])
+        # selection_set() does not itself fire <<TreeviewSelect>>, so the
+        # initial show/hide has to be forced explicitly.
+        self._on_category_selected(None)
 
         buttons = ttk.Frame(main)
-        buttons.grid(row=6, column=0, sticky="ew", pady=(16, 0))
+        buttons.grid(row=3, column=0, sticky="ew", pady=(16, 0))
         ttk.Button(buttons, text="Apply", command=self._apply).grid(row=0, column=0)
         ttk.Button(buttons, text="Save", command=self._save).grid(
             row=0, column=1, padx=(8, 0)
@@ -109,13 +124,38 @@ class SettingsWindow:
             row=0, column=2, padx=(8, 0)
         )
         self._status = ttk.Label(main, font=SECTION_FONT)
-        self._status.grid(row=7, column=0, sticky="w", pady=(10, 0))
+        self._status.grid(row=4, column=0, sticky="w", pady=(10, 0))
 
-    def _add_setting_row(self, parent: ttk.LabelFrame, index: int, row) -> None:
+    def _build_category(self, frame: ttk.Frame, rows: list) -> None:
+        index = 0
+        for row in rows:
+            if row.key == self._HIGH_CURRENT_MODE_KEY:
+                ttk.Checkbutton(
+                    frame,
+                    text=row.label,
+                    variable=self._high_current_var,
+                    command=self._on_high_current_mode_toggled,
+                ).grid(row=index, column=0, columnspan=2, sticky="w", pady=4)
+                index += 1
+                ttk.Label(frame, text=row.description, wraplength=480).grid(
+                    row=index, column=0, columnspan=2, sticky="w", pady=(0, 4)
+                )
+                index += 1
+            elif row.key == self._CEILING_KEY:
+                self._ceiling_frame = ttk.Frame(frame)
+                self._ceiling_frame.columnconfigure(1, weight=1)
+                self._add_setting_row(self._ceiling_frame, 0, row)
+                self._ceiling_row_index = index
+                index += 1
+            else:
+                self._add_setting_row(frame, index, row)
+                index += 1
+
+    def _add_setting_row(self, parent: ttk.Frame, index: int, row) -> None:
         ttk.Label(parent, text=f"{row.label}:").grid(
             row=index, column=0, sticky="w", pady=4
         )
-        entry = ttk.Entry(parent, width=58)
+        entry = ttk.Entry(parent, width=48)
         entry.grid(row=index, column=1, sticky="ew", padx=8, pady=4)
         self._entries[row.key] = entry
         if row.key == "default_output_directory":
@@ -150,14 +190,16 @@ class SettingsWindow:
         )
         self._update_ceiling_visibility()
 
-    def _toggle_advanced(self) -> None:
-        self._advanced_visible = not self._advanced_visible
-        if self._advanced_visible:
-            self._advanced.grid(row=5, column=0, sticky="ew", pady=(8, 0))
-            self._advanced_button.configure(text="Hide advanced / technical settings")
-        else:
-            self._advanced.grid_remove()
-            self._advanced_button.configure(text="Show advanced / technical settings")
+    def _on_category_selected(self, _event: tk.Event) -> None:
+        selection = self._sidebar.selection()
+        if not selection:
+            return
+        selected = selection[0]
+        for category, frame in self._category_frames.items():
+            if category == selected:
+                frame.grid(row=0, column=0, sticky="new")
+            else:
+                frame.grid_remove()
 
     def _on_high_current_mode_toggled(self) -> None:
         if self._high_current_var.get():
@@ -178,7 +220,9 @@ class SettingsWindow:
 
     def _update_ceiling_visibility(self) -> None:
         if self._high_current_var.get():
-            self._ceiling_frame.grid(row=2, column=0, columnspan=2, sticky="ew")
+            self._ceiling_frame.grid(
+                row=self._ceiling_row_index, column=0, columnspan=2, sticky="ew"
+            )
         else:
             self._ceiling_frame.grid_remove()
 

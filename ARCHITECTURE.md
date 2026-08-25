@@ -33,6 +33,42 @@ Measurements travel in the opposite direction:
         -> Control and data systems
         -> Live user interface and experiment files
 
+## Where user data lives
+
+Real rig profiles, application settings, technical logs, and recorded
+experiment data are per-machine, user-editable state - not source code -
+and are kept out of the checkout so re-cloning or updating the repository
+never touches them. `app_paths.py` resolves one data-home folder per
+machine:
+
+    ECHEM_RIG_CONTROL_HOME env var, if set
+        -> that folder exactly (e.g. a portable/USB deployment)
+    otherwise %LOCALAPPDATA%\EchemRigControl (Windows)
+    otherwise ~/.echem-rig-control (fallback)
+
+with settings/, profiles/, logs/, and experiments/ subfolders, plus
+`app-selection.toml` at the top (which settings file and rig profile are
+currently active - see "User interface" below). Application setting
+defaults for the log path and default recording folder point here too,
+so a freshly created settings file writes to the data home without
+needing to be told to.
+
+The example/simulation profiles shipped in this repository
+(`rig-profile.simulation.toml`, `rig-profile.example.toml`) are checked
+into git and stay in the repository, since tests and quick demos
+reference them directly - they are fixtures, not a real rig's
+configuration. A real rig profile, once created through Device Setup,
+belongs under the data home's `profiles/` folder instead.
+
+**Moving an existing installation**: if a machine already has
+`app-selection.toml`, a rig profile, or a settings file sitting at the
+repository root from before this change, move them into the new data
+home manually (there is no automatic migration) - update any relative
+paths inside `app-selection.toml` to point at the new locations, and
+edit `default_output_directory`/`technical_log_path` inside the moved
+settings file if they should point at the new `experiments/`/`logs/`
+folders too.
+
 ## Rig profile
 
 `rig-profile.toml` describes the hardware arrangement expected for a particular rig.

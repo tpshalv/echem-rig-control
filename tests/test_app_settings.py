@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from rig_control.app_paths import experiments_directory, logs_directory
 from rig_control.app_settings import (
     AppSettings,
     default_app_settings,
@@ -15,9 +16,11 @@ def test_defaults_are_safe_and_explicit() -> None:
     settings = default_app_settings()
 
     assert settings.publish_interval_seconds == 1.0
-    assert settings.technical_log_path == "logs/rig-control.log"
+    # Both default paths sit under the per-machine data home, not next to
+    # the source checkout (see app_paths.py).
+    assert settings.technical_log_path == str(logs_directory() / "rig-control.log")
     assert settings.trend_history_readings == 500
-    assert settings.default_output_directory == "experiments"
+    assert settings.default_output_directory == str(experiments_directory())
     assert settings.power_supply_default_current_amps == 20.0
     assert settings.power_supply_default_voltage_volts == 10.0
     assert settings.power_supply_high_current_mode is False

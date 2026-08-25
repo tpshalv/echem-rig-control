@@ -26,13 +26,14 @@ class VerticalScrolledFrame(ttk.Frame):
         )
         self._canvas.grid(row=0, column=0, sticky="nsew")
 
-        scrollbar = ttk.Scrollbar(
+        self._scrollbar = ttk.Scrollbar(
             self,
             orient="vertical",
             command=self._canvas.yview,
         )
-        scrollbar.grid(row=0, column=1, sticky="ns")
-        self._canvas.configure(yscrollcommand=scrollbar.set)
+        self._scrollbar.grid(row=0, column=1, sticky="ns")
+        self._scrollbar_visible = True
+        self._canvas.configure(yscrollcommand=self._scrollbar.set)
 
         self.content = ttk.Frame(self._canvas)
         self.content.columnconfigure(0, weight=1)
@@ -52,12 +53,31 @@ class VerticalScrolledFrame(ttk.Frame):
 
     def _update_scroll_region(self, _event: tk.Event) -> None:
         self._canvas.configure(scrollregion=self._canvas.bbox("all"))
+        self._refresh_scrollbar_visibility()
 
     def _match_content_width(self, event: tk.Event) -> None:
         self._canvas.itemconfigure(
             self._content_window,
             width=event.width,
         )
+        self._refresh_scrollbar_visibility()
+
+    def _refresh_scrollbar_visibility(self) -> None:
+        """Show the scrollbar only while content is actually taller than
+        the visible area; hide it (rather than just leaving it inert) so
+        a short dialog never carries a dead scroll track."""
+
+        needed = self.content.winfo_reqheight()
+        available = self._canvas.winfo_height()
+        should_show = needed > available > 1
+
+        if should_show and not self._scrollbar_visible:
+            self._scrollbar.grid(row=0, column=1, sticky="ns")
+            self._scrollbar_visible = True
+        elif not should_show and self._scrollbar_visible:
+            self._scrollbar.grid_remove()
+            self._scrollbar_visible = False
+            self._canvas.yview_moveto(0)
 
     def _on_mouse_wheel(self, event: tk.Event) -> str | None:
         """Scroll only when the pointer is inside this container."""

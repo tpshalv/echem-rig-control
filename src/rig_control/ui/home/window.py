@@ -4,6 +4,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+from rig_control.app_paths import default_selection_path
 from rig_control.app_selection import load_app_selection
 from rig_control.ui.common.theme import SECTION_FONT, TITLE_FONT, apply_blueprint_theme
 from rig_control.ui.device_setup.model import DeviceSetupViewModel
@@ -292,14 +293,20 @@ def main(arguments: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Start Echem Rig Control")
     parser.add_argument("--profile")
     parser.add_argument("--settings")
-    parser.add_argument("--selection", default="app-selection.toml")
+    parser.add_argument("--selection")
     parsed = parser.parse_args(arguments)
     profile_path = parsed.profile
     settings_path = parsed.settings
+    # Defaults to the per-machine data home (see app_paths.py) so a normal
+    # launch never reads or writes configuration next to the source code.
+    # A selection file there only ever exists once something has actually
+    # been saved; a completely fresh checkout with nothing saved yet still
+    # falls through to the shipped simulation profile below, unchanged.
+    selection_path = parsed.selection or str(default_selection_path())
     if (profile_path is None or settings_path is None) and Path(
-        parsed.selection
+        selection_path
     ).exists():
-        selection = load_app_selection(parsed.selection)
+        selection = load_app_selection(selection_path)
         profile_path = profile_path or selection.rig_profile_file
         settings_path = settings_path or selection.settings_file
     profile_path = profile_path or "rig-profile.simulation.toml"
@@ -308,7 +315,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
     model = HomeViewModel(
         rig_profile_path=profile_path,
         settings_path=settings_path,
-        selection_path=parsed.selection,
+        selection_path=selection_path,
     )
     root = tk.Tk()
     home_window = HomeWindow(root, model)

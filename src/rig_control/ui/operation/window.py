@@ -371,7 +371,8 @@ class OperationWindow:
                     label,
                     reading.unit,
                     group,
-                    "setpoint" in channel or "limit" in channel,
+                    quantity=row.channel_name if row is not None else "",
+                    is_setpoint="setpoint" in channel or "limit" in channel,
                 )
             )
         return tuple(sorted(signals, key=lambda signal: signal.label.casefold()))

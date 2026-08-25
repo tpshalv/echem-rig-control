@@ -3,10 +3,10 @@ from __future__ import annotations
 import tkinter as tk
 from dataclasses import dataclass
 from datetime import datetime
-from math import ceil, floor
+from math import ceil, floor, log10
 from tkinter import messagebox, ttk
 
-from rig_control.ui.common.theme import INFO_TEXT, MUTED_TEXT, SECTION_FONT
+from rig_control.ui.common.theme import HAIRLINE, INFO_TEXT, MUTED_TEXT, SECTION_FONT
 from rig_control.ui.operation.trend_window import (
     TIME_RANGES,
     padded_value_range,
@@ -26,6 +26,7 @@ TRACE_COLOURS = (
     "#A23B72",
     "#596157",
 )
+RANGE_RELAX_FACTOR = 0.15
 TIME_TICK_INTERVALS = (
     1,
     2,
@@ -43,6 +44,44 @@ TIME_TICK_INTERVALS = (
     21_600,
     43_200,
 )
+
+
+NICE_STEP_FACTORS = (1, 2, 2.5, 5, 10)
+
+
+def value_axis_ticks(
+    minimum: float,
+    maximum: float,
+    *,
+    maximum_count: int = 4,
+) -> tuple[float, ...]:
+    """Return "nice", evenly spaced tick values covering the given range.
+
+    Ticks are not forced to land exactly on minimum/maximum: with a
+    reasonable step, the lowest and highest ticks naturally fall close to
+    (but not exactly on) the ends of the range, which is enough to read the
+    axis at a glance without needing separate always-shown min/max labels.
+    """
+
+    span = maximum - minimum
+    if span <= 0 or maximum_count < 1:
+        return ()
+    raw_step = span / maximum_count
+    magnitude = 10 ** floor(log10(raw_step))
+    step = next(
+        (
+            factor * magnitude
+            for factor in NICE_STEP_FACTORS
+            if factor * magnitude >= raw_step
+        ),
+        NICE_STEP_FACTORS[-1] * magnitude,
+    )
+    ticks: list[float] = []
+    value = ceil(minimum / step) * step
+    while value <= maximum + step * 1e-9 and len(ticks) < maximum_count:
+        ticks.append(value)
+        value += step
+    return tuple(ticks)
 
 
 def time_axis_ticks(
@@ -77,11 +116,16 @@ class DashboardSignal:
     label: str
     unit: str
     group: str
+    quantity: str = ""
     is_setpoint: bool = False
 
     @property
     def key(self) -> tuple[str, str]:
         return (self.device_id, self.channel)
+
+    @property
+    def display_quantity(self) -> str:
+        return self.quantity or self.channel.replace("_", " ").capitalize()
 
 
 def quadrant_layout(count: int) -> tuple[tuple[int, int, int], ...]:
@@ -106,10 +150,8 @@ class MultiTraceCanvasRenderer:
         self._axis = canvas.create_line(0, 0, 0, 0, state="hidden")
         self._right_axis = canvas.create_line(0, 0, 0, 0, state="hidden")
         self._empty = canvas.create_text(0, 0, state="hidden")
-        self._left_maximum = canvas.create_text(0, 0, state="hidden")
-        self._left_minimum = canvas.create_text(0, 0, state="hidden")
-        self._right_maximum = canvas.create_text(0, 0, state="hidden")
-        self._right_minimum = canvas.create_text(0, 0, state="hidden")
+        self._left_unit = canvas.create_text(0, 0, state="hidden")
+        self._right_unit = canvas.create_text(0, 0, state="hidden")
         self._time_ticks = tuple(
             (
                 canvas.create_line(0, 0, 0, 0, state="hidden"),
@@ -117,11 +159,67 @@ class MultiTraceCanvasRenderer:
             )
             for _ in range(7)
         )
+        self._left_value_ticks = tuple(
+            (
+                canvas.create_line(0, 0, 0, 0, state="hidden"),
+                canvas.create_text(0, 0, state="hidden"),
+            )
+            for _ in range(4)
+        )
+        self._right_value_ticks = tuple(
+            (
+                canvas.create_line(0, 0, 0, 0, state="hidden"),
+                canvas.create_text(0, 0, state="hidden"),
+            )
+            for _ in range(4)
+        )
         self._lines: dict[tuple[str, str], int] = {}
+        self._displayed_ranges: dict[str, tuple[float, float]] = {}
 
     @property
     def item_count(self) -> int:
-        return 21 + len(self._lines)
+        return 35 + len(self._lines)
+
+    def reset(self) -> None:
+        """Forget any sticky axis ranges, e.g. when the signal set changes."""
+
+        self._displayed_ranges.clear()
+
+    def _apply_sticky_range(
+        self,
+        unit: str,
+        desired_min: float,
+        desired_max: float,
+    ) -> tuple[float, float]:
+        """Damp axis rescaling: snap outward immediately, relax inward slowly.
+
+        A tight-fit-every-redraw axis makes the trace visibly jump whenever
+        the live window's min/max shifts by a small amount. Widening
+        immediately keeps new data from ever being clipped off-screen;
+        shrinking only gradually keeps the axis (and the trace) visually
+        steady between redraws instead of constantly re-fitting.
+        """
+
+        previous = self._displayed_ranges.get(unit)
+        if previous is None:
+            result = (desired_min, desired_max)
+        else:
+            previous_min, previous_max = previous
+            new_min = (
+                desired_min
+                if desired_min < previous_min
+                else previous_min
+                + (desired_min - previous_min) * RANGE_RELAX_FACTOR
+            )
+            new_max = (
+                desired_max
+                if desired_max > previous_max
+                else previous_max
+                + (desired_max - previous_max) * RANGE_RELAX_FACTOR
+            )
+            result = (new_min, new_max)
+        self._displayed_ranges[unit] = result
+        return result
 
     def draw(
         self,
@@ -174,6 +272,9 @@ class MultiTraceCanvasRenderer:
         units = tuple(dict.fromkeys(signal.unit or "value" for signal, _, _ in visible))
         left_unit = units[0]
         right_unit = units[1] if len(units) > 1 else None
+        unit_quantities: dict[str, str] = {}
+        for signal, _readings, _colour in visible:
+            unit_quantities.setdefault(signal.unit or "value", signal.display_quantity)
         ranges: dict[str, tuple[float, float]] = {}
         for unit in units[:2]:
             values = [
@@ -183,10 +284,11 @@ class MultiTraceCanvasRenderer:
                 for reading in readings
             ]
             minimum, maximum = min(values), max(values)
-            ranges[unit] = padded_value_range(minimum, maximum, unit)
+            desired_min, desired_max = padded_value_range(minimum, maximum, unit)
+            ranges[unit] = self._apply_sticky_range(unit, desired_min, desired_max)
 
-        left, top = 58, 18
-        right = width - (58 if right_unit else 16)
+        left, top = 60, 18
+        right = width - (60 if right_unit else 16)
         bottom = height - 34
         self._canvas.itemconfigure(self._empty, state="hidden")
         self._canvas.coords(self._axis, left, top, left, bottom, right, bottom)
@@ -230,38 +332,50 @@ class MultiTraceCanvasRenderer:
 
         left_min, left_max = ranges[left_unit]
         self._set_text(
-            self._left_maximum,
-            left - 6,
-            top,
-            f"{left_max:.5g} {left_unit}",
-            "e",
+            self._left_unit,
+            14,
+            (top + bottom) / 2,
+            f"{unit_quantities[left_unit]} ({left_unit})",
+            "center",
+            angle=90,
         )
-        self._set_text(
-            self._left_minimum,
-            left - 6,
-            bottom,
-            f"{left_min:.5g} {left_unit}",
-            "e",
+        self._draw_value_ticks(
+            self._left_value_ticks,
+            minimum=left_min,
+            maximum=left_max,
+            axis_x=left,
+            label_x=left - 6,
+            anchor="e",
+            gridline_end=right,
+            top=top,
+            bottom=bottom,
         )
         if right_unit:
             right_min, right_max = ranges[right_unit]
             self._set_text(
-                self._right_maximum,
-                right + 6,
-                top,
-                f"{right_max:.5g} {right_unit}",
-                "w",
+                self._right_unit,
+                width - 14,
+                (top + bottom) / 2,
+                f"{unit_quantities[right_unit]} ({right_unit})",
+                "center",
+                angle=90,
             )
-            self._set_text(
-                self._right_minimum,
-                right + 6,
-                bottom,
-                f"{right_min:.5g} {right_unit}",
-                "w",
+            self._draw_value_ticks(
+                self._right_value_ticks,
+                minimum=right_min,
+                maximum=right_max,
+                axis_x=right,
+                label_x=right + 6,
+                anchor="w",
+                gridline_end=None,
+                top=top,
+                bottom=bottom,
             )
         else:
-            self._canvas.itemconfigure(self._right_maximum, state="hidden")
-            self._canvas.itemconfigure(self._right_minimum, state="hidden")
+            self._canvas.itemconfigure(self._right_unit, state="hidden")
+            for mark, label in self._right_value_ticks:
+                self._canvas.itemconfigure(mark, state="hidden")
+                self._canvas.itemconfigure(label, state="hidden")
         ticks = time_axis_ticks(selected_start, selected_end)
         for index, (mark, label) in enumerate(self._time_ticks):
             if index >= len(ticks):
@@ -275,15 +389,46 @@ class MultiTraceCanvasRenderer:
             self._set_text(label, x, bottom + 7, text, "n")
         return (selected_start, selected_end)
 
+    def _draw_value_ticks(
+        self,
+        slots: tuple[tuple[int, int], ...],
+        *,
+        minimum: float,
+        maximum: float,
+        axis_x: float,
+        label_x: float,
+        anchor: str,
+        gridline_end: float | None,
+        top: float,
+        bottom: float,
+    ) -> None:
+        ticks = value_axis_ticks(minimum, maximum, maximum_count=len(slots))
+        for index, (mark, label) in enumerate(slots):
+            if index >= len(ticks):
+                self._canvas.itemconfigure(mark, state="hidden")
+                self._canvas.itemconfigure(label, state="hidden")
+                continue
+            value = ticks[index]
+            y = bottom - (value - minimum) / (maximum - minimum) * (bottom - top)
+            if gridline_end is None:
+                end_x = axis_x + 4
+                colour = MUTED_TEXT
+            else:
+                end_x = gridline_end
+                colour = HAIRLINE
+            self._canvas.coords(mark, axis_x, y, end_x, y)
+            self._canvas.itemconfigure(mark, fill=colour, state="normal")
+            self._set_text(label, label_x, y, f"{value:.3g}", anchor)
+
     def _show_empty(self, width: int, height: int) -> None:
         for item in (
             self._axis,
             self._right_axis,
-            self._left_maximum,
-            self._left_minimum,
-            self._right_maximum,
-            self._right_minimum,
+            self._left_unit,
+            self._right_unit,
             *(item for pair in self._time_ticks for item in pair),
+            *(item for pair in self._left_value_ticks for item in pair),
+            *(item for pair in self._right_value_ticks for item in pair),
         ):
             self._canvas.itemconfigure(item, state="hidden")
         self._canvas.coords(self._empty, width / 2, height / 2)
@@ -301,16 +446,23 @@ class MultiTraceCanvasRenderer:
         y: float,
         text: str,
         anchor: str,
+        *,
+        angle: int = 0,
     ) -> None:
         self._canvas.coords(item, x, y)
         self._canvas.itemconfigure(
-            item, text=text, anchor=anchor, fill=MUTED_TEXT, state="normal"
+            item,
+            text=text,
+            anchor=anchor,
+            angle=angle,
+            fill=MUTED_TEXT,
+            state="normal",
         )
 
 
 class DashboardPanel(ttk.LabelFrame):
     def __init__(self, parent, *, signal_provider, history_provider) -> None:
-        super().__init__(parent, text="LIVE GRAPH", padding=6)
+        super().__init__(parent, text="LIVE GRAPH", padding=10)
         self._signal_provider = signal_provider
         self._history_provider = history_provider
         self._selected: dict[tuple[str, str], DashboardSignal] = {}
@@ -492,6 +644,7 @@ class DashboardPanel(ttk.LabelFrame):
         self._selected.clear()
         self._visible.clear()
         self._rebuild_legend()
+        self._renderer.reset()
         self.reset_view()
 
     def _zoom(self, event: tk.Event) -> str:
@@ -636,6 +789,6 @@ class LiveDashboardWindow:
                 column=column,
                 columnspan=span,
                 sticky="nsew",
-                padx=4,
-                pady=4,
+                padx=8,
+                pady=8,
             )

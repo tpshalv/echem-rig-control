@@ -11,12 +11,14 @@ from rig_control.ui.operation.dashboard_window import (
     MultiTraceCanvasRenderer,
     quadrant_layout,
     time_axis_ticks,
+    value_axis_ticks,
 )
 
 
 class FakeCanvas:
     def __init__(self) -> None:
         self.created = 0
+        self.configured: dict[int, dict] = {}
 
     def _create(self, *_args, **_kwargs) -> int:
         self.created += 1
@@ -29,8 +31,8 @@ class FakeCanvas:
     def coords(self, *_args) -> None:
         pass
 
-    def itemconfigure(self, *_args, **_kwargs) -> None:
-        pass
+    def itemconfigure(self, item, *_args, **kwargs) -> None:
+        self.configured[item] = kwargs
 
 
 def test_chart_subsampling_caps_points_and_preserves_endpoints() -> None:
@@ -107,6 +109,102 @@ def test_dashboard_time_ticks_use_clean_clock_boundaries() -> None:
         "12:50",
         "13:00",
     ]
+
+
+def test_dashboard_value_ticks_use_nice_round_numbers() -> None:
+    assert value_axis_ticks(0.0, 100.0) == (0.0, 25.0, 50.0, 75.0)
+    assert value_axis_ticks(-10.0, 10.0) == (-10.0, -5.0, 0.0, 5.0)
+
+
+def test_dashboard_value_ticks_stay_within_bounds() -> None:
+    ticks = value_axis_ticks(21.9, 22.34)
+
+    assert ticks
+    assert all(21.9 <= tick <= 22.34 for tick in ticks)
+
+
+def test_dashboard_value_ticks_empty_for_zero_span() -> None:
+    assert value_axis_ticks(5.0, 5.0) == ()
+
+
+def test_multi_trace_renderer_draws_value_ticks_covering_the_range() -> None:
+    canvas = FakeCanvas()
+    renderer = MultiTraceCanvasRenderer(canvas)
+    start = datetime(2026, 8, 24, tzinfo=UTC)
+    signal = DashboardSignal("sensor", "temperature", "Temperature", "degC", "Temperatures")
+    readings = tuple(
+        SimpleNamespace(value=float(index) * 10, timestamp=start + timedelta(seconds=index))
+        for index in range(10)
+    )
+
+    renderer.draw(
+        width=600,
+        height=300,
+        traces=((signal, readings, "blue"),),
+        view_start=None,
+        view_end=None,
+    )
+
+    assert len(renderer._left_value_ticks) == 4
+    assert renderer.item_count == 35 + 1
+
+
+def test_dashboard_signal_quantity_falls_back_to_humanized_channel() -> None:
+    explicit = DashboardSignal(
+        "ps", "current", "Supply — Current draw", "A", "Electrical", "Current draw"
+    )
+    assert explicit.display_quantity == "Current draw"
+
+    fallback = DashboardSignal("mfc", "mass_flow", "MFC — Mass flow", "sccm", "Flows")
+    assert fallback.display_quantity == "Mass flow"
+
+
+def test_dashboard_axis_title_uses_signal_quantity_not_group() -> None:
+    canvas = FakeCanvas()
+    renderer = MultiTraceCanvasRenderer(canvas)
+    start = datetime(2026, 8, 24, tzinfo=UTC)
+    signal = DashboardSignal(
+        "ps", "current", "Supply — Current draw", "A", "Electrical", "Current draw"
+    )
+    readings = tuple(
+        SimpleNamespace(value=float(index), timestamp=start + timedelta(seconds=index))
+        for index in range(3)
+    )
+
+    renderer.draw(
+        width=600,
+        height=300,
+        traces=((signal, readings, "blue"),),
+        view_start=None,
+        view_end=None,
+    )
+
+    assert canvas.configured[renderer._left_unit]["text"] == "Current draw (A)"
+
+
+def test_sticky_range_widens_immediately_but_shrinks_gradually() -> None:
+    canvas = FakeCanvas()
+    renderer = MultiTraceCanvasRenderer(canvas)
+
+    first = renderer._apply_sticky_range("degC", 10.0, 20.0)
+    assert first == (10.0, 20.0)
+
+    grown = renderer._apply_sticky_range("degC", 5.0, 30.0)
+    assert grown == (5.0, 30.0)
+
+    shrunk = renderer._apply_sticky_range("degC", 10.0, 20.0)
+    assert 5.0 < shrunk[0] < 10.0
+    assert 20.0 < shrunk[1] < 30.0
+
+
+def test_sticky_range_reset_clears_state() -> None:
+    canvas = FakeCanvas()
+    renderer = MultiTraceCanvasRenderer(canvas)
+    renderer._apply_sticky_range("degC", 5.0, 30.0)
+
+    renderer.reset()
+
+    assert renderer._apply_sticky_range("degC", 10.0, 20.0) == (10.0, 20.0)
 
 
 def test_multi_trace_renderer_reuses_one_line_per_signal() -> None:

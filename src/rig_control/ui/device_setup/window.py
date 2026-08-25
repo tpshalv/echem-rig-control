@@ -1337,10 +1337,14 @@ class DeviceSetupWindow:
                 maximum_flow = float(
                     entries["Maximum flow"].get().strip()
                 )
+                poll_interval_seconds = float(
+                    entries["Measurement interval (seconds)"].get().strip()
+                )
             except ValueError:
                 messagebox.showerror(
-                    "Invalid maximum flow",
-                    "Maximum flow must be a number.",
+                    "Invalid numeric value",
+                    "Maximum flow and measurement interval must be "
+                    "numbers.",
                     parent=dialog,
                 )
                 return
@@ -1365,9 +1369,7 @@ class DeviceSetupWindow:
                     maximum_flow=maximum_flow,
                     device_kind="meter" if is_meter else "controller",
                     flow_unit=entries["Mass-flow unit"].get(),
-                    poll_interval_seconds=float(
-                        entries["Measurement interval (seconds)"].get().strip()
-                    ),
+                    poll_interval_seconds=poll_interval_seconds,
                 )
             )
             self._record_result(result)
@@ -1396,6 +1398,11 @@ class DeviceSetupWindow:
             text="Read-only check and save",
             command=check_and_save,
         ).grid(row=0, column=1)
+        for field_entry in entries.values():
+            field_entry.bind("<Return>", lambda _event: check_and_save())
+            field_entry.bind("<KP_Enter>", lambda _event: check_and_save())
+        port_selector.bind("<Return>", lambda _event: check_and_save())
+        port_selector.bind("<KP_Enter>", lambda _event: check_and_save())
         entries["Device ID"].focus_set()
         entries["Device ID"].selection_range(0, "end")
 
@@ -1566,6 +1573,9 @@ class DeviceSetupWindow:
             text="Read-only identify and save",
             command=check_and_save,
         ).grid(row=0, column=1)
+        for field_entry in entries.values():
+            field_entry.bind("<Return>", lambda _event: check_and_save())
+            field_entry.bind("<KP_Enter>", lambda _event: check_and_save())
         entries["Device ID"].focus_set()
         entries["Device ID"].selection_range(0, "end")
 

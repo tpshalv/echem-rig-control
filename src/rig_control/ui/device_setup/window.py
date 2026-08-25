@@ -1,14 +1,18 @@
 import tkinter as tk
 from datetime import datetime
+from pathlib import Path
 from queue import Empty, Queue
+import re
 from threading import Thread
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 from rig_control.ui.common.theme import MONOSPACE_FONT, SECTION_FONT, TITLE_FONT
 from rig_control.ui.device_setup.model import (
     AddAlicatRequest,
+    AddEsp32Request,
     AddKeithleyRequest,
     DeviceSetupViewModel,
+    EditDeviceRequest,
     ReadinessCheckResult,
 )
 
@@ -35,17 +39,40 @@ class DeviceSetupWindow:
         main = ttk.Frame(self._root, padding=12)
         main.grid(row=0, column=0, sticky="nsew")
         main.columnconfigure(0, weight=1)
-        main.rowconfigure(1, weight=3)
-        main.rowconfigure(4, weight=1)
-        main.rowconfigure(7, weight=2)
+        main.rowconfigure(2, weight=3)
+        main.rowconfigure(5, weight=1)
+        main.rowconfigure(8, weight=2)
 
-        ttk.Label(main, text="Device setup and readiness", font=TITLE_FONT).grid(
-            row=0, column=0, sticky="w", pady=(0, 10)
+        profile = ttk.LabelFrame(main, text="Rig profile", padding=8)
+        profile.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        profile.columnconfigure(0, weight=1)
+        self._profile_summary = ttk.Label(profile, justify="left")
+        self._profile_summary.grid(row=0, column=0, sticky="w")
+        profile_buttons = ttk.Frame(profile)
+        profile_buttons.grid(row=0, column=1, sticky="e")
+        ttk.Button(
+            profile_buttons, text="New rig", command=self._new_profile
+        ).grid(row=0, column=0, padx=(0, 4))
+        ttk.Button(
+            profile_buttons, text="Edit details", command=self._edit_profile
+        ).grid(row=0, column=1, padx=(0, 4))
+        ttk.Button(
+            profile_buttons, text="Switch profile", command=self._switch_profile
+        ).grid(row=0, column=2, padx=(0, 4))
+        ttk.Button(
+            profile_buttons, text="Duplicate / Save as", command=self._save_profile_as
+        ).grid(row=0, column=3, padx=(0, 4))
+        ttk.Button(
+            profile_buttons, text="Reload", command=self._reload_profile
+        ).grid(row=0, column=4)
+
+        ttk.Label(main, text="Configured devices", font=TITLE_FONT).grid(
+            row=1, column=0, sticky="w", pady=(0, 6)
         )
 
         self._devices = ttk.Treeview(
             main,
-            columns=("label", "type", "connection", "readiness"),
+            columns=("label", "type", "connection", "interval", "enabled", "readiness"),
             show="tree headings",
             selectmode="browse",
         )
@@ -53,16 +80,20 @@ class DeviceSetupWindow:
         self._devices.heading("label", text="Label")
         self._devices.heading("type", text="Type")
         self._devices.heading("connection", text="Connection")
+        self._devices.heading("interval", text="Measurement interval")
+        self._devices.heading("enabled", text="Enabled")
         self._devices.heading("readiness", text="Readiness")
         self._devices.column("#0", width=150)
         self._devices.column("label", width=160)
         self._devices.column("type", width=230)
         self._devices.column("connection", width=180)
+        self._devices.column("interval", width=135)
+        self._devices.column("enabled", width=70)
         self._devices.column("readiness", width=110)
-        self._devices.grid(row=1, column=0, sticky="nsew")
+        self._devices.grid(row=2, column=0, sticky="nsew")
 
         device_buttons = ttk.Frame(main)
-        device_buttons.grid(row=2, column=0, sticky="w", pady=(8, 12))
+        device_buttons.grid(row=3, column=0, sticky="w", pady=(8, 12))
         ttk.Button(
             device_buttons,
             text="Add device",
@@ -70,17 +101,32 @@ class DeviceSetupWindow:
         ).grid(row=0, column=0, padx=(0, 8))
         ttk.Button(
             device_buttons,
+            text="Edit selected",
+            command=self._edit_selected_device,
+        ).grid(row=0, column=1, padx=(0, 8))
+        ttk.Button(
+            device_buttons,
             text="Run read-only check",
             command=self._check_selected,
-        ).grid(row=0, column=1, padx=(0, 8))
+        ).grid(row=0, column=2, padx=(0, 8))
+        ttk.Button(
+            device_buttons,
+            text="Edit measurement interval",
+            command=self._edit_measurement_interval,
+        ).grid(row=0, column=3, padx=(0, 8))
+        ttk.Button(
+            device_buttons,
+            text="Remove selected",
+            command=self._remove_selected_device,
+        ).grid(row=0, column=4, padx=(0, 8))
         ttk.Button(
             device_buttons,
             text="Refresh lists",
             command=self.refresh,
-        ).grid(row=0, column=2)
+        ).grid(row=0, column=5)
 
         ttk.Label(main, text="Available Windows serial ports", font=SECTION_FONT).grid(
-            row=3, column=0, sticky="w", pady=(0, 4)
+            row=4, column=0, sticky="w", pady=(0, 4)
         )
         self._ports = ttk.Treeview(
             main,
@@ -94,13 +140,13 @@ class DeviceSetupWindow:
         self._ports.column("#0", width=100)
         self._ports.column("description", width=350)
         self._ports.column("hardware_id", width=500)
-        self._ports.grid(row=4, column=0, sticky="nsew")
+        self._ports.grid(row=5, column=0, sticky="nsew")
 
         self._port_note = ttk.Label(main, text="")
-        self._port_note.grid(row=5, column=0, sticky="w", pady=(4, 12))
+        self._port_note.grid(row=6, column=0, sticky="w", pady=(4, 12))
 
         ttk.Label(main, text="Read-only check log", font=SECTION_FONT).grid(
-            row=6, column=0, sticky="w", pady=(0, 4)
+            row=7, column=0, sticky="w", pady=(0, 4)
         )
         self._log = tk.Text(
             main,
@@ -109,9 +155,16 @@ class DeviceSetupWindow:
             font=MONOSPACE_FONT,
             state="disabled",
         )
-        self._log.grid(row=7, column=0, sticky="nsew")
+        self._log.grid(row=8, column=0, sticky="nsew")
 
     def refresh(self) -> None:
+        profile = self._view_model.profile
+        self._profile_summary.configure(
+            text=(
+                f"{profile.friendly_name}  ({profile.profile_id})\n"
+                f"{self._view_model.profile_path.resolve()}"
+            )
+        )
         selected = self._selected_device_id()
         for item in self._devices.get_children():
             self._devices.delete(item)
@@ -125,6 +178,8 @@ class DeviceSetupWindow:
                     row.friendly_name,
                     row.device_type,
                     row.connection,
+                    row.measurement_interval,
+                    "Yes" if row.enabled else "No",
                     row.readiness,
                 ),
             )
@@ -164,30 +219,447 @@ class DeviceSetupWindow:
         self._record_result(result)
         self.refresh()
 
-    def _open_scan_alicat(self, *, is_meter: bool) -> None:
+    def _switch_profile(self) -> None:
+        selected = filedialog.askopenfilename(
+            parent=self._root,
+            filetypes=(("TOML rig profiles", "*.toml"),),
+        )
+        if not selected:
+            return
+        self._record_result(self._view_model.switch_profile(selected))
+        self.refresh()
+
+    def _new_profile(self) -> None:
         dialog = tk.Toplevel(self._root)
-        device_type = "meter" if is_meter else "controller"
-        dialog.title(f"Find Alicat mass-flow {device_type}")
+        dialog.title("Create new rig")
         dialog.transient(self._root)
         dialog.grab_set()
-        dialog.geometry("760x430")
+        dialog.resizable(False, False)
+        frame = ttk.Frame(dialog, padding=14)
+        frame.grid(row=0, column=0, sticky="nsew")
+        frame.columnconfigure(1, weight=1)
+        friendly_name = tk.StringVar()
+        profile_id = tk.StringVar()
+        destination = tk.StringVar()
+        for row, (label, variable) in enumerate(
+            (
+                ("Display name", friendly_name),
+                ("Internal ID", profile_id),
+                ("Profile filename", destination),
+            )
+        ):
+            ttk.Label(frame, text=f"{label}:").grid(row=row, column=0, sticky="w")
+            entry = ttk.Entry(frame, textvariable=variable, width=52)
+            entry.grid(
+                row=row, column=1, sticky="ew", padx=(8, 4), pady=3
+            )
+            if variable is destination:
+                entry.bind(
+                    "<FocusOut>",
+                    lambda _event: update_id_from_filename(),
+                )
+
+        ttk.Label(
+            frame,
+            text="Shown in the app; spaces and capitals are allowed.",
+        ).grid(row=0, column=2, sticky="w")
+        ttk.Label(
+            frame,
+            text="Stable software label, for example main_echem_rig.",
+        ).grid(row=1, column=2, sticky="w")
+
+        def id_from_filename(filename: str) -> str:
+            stem = Path(filename).stem.casefold()
+            for prefix in ("rig-profile.", "rig_profile_", "rig-profile-"):
+                if stem.startswith(prefix):
+                    stem = stem[len(prefix):]
+                    break
+            value = re.sub(r"[^a-z0-9_-]+", "_", stem).strip("_-")
+            if value and not value[0].isalpha():
+                value = "rig_" + value
+            return value
+
+        def update_id_from_filename() -> None:
+            derived = id_from_filename(destination.get())
+            if derived:
+                profile_id.set(derived)
+
+        def browse() -> None:
+            suggested_id = profile_id.get().strip() or id_from_filename(
+                friendly_name.get()
+            )
+            selected = filedialog.asksaveasfilename(
+                parent=dialog,
+                defaultextension=".toml",
+                initialfile=(
+                    f"rig-profile.{suggested_id}.toml"
+                    if suggested_id
+                    else "rig-profile.toml"
+                ),
+                filetypes=(("TOML rig profiles", "*.toml"),),
+            )
+            if selected:
+                destination.set(selected)
+                update_id_from_filename()
+
+        ttk.Button(frame, text="Browse…", command=browse).grid(
+            row=2, column=2, pady=3
+        )
+        ttk.Label(
+            frame,
+            text=(
+                "The new profile starts with no devices or connections. "
+                "Devices can be added after creation."
+            ),
+            wraplength=480,
+        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(8, 4))
+
+        def create() -> None:
+            result = self._view_model.create_new_profile(
+                profile_id.get(),
+                friendly_name.get(),
+                destination.get(),
+            )
+            self._record_result(result)
+            if result.succeeded:
+                dialog.destroy()
+                self.refresh()
+            else:
+                messagebox.showerror(
+                    "Could not create rig",
+                    result.technical_details or result.summary,
+                    parent=dialog,
+                )
+
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=4, column=0, columnspan=3, sticky="e", pady=(10, 0))
+        ttk.Button(buttons, text="Cancel", command=dialog.destroy).grid(
+            row=0, column=0, padx=(0, 8)
+        )
+        ttk.Button(buttons, text="Create rig", command=create).grid(row=0, column=1)
+
+    def _save_profile_as(self) -> None:
+        selected = filedialog.asksaveasfilename(
+            parent=self._root,
+            defaultextension=".toml",
+            filetypes=(("TOML rig profiles", "*.toml"),),
+        )
+        if not selected:
+            return
+        self._record_result(self._view_model.save_profile_as(selected))
+        self.refresh()
+
+    def _reload_profile(self) -> None:
+        if not messagebox.askyesno(
+            "Reload profile",
+            "Reload this profile from disk? Any unsaved dialog entries will "
+            "not be applied.",
+            parent=self._root,
+        ):
+            return
+        self._record_result(
+            self._view_model.switch_profile(self._view_model.profile_path)
+        )
+        self.refresh()
+
+    def _edit_profile(self) -> None:
+        dialog = tk.Toplevel(self._root)
+        dialog.title("Edit rig profile details")
+        dialog.transient(self._root)
+        dialog.grab_set()
+        frame = ttk.Frame(dialog, padding=14)
+        frame.grid(row=0, column=0, sticky="nsew")
+        values = {
+            "Display name": tk.StringVar(
+                value=self._view_model.profile.friendly_name
+            ),
+            "Internal ID": tk.StringVar(value=self._view_model.profile.profile_id),
+        }
+        for row, (label, variable) in enumerate(values.items()):
+            ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w")
+            ttk.Entry(frame, textvariable=variable, width=42).grid(
+                row=row, column=1, sticky="ew", padx=(8, 0), pady=3
+            )
+        ttk.Label(
+            frame,
+            text="Shown in the app; spaces and capitals are allowed.",
+        ).grid(row=0, column=2, sticky="w", padx=(8, 0))
+        ttk.Label(
+            frame,
+            text="Stable software label, for example main_echem_rig.",
+        ).grid(row=1, column=2, sticky="w", padx=(8, 0))
+
+        def save() -> None:
+            result = self._view_model.update_profile_identity(
+                values["Internal ID"].get(),
+                values["Display name"].get(),
+            )
+            self._record_result(result)
+            if result.succeeded:
+                dialog.destroy()
+                self.refresh()
+
+        ttk.Button(frame, text="Save", command=save).grid(
+            row=2, column=1, sticky="e", pady=(10, 0)
+        )
+
+    def _edit_selected_device(self) -> None:
+        device_id = self._selected_device_id()
+        if device_id is None:
+            messagebox.showinfo(
+                "Select a device",
+                "Select a configured device before editing it.",
+                parent=self._root,
+            )
+            return
+        original = self._view_model.device_edit_values(device_id)
+        dialog = tk.Toplevel(self._root)
+        dialog.title(f"Edit device — {device_id}")
+        dialog.transient(self._root)
+        dialog.grab_set()
+        dialog.geometry("720x720")
+        dialog.columnconfigure(0, weight=1)
+        dialog.rowconfigure(0, weight=1)
+        canvas = tk.Canvas(dialog, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(dialog, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        frame = ttk.Frame(canvas, padding=14)
+        window_id = canvas.create_window((0, 0), window=frame, anchor="nw")
+        frame.bind(
+            "<Configure>",
+            lambda _event: canvas.configure(scrollregion=canvas.bbox("all")),
+        )
+        canvas.bind(
+            "<Configure>",
+            lambda event: canvas.itemconfigure(window_id, width=event.width),
+        )
+        frame.columnconfigure(1, weight=1)
+        friendly_name = tk.StringVar(value=original.friendly_name)
+        enabled = tk.BooleanVar(value=original.enabled)
+        required = tk.BooleanVar(value=original.required)
+        system = tk.StringVar(value=original.system)
+        interval = tk.StringVar(
+            value=(
+                "" if original.poll_interval_seconds is None
+                else f"{original.poll_interval_seconds:g}"
+            )
+        )
+        common = (
+            ("Device ID", ttk.Label(frame, text=device_id)),
+            ("Friendly name", ttk.Entry(frame, textvariable=friendly_name)),
+            ("System/group", ttk.Entry(frame, textvariable=system)),
+            ("Measurement interval (s)", ttk.Entry(frame, textvariable=interval)),
+        )
+        next_row = 0
+        for label, widget in common:
+            ttk.Label(frame, text=label).grid(row=next_row, column=0, sticky="w")
+            widget.grid(row=next_row, column=1, sticky="ew", padx=(8, 0), pady=3)
+            next_row += 1
+        flags = ttk.Frame(frame)
+        flags.grid(row=next_row, column=1, sticky="w", padx=(8, 0), pady=3)
+        ttk.Checkbutton(flags, text="Enabled", variable=enabled).grid(row=0, column=0)
+        ttk.Checkbutton(flags, text="Required", variable=required).grid(
+            row=0, column=1, padx=(12, 0)
+        )
+        next_row += 1
+        mapping_entries: dict[str, tuple[dict[str, object], dict[str, tk.StringVar]]] = {}
+        for title, key, mapping in (
+            ("Shared connection", "connection", original.connection_parameters),
+            ("Device connection", "device_connection", original.device_connection_parameters),
+            ("Driver settings and limits", "settings", original.settings),
+        ):
+            box = ttk.LabelFrame(frame, text=title, padding=8)
+            box.grid(row=next_row, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+            box.columnconfigure(1, weight=1)
+            variables: dict[str, tk.StringVar] = {}
+            for mapping_row, (name, value) in enumerate(mapping.items()):
+                variable = tk.StringVar(value=str(value))
+                variables[name] = variable
+                ttk.Label(box, text=name.replace("_", " ")).grid(
+                    row=mapping_row, column=0, sticky="w"
+                )
+                ttk.Entry(box, textvariable=variable).grid(
+                    row=mapping_row, column=1, sticky="ew", padx=(8, 0), pady=2
+                )
+            if not mapping:
+                ttk.Label(box, text="No values for this device.").grid(row=0, column=0)
+            mapping_entries[key] = (mapping, variables)
+            next_row += 1
+        ttk.Label(
+            frame,
+            text=(
+                "Connection values may be shared by multiple devices on the same "
+                "bus. Changes are validated and backed up before saving."
+            ),
+            wraplength=650,
+        ).grid(row=next_row, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        next_row += 1
+
+        def parsed_mapping(key: str) -> dict[str, object]:
+            originals, variables = mapping_entries[key]
+            return {
+                name: _parse_existing_value(variables[name].get(), value)
+                for name, value in originals.items()
+            }
+
+        def save() -> None:
+            try:
+                interval_text = interval.get().strip()
+                interval_value = float(interval_text) if interval_text else None
+                request = EditDeviceRequest(
+                    device_id,
+                    friendly_name.get(),
+                    enabled.get(),
+                    required.get(),
+                    system.get(),
+                    interval_value,
+                    parsed_mapping("connection"),
+                    parsed_mapping("device_connection"),
+                    parsed_mapping("settings"),
+                )
+            except Exception as error:
+                messagebox.showerror("Invalid value", str(error), parent=dialog)
+                return
+            result = self._view_model.update_device(request)
+            self._record_result(result)
+            if result.succeeded:
+                dialog.destroy()
+                self.refresh()
+
+        ttk.Button(frame, text="Save device", command=save).grid(
+            row=next_row, column=1, sticky="e", pady=(12, 0)
+        )
+
+    def _remove_selected_device(self) -> None:
+        device_id = self._selected_device_id()
+        if device_id is None:
+            messagebox.showinfo(
+                "Select a device",
+                "Select a configured device before removing it.",
+                parent=self._root,
+            )
+            return
+        if not messagebox.askyesno(
+            "Remove configured device",
+            f"Remove {device_id!r} from this rig profile?\n\n"
+            "A backup of the current profile will be created.",
+            parent=self._root,
+        ):
+            return
+        self._record_result(self._view_model.remove_device(device_id))
+        self.refresh()
+
+    def _edit_measurement_interval(self) -> None:
+        device_id = self._selected_device_id()
+        if device_id is None:
+            messagebox.showinfo(
+                "Select a device",
+                "Select a configured device before editing its interval.",
+                parent=self._root,
+            )
+            return
+
+        dialog = tk.Toplevel(self._root)
+        dialog.title("Edit measurement interval")
+        dialog.transient(self._root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+        frame = ttk.Frame(dialog, padding=14)
+        frame.grid(row=0, column=0, sticky="nsew")
+        ttk.Label(
+            frame,
+            text=f"Measurement interval for {device_id}",
+            font=SECTION_FONT,
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        ttk.Label(frame, text="Seconds:").grid(
+            row=1, column=0, sticky="w", padx=(0, 10)
+        )
+        entry = ttk.Entry(frame, width=18)
+        current = self._view_model.device_poll_interval(device_id)
+        if current is not None:
+            entry.insert(0, f"{current:g}")
+        entry.grid(row=1, column=1, sticky="w")
+        ttk.Label(
+            frame,
+            text=(
+                "Enter a positive interval, for example 0.1 for ten readings "
+                "per second. Leave blank to use the application default."
+            ),
+            wraplength=410,
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(10, 12))
+
+        def save() -> None:
+            text = entry.get().strip()
+            try:
+                interval = None if not text else float(text)
+            except ValueError:
+                messagebox.showerror(
+                    "Invalid measurement interval",
+                    "The interval must be a positive number of seconds.",
+                    parent=dialog,
+                )
+                return
+            result = self._view_model.update_measurement_interval(
+                device_id,
+                interval,
+            )
+            self._record_result(result)
+            if not result.succeeded:
+                messagebox.showerror(
+                    "Interval not changed",
+                    result.summary + "\n\n" + result.technical_details,
+                    parent=dialog,
+                )
+                return
+            self.refresh()
+            messagebox.showinfo(
+                "Measurement interval saved",
+                result.summary,
+                parent=dialog,
+            )
+            dialog.destroy()
+
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=3, column=0, columnspan=2, sticky="e")
+        ttk.Button(buttons, text="Cancel", command=dialog.destroy).grid(
+            row=0, column=0, padx=(0, 8)
+        )
+        ttk.Button(buttons, text="Save", command=save).grid(row=0, column=1)
+        entry.bind("<Return>", lambda _event: save())
+        entry.focus_set()
+        entry.selection_range(0, "end")
+
+    def _open_scan_alicat(self) -> None:
+        dialog = tk.Toplevel(self._root)
+        dialog.title("Find Alicat mass-flow device")
+        dialog.transient(self._root)
+        dialog.grab_set()
+        dialog.geometry("780x470")
         dialog.columnconfigure(0, weight=1)
         dialog.rowconfigure(2, weight=1)
 
         frame = ttk.Frame(dialog, padding=14)
         frame.grid(row=0, column=0, sticky="nsew")
         frame.columnconfigure(1, weight=1)
-        frame.rowconfigure(2, weight=1)
-        ttk.Label(
+        frame.rowconfigure(3, weight=1)
+        description = ttk.Label(
             frame,
-            text=(
-                f"Finding an Alicat mass-flow {device_type} using a read-only "
-                "scan of addresses A-Z. Devices must have unique addresses "
-                "and be in polling mode."
-            ),
             wraplength=700,
-        ).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 10))
-        ttk.Label(frame, text="COM port").grid(row=1, column=0, sticky="w")
+        )
+        description.grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 10))
+        ttk.Label(frame, text="Device function").grid(row=1, column=0, sticky="w")
+        device_function = tk.StringVar(value="Controller (MFC)")
+        function_selector = ttk.Combobox(
+            frame,
+            textvariable=device_function,
+            values=("Controller (MFC)", "Meter (MFM)"),
+            state="readonly",
+            width=20,
+        )
+        function_selector.grid(row=1, column=1, sticky="w", padx=(8, 16))
+        ttk.Label(frame, text="COM port").grid(row=2, column=0, sticky="w")
         known_ports = tuple(
             port.device for port in self._view_model.serial_ports()
         )
@@ -198,13 +670,13 @@ class DeviceSetupWindow:
             port.set(known_ports[0])
         else:
             port.set("COM5")
-        port.grid(row=1, column=1, sticky="w", padx=(8, 16))
+        port.grid(row=2, column=1, sticky="w", padx=(8, 16))
         status = ttk.Label(frame, text="Not scanned")
-        status.grid(row=1, column=2, sticky="w")
+        status.grid(row=2, column=2, sticky="w")
 
         results = ttk.Treeview(
             frame,
-            columns=("status", "type", "device_id", "response"),
+            columns=("status", "type", "model", "range", "device_id", "response"),
             show="tree headings",
             selectmode="browse",
             height=10,
@@ -212,14 +684,18 @@ class DeviceSetupWindow:
         results.heading("#0", text="Address")
         results.heading("status", text="Configuration")
         results.heading("type", text="Saved type")
+        results.heading("model", text="Detected model/type")
+        results.heading("range", text="Inferred range")
         results.heading("device_id", text="Device ID")
         results.heading("response", text="Raw response")
         results.column("#0", width=65)
         results.column("status", width=105)
-        results.column("type", width=85)
-        results.column("device_id", width=130)
-        results.column("response", width=330)
-        results.grid(row=2, column=0, columnspan=4, sticky="nsew", pady=10)
+        results.column("type", width=80)
+        results.column("model", width=135)
+        results.column("range", width=105)
+        results.column("device_id", width=115)
+        results.column("response", width=220)
+        results.grid(row=3, column=0, columnspan=4, sticky="nsew", pady=10)
 
         result_queue: Queue[object] = Queue()
         discovered_by_address = {}
@@ -254,6 +730,15 @@ class DeviceSetupWindow:
                     values=(
                         device.configuration_status,
                         device.configured_kind or "-",
+                        (
+                            f"{device.model or 'unknown'} / "
+                            f"{device.inferred_kind or 'ambiguous'}"
+                        ),
+                        (
+                            f"{device.inferred_maximum_flow_sccm:g} SCCM"
+                            if device.inferred_maximum_flow_sccm is not None
+                            else "confirm manually"
+                        ),
                         device.configured_device_id or "-",
                         device.raw_response,
                     ),
@@ -314,18 +799,21 @@ class DeviceSetupWindow:
             selected_port = port.get().strip()
             dialog.destroy()
             self._open_add_alicat(
-                is_meter=is_meter,
+                is_meter=device_function.get() == "Meter (MFM)",
                 initial_port=selected_port,
                 initial_address=address,
+                initial_maximum_flow=(
+                    selected.inferred_maximum_flow_sccm
+                ),
             )
 
         buttons = ttk.Frame(frame)
-        buttons.grid(row=3, column=0, columnspan=4, sticky="e")
+        buttons.grid(row=4, column=0, columnspan=4, sticky="e")
         scan_button = ttk.Button(buttons, text="Scan A-Z", command=scan)
         scan_button.grid(row=0, column=0, padx=(0, 8))
         continue_button = ttk.Button(
             buttons,
-            text=f"Continue with selected {device_type}",
+            text="Continue with selected controller",
             command=add_selected,
         )
         continue_button.grid(row=0, column=1, padx=(0, 8))
@@ -335,23 +823,58 @@ class DeviceSetupWindow:
             selected = (
                 discovered_by_address.get(selection[0]) if selection else None
             )
+
+        def handle_result_selection(event: tk.Event | None = None) -> None:
+            selection = results.selection()
+            selected = (
+                discovered_by_address.get(selection[0]) if selection else None
+            )
+            if selected is not None and selected.inferred_kind in {
+                "controller",
+                "meter",
+            }:
+                device_function.set(
+                    "Meter (MFM)"
+                    if selected.inferred_kind == "meter"
+                    else "Controller (MFC)"
+                )
+                update_device_function()
+            update_selected_action(event)
             continue_button.configure(
                 text=(
                     "Run check for configured device"
                     if selected is not None
                     and selected.configured_device_id is not None
-                    else f"Continue with selected {device_type}"
+                    else (
+                        "Continue with selected meter"
+                        if device_function.get() == "Meter (MFM)"
+                        else "Continue with selected controller"
+                    )
                 )
             )
 
-        results.bind("<<TreeviewSelect>>", update_selected_action)
+        def update_device_function(_: tk.Event | None = None) -> None:
+            is_meter = device_function.get() == "Meter (MFM)"
+            device_type = "meter" if is_meter else "controller"
+            description.configure(
+                text=(
+                    f"Finding an Alicat mass-flow {device_type} using a "
+                    "read-only scan of addresses A-Z. Devices must have "
+                    "unique addresses and be in polling mode."
+                )
+            )
+            dialog.title(f"Find Alicat mass-flow {device_type}")
+            update_selected_action()
+
+        results.bind("<<TreeviewSelect>>", handle_result_selection)
+        function_selector.bind("<<ComboboxSelected>>", update_device_function)
         ttk.Button(
             buttons,
             text="Enter manually",
             command=lambda: (
                 dialog.destroy(),
                 self._open_add_alicat(
-                    is_meter=is_meter,
+                    is_meter=device_function.get() == "Meter (MFM)",
                     initial_port=port.get().strip(),
                 ),
             ),
@@ -359,6 +882,7 @@ class DeviceSetupWindow:
         ttk.Button(buttons, text="Close", command=dialog.destroy).grid(
             row=0, column=3
         )
+        update_device_function()
         dialog.after(100, scan)
 
     def _open_add_device(self) -> None:
@@ -378,9 +902,9 @@ class DeviceSetupWindow:
             frame,
             state="readonly",
             values=(
-                "Alicat mass-flow controller",
-                "Alicat mass-flow meter",
+                "Alicat mass-flow device",
                 "Keithley 2260B",
+                "ESP32 controller (auto-discover)",
             ),
             width=34,
         )
@@ -392,10 +916,10 @@ class DeviceSetupWindow:
             dialog.destroy()
             if selected == "Keithley 2260B":
                 self._open_add_keithley()
+            elif selected == "ESP32 controller (auto-discover)":
+                self._open_add_esp32()
             else:
-                self._open_scan_alicat(
-                    is_meter=selected == "Alicat mass-flow meter"
-                )
+                self._open_scan_alicat()
 
         ttk.Button(frame, text="Cancel", command=dialog.destroy).grid(
             row=2, column=0, padx=(0, 8)
@@ -405,12 +929,312 @@ class DeviceSetupWindow:
         )
         selector.focus_set()
 
+    def _open_add_esp32(self) -> None:
+        dialog = tk.Toplevel(self._root)
+        dialog.title("Discover ESP32 controller")
+        dialog.transient(self._root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+        frame = ttk.Frame(dialog, padding=14)
+        frame.grid(row=0, column=0, sticky="nsew")
+        frame.columnconfigure(1, weight=1)
+        known_ports = tuple(port.device for port in self._view_model.serial_ports())
+        port = tk.StringVar(value=known_ports[0] if known_ports else "")
+        baud_rate = tk.StringVar(value="115200")
+        timeout = tk.StringVar(value="2.0")
+        heartbeat_interval = tk.StringVar(value="2.0")
+        fields = (
+            ("COM port", port),
+            ("Baud rate", baud_rate),
+            ("Timeout (seconds)", timeout),
+            ("Heartbeat interval (seconds)", heartbeat_interval),
+        )
+        for row, (label, variable) in enumerate(fields):
+            ttk.Label(frame, text=f"{label}:").grid(row=row, column=0, sticky="w")
+            if variable is port:
+                field = ttk.Combobox(
+                    frame,
+                    textvariable=variable,
+                    values=known_ports,
+                    width=34,
+                )
+            else:
+                field = ttk.Entry(frame, textvariable=variable, width=36)
+            field.grid(row=row, column=1, sticky="ew", padx=(8, 0), pady=3)
+        ttk.Label(
+            frame,
+            text=(
+                "Discovery is read-only. The ESP32 reports its controller ID, "
+                "sensor devices, channels and writable outputs."
+            ),
+            wraplength=500,
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 6))
+        status = ttk.Label(frame, text="Ready to scan.", wraplength=500)
+        status.grid(row=5, column=0, columnspan=2, sticky="w")
+        results: Queue[tuple[AddEsp32Request, object, Exception | None]] = Queue()
+
+        def request_values() -> AddEsp32Request:
+            return AddEsp32Request(
+                port=port.get().strip(),
+                baud_rate=int(baud_rate.get()),
+                timeout_seconds=float(timeout.get()),
+                heartbeat_interval_seconds=float(heartbeat_interval.get()),
+            )
+
+        def scan() -> None:
+            try:
+                request = request_values()
+            except ValueError as error:
+                messagebox.showerror("Invalid value", str(error), parent=dialog)
+                return
+            scan_button.configure(state="disabled")
+            status.configure(text=f"Scanning {request.port}…")
+
+            def worker() -> None:
+                try:
+                    discovery = self._view_model.scan_esp32(request)
+                    results.put((request, discovery, None))
+                except Exception as error:
+                    results.put((request, None, error))
+
+            Thread(target=worker, name="esp32-discovery", daemon=True).start()
+            dialog.after(100, poll_result)
+
+        def poll_result() -> None:
+            if not dialog.winfo_exists():
+                return
+            try:
+                request, discovery, error = results.get_nowait()
+            except Empty:
+                dialog.after(100, poll_result)
+                return
+            scan_button.configure(state="normal")
+            if error is not None:
+                status.configure(text=f"Discovery failed: {type(error).__name__}: {error}")
+                return
+            identity = discovery.identity
+            capabilities = discovery.capabilities
+            devices = capabilities.get("devices", [])
+            outputs = capabilities.get("outputs", [])
+            device_lines = [
+                f"{item.get('label', item.get('id', 'unnamed'))} "
+                f"({item.get('kind', 'unknown')})"
+                for item in devices
+                if isinstance(item, dict)
+            ]
+            output_lines = [
+                str(item.get("name", "unnamed"))
+                for item in outputs
+                if isinstance(item, dict)
+            ]
+            summary = (
+                f"Controller: {identity.get('controller_id', 'unknown')}\n"
+                f"Firmware: {identity.get('firmware_version', 'unknown')}\n"
+                f"Devices: {', '.join(device_lines) or 'none'}\n"
+                f"Outputs: {', '.join(output_lines) or 'none'}"
+            )
+            status.configure(text=summary)
+            dialog.destroy()
+            self._open_esp32_discovery_selection(request, discovery)
+
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=6, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        ttk.Button(buttons, text="Cancel", command=dialog.destroy).grid(
+            row=0, column=0, padx=(0, 8)
+        )
+        scan_button = ttk.Button(buttons, text="Discover", command=scan)
+        scan_button.grid(row=0, column=1)
+
+    def _open_esp32_discovery_selection(self, request, discovery) -> None:
+        dialog = tk.Toplevel(self._root)
+        dialog.title("Select discovered ESP32 devices")
+        dialog.transient(self._root)
+        dialog.grab_set()
+        dialog.geometry("850x500")
+        dialog.minsize(720, 400)
+        dialog.columnconfigure(0, weight=1)
+        dialog.rowconfigure(0, weight=1)
+        outer = ttk.Frame(dialog, padding=14)
+        outer.grid(row=0, column=0, sticky="nsew")
+        outer.columnconfigure(0, weight=1)
+        ttk.Label(
+            outer,
+            text="Discovered ESP32 devices",
+            font=TITLE_FONT,
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            outer,
+            text=(
+                "Choose the supported devices to add and give each a useful "
+                "display name. The controller is required for selected sensors."
+            ),
+            wraplength=760,
+        ).grid(row=1, column=0, sticky="w", pady=(4, 10))
+
+        table = ttk.Frame(outer)
+        table.grid(row=2, column=0, sticky="nsew")
+        table.columnconfigure(2, weight=1)
+        for column, heading in enumerate(
+            (
+                "Add",
+                "Reported item",
+                "Display name",
+                "Interval (s)",
+                "Channels",
+                "Support",
+            )
+        ):
+            ttk.Label(table, text=heading, font=SECTION_FONT).grid(
+                row=0, column=column, sticky="w", padx=(0, 8), pady=(0, 6)
+            )
+
+        controller_id = str(
+            discovery.identity.get("controller_id", "esp32_controller")
+        )
+        controller_name = tk.StringVar(value="Main ESP32 controller")
+        controller_selected = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            table, variable=controller_selected, state="disabled"
+        ).grid(row=1, column=0, sticky="w")
+        ttk.Label(table, text=controller_id).grid(
+            row=1, column=1, sticky="w", padx=(0, 8)
+        )
+        ttk.Entry(table, textvariable=controller_name).grid(
+            row=1, column=2, sticky="ew", padx=(0, 8), pady=3
+        )
+        outputs = discovery.capabilities.get("outputs", [])
+        output_names = [
+            str(item.get("name", "unnamed"))
+            for item in outputs
+            if isinstance(item, dict)
+        ]
+        ttk.Label(table, text="—").grid(
+            row=1, column=3, sticky="w", padx=(0, 8)
+        )
+        ttk.Label(table, text=", ".join(output_names) or "—").grid(
+            row=1, column=4, sticky="w", padx=(0, 8)
+        )
+        ttk.Label(table, text="Controller").grid(row=1, column=5, sticky="w")
+
+        choices: list[
+            tuple[str, tk.BooleanVar, tk.StringVar, tk.StringVar]
+        ] = []
+        devices = discovery.capabilities.get("devices", [])
+        for row, item in enumerate(
+            (value for value in devices if isinstance(value, dict)),
+            start=2,
+        ):
+            device_id = str(item.get("id", "unnamed"))
+            kind = str(item.get("kind", "unknown"))
+            supported = kind == "dht11"
+            selected = tk.BooleanVar(value=supported)
+            display_name = tk.StringVar(
+                value=str(item.get("label", device_id))
+            )
+            recommended_interval = item.get(
+                "recommended_poll_interval_seconds",
+                request.sensor_poll_interval_seconds,
+            )
+            try:
+                interval_text = f"{float(recommended_interval):g}"
+            except (TypeError, ValueError):
+                interval_text = f"{request.sensor_poll_interval_seconds:g}"
+            interval = tk.StringVar(value=interval_text)
+            check = ttk.Checkbutton(table, variable=selected)
+            if not supported:
+                check.configure(state="disabled")
+            check.grid(row=row, column=0, sticky="w")
+            ttk.Label(table, text=f"{device_id} ({kind})").grid(
+                row=row, column=1, sticky="w", padx=(0, 8)
+            )
+            name_entry = ttk.Entry(table, textvariable=display_name)
+            name_entry.grid(row=row, column=2, sticky="ew", padx=(0, 8), pady=3)
+            if not supported:
+                name_entry.configure(state="disabled")
+            interval_entry = ttk.Entry(table, textvariable=interval, width=10)
+            interval_entry.grid(
+                row=row, column=3, sticky="w", padx=(0, 8), pady=3
+            )
+            if not supported:
+                interval_entry.configure(state="disabled")
+            channels = item.get("channels", [])
+            channel_names = [
+                str(channel.get("name", "unnamed"))
+                for channel in channels
+                if isinstance(channel, dict)
+            ]
+            ttk.Label(table, text=", ".join(channel_names) or "—").grid(
+                row=row, column=4, sticky="w", padx=(0, 8)
+            )
+            ttk.Label(
+                table,
+                text="Ready" if supported else "Driver not installed",
+            ).grid(row=row, column=5, sticky="w")
+            if supported:
+                choices.append((device_id, selected, display_name, interval))
+
+        ttk.Label(
+            outer,
+            text=(
+                "Writable outputs are exposed by the controller. Unsupported "
+                "reported devices remain visible but cannot be selected yet."
+            ),
+            wraplength=760,
+        ).grid(row=3, column=0, sticky="w", pady=(12, 0))
+
+        def add_selected() -> None:
+            selected_names = {
+                device_id: name.get()
+                for device_id, selected, name, _interval in choices
+                if selected.get()
+            }
+            try:
+                selected_intervals = {
+                    device_id: float(interval.get())
+                    for device_id, selected, _name, interval in choices
+                    if selected.get()
+                }
+            except ValueError:
+                messagebox.showerror(
+                    "Invalid measurement interval",
+                    "Every selected sensor interval must be a positive number.",
+                    parent=dialog,
+                )
+                return
+            result = self._view_model.add_discovered_esp32(
+                request,
+                discovery,
+                controller_friendly_name=controller_name.get(),
+                selected_device_names=selected_names,
+                selected_device_intervals=selected_intervals,
+            )
+            self._record_result(result)
+            if result.succeeded:
+                dialog.destroy()
+                self.refresh()
+            else:
+                messagebox.showerror(
+                    "Could not add ESP32",
+                    result.technical_details or result.summary,
+                    parent=dialog,
+                )
+
+        buttons = ttk.Frame(outer)
+        buttons.grid(row=4, column=0, sticky="e", pady=(14, 0))
+        ttk.Button(buttons, text="Cancel", command=dialog.destroy).grid(
+            row=0, column=0, padx=(0, 8)
+        )
+        ttk.Button(buttons, text="Add selected", command=add_selected).grid(
+            row=0, column=1
+        )
+
     def _open_add_alicat(
         self,
         *,
         is_meter: bool = False,
         initial_port: str = "",
         initial_address: str | None = None,
+        initial_maximum_flow: float | None = None,
     ) -> None:
         dialog = tk.Toplevel(self._root)
         dialog.title("Add Alicat mass-flow meter" if is_meter else "Add Alicat MFC")
@@ -430,8 +1254,14 @@ class DeviceSetupWindow:
                 "Alicat address",
                 initial_address or ("B" if is_meter else "A"),
             ),
-            ("Maximum flow", "2000"),
+            (
+                "Maximum flow",
+                f"{initial_maximum_flow:g}"
+                if initial_maximum_flow is not None
+                else "2000",
+            ),
             ("Mass-flow unit", "SCCM"),
+            ("Measurement interval (seconds)", "1.0"),
         )
         entries: dict[str, ttk.Entry | ttk.Combobox] = {}
         for row_index, (label, default) in enumerate(fields):
@@ -442,11 +1272,11 @@ class DeviceSetupWindow:
                 padx=(0, 10),
                 pady=4,
             )
-            if label == "Connection method (Ethernet or VISA)":
+            if label == "Mass-flow unit":
                 entry = ttk.Combobox(
                     form,
                     width=29,
-                    values=("VISA", "Ethernet"),
+                    values=("SCCM",),
                     state="readonly",
                 )
                 entry.set(default)
@@ -535,6 +1365,9 @@ class DeviceSetupWindow:
                     maximum_flow=maximum_flow,
                     device_kind="meter" if is_meter else "controller",
                     flow_unit=entries["Mass-flow unit"].get(),
+                    poll_interval_seconds=float(
+                        entries["Measurement interval (seconds)"].get().strip()
+                    ),
                 )
             )
             self._record_result(result)
@@ -589,20 +1422,55 @@ class DeviceSetupWindow:
             ("Maximum voltage (V)", "30"),
             ("Maximum current (A)", "108"),
             ("Maximum power (W)", "1080"),
+            ("Measurement interval (seconds)", "0.1"),
         )
-        entries: dict[str, ttk.Entry] = {}
+        entries: dict[str, ttk.Entry | ttk.Combobox] = {}
+        labels: dict[str, ttk.Label] = {}
         for row_index, (label, default) in enumerate(fields):
-            ttk.Label(form, text=label).grid(
+            label_widget = ttk.Label(form, text=label)
+            label_widget.grid(
                 row=row_index,
                 column=0,
                 sticky="w",
                 padx=(0, 10),
                 pady=4,
             )
-            entry = ttk.Entry(form, width=32)
-            entry.insert(0, default)
+            if label == "Connection method (Ethernet or VISA)":
+                entry = ttk.Combobox(
+                    form,
+                    width=29,
+                    values=("VISA", "Ethernet"),
+                    state="readonly",
+                )
+                entry.set(default)
+            else:
+                entry = ttk.Entry(form, width=32)
+                entry.insert(0, default)
             entry.grid(row=row_index, column=1, sticky="ew", pady=4)
+            labels[label] = label_widget
             entries[label] = entry
+
+        visa_fields = ("VISA resource", "VISA baud rate")
+        ethernet_fields = ("IP address or host name", "SCPI port")
+
+        def update_connection_fields(*_args: object) -> None:
+            method = entries[
+                "Connection method (Ethernet or VISA)"
+            ].get().strip().casefold()
+            for field in visa_fields:
+                action = "grid" if method == "visa" else "grid_remove"
+                getattr(labels[field], action)()
+                getattr(entries[field], action)()
+            for field in ethernet_fields:
+                action = "grid" if method == "ethernet" else "grid_remove"
+                getattr(labels[field], action)()
+                getattr(entries[field], action)()
+
+        entries["Connection method (Ethernet or VISA)"].bind(
+            "<<ComboboxSelected>>",
+            update_connection_fields,
+        )
+        update_connection_fields()
 
         note_row = len(fields)
         ttk.Label(
@@ -653,6 +1521,9 @@ class DeviceSetupWindow:
                     ].get(),
                     resource_name=entries["VISA resource"].get(),
                     visa_baud_rate=int(entries["VISA baud rate"].get().strip()),
+                    poll_interval_seconds=float(
+                        entries["Measurement interval (seconds)"].get().strip()
+                    ),
                 )
             except ValueError:
                 messagebox.showerror(
@@ -712,3 +1583,21 @@ class DeviceSetupWindow:
         self._log.delete("1.0", "end")
         self._log.insert("1.0", "\n\n".join(self._history))
         self._log.configure(state="disabled")
+
+
+def _parse_existing_value(text: str, original: object) -> object:
+    value = text.strip()
+    if isinstance(original, bool):
+        normalised = value.casefold()
+        if normalised in {"true", "yes", "1", "on"}:
+            return True
+        if normalised in {"false", "no", "0", "off"}:
+            return False
+        raise ValueError(f"Expected True or False, received {text!r}")
+    if isinstance(original, int):
+        return int(value)
+    if isinstance(original, float):
+        return float(value)
+    if isinstance(original, str):
+        return text.strip()
+    raise TypeError(f"Unsupported profile value {original!r}")

@@ -1,4 +1,5 @@
 import argparse
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -30,6 +31,12 @@ class DiscoveredAlicat:
 
     address: str
     raw_response: str
+    manufacturer_response: str = ""
+    data_format_response: str = ""
+    firmware_response: str = ""
+    model: str | None = None
+    inferred_kind: str | None = None
+    inferred_maximum_flow_sccm: float | None = None
 
 
 def scan_alicat_bus(
@@ -58,9 +65,67 @@ def scan_alicat_bus(
             if response.split(maxsplit=1)[0].upper() != address:
                 continue
             found.append(DiscoveredAlicat(address, response))
+        enriched: list[DiscoveredAlicat] = []
+        for device in found:
+            manufacturer = _optional_query(
+                selected_transport, f"{device.address}??M*"
+            )
+            data_format = _optional_query(
+                selected_transport, f"{device.address}??D*"
+            )
+            firmware = _optional_query(
+                selected_transport, f"{device.address}VE"
+            )
+            model, kind, maximum = infer_alicat_identity(
+                manufacturer,
+                data_format,
+            )
+            enriched.append(
+                DiscoveredAlicat(
+                    device.address,
+                    device.raw_response,
+                    manufacturer,
+                    data_format,
+                    firmware,
+                    model,
+                    kind,
+                    maximum,
+                )
+            )
     finally:
         selected_transport.close()
-    return tuple(found)
+    return tuple(enriched)
+
+
+def _optional_query(transport: SerialTextTransport, command: str) -> str:
+    try:
+        return transport.request(command)
+    except (TimeoutError, OSError, RuntimeError):
+        return ""
+
+
+def infer_alicat_identity(
+    manufacturer_response: str,
+    data_format_response: str = "",
+) -> tuple[str | None, str | None, float | None]:
+    """Conservatively infer model, function and canonical SCCM range."""
+
+    match = re.search(
+        r"\b(MC|M)\s*-\s*(\d+(?:\.\d+)?)\s*(SCCM|SLPM)\b",
+        manufacturer_response,
+        flags=re.IGNORECASE,
+    )
+    if match is None:
+        kind = (
+            "controller"
+            if re.search(r"\bset\s*point\b|\bsetpoint\b", data_format_response, re.I)
+            else None
+        )
+        return None, kind, None
+    prefix, number, unit = match.groups()
+    model = match.group(0).replace(" ", "").upper()
+    maximum = float(number) * (1000.0 if unit.upper() == "SLPM" else 1.0)
+    return model, ("controller" if prefix.upper() == "MC" else "meter"), maximum
 
 
 def read_alicat_state(

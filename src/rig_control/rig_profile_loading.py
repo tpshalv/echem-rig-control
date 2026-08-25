@@ -36,12 +36,10 @@ def load_rig_profile(path: str | Path) -> RigProfile:
         "profile",
     )
 
-    devices_data = data.get("devices")
-
-    if devices_data is None:
-        raise ValueError(
-            "Missing required configuration section: devices"
-        )
+    # A newly created rig is valid before its first device is added. TOML has
+    # no useful empty-array-of-tables representation, so the writer omits the
+    # section and the loader treats that omission as an empty device list.
+    devices_data = data.get("devices", [])
 
     if not isinstance(devices_data, list):
         raise TypeError(

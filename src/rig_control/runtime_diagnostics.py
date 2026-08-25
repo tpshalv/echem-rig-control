@@ -74,7 +74,9 @@ class RuntimeDiagnostics:
         metric_providers: Mapping[str, MetricProvider] | None = None,
         event_sink: EventSink | None = None,
         sample_interval_seconds: float = 30.0,
-        allocation_interval_seconds: float = 300.0,
+        allocation_interval_seconds: float = 3_600.0,
+        warning_allocation_cooldown_seconds: float = 600.0,
+        warning_allocation_limit_per_hour: int = 3,
         warning_private_bytes: int = 1_000_000_000,
         warning_growth_bytes: int = 250_000_000,
         warning_window_seconds: float = 600.0,
@@ -82,11 +84,16 @@ class RuntimeDiagnostics:
         backup_count: int = 5,
         process_sampler: ProcessSampler | None = None,
         display_history_limit: int = 2_880,
+        overview_history_limit: int = 240,
     ) -> None:
         if sample_interval_seconds <= 0:
             raise ValueError("Diagnostic sample interval must be positive")
         if allocation_interval_seconds <= 0:
             raise ValueError("Allocation sample interval must be positive")
+        if warning_allocation_cooldown_seconds <= 0:
+            raise ValueError("Warning allocation cooldown must be positive")
+        if warning_allocation_limit_per_hour <= 0:
+            raise ValueError("Warning allocation limit must be positive")
         if max_bytes <= 0 or backup_count < 0:
             raise ValueError("Invalid diagnostic log rotation settings")
         if (
@@ -95,6 +102,12 @@ class RuntimeDiagnostics:
             or display_history_limit <= 0
         ):
             raise ValueError("Diagnostic display history limit must be positive")
+        if (
+            isinstance(overview_history_limit, bool)
+            or not isinstance(overview_history_limit, int)
+            or overview_history_limit < 4
+        ):
+            raise ValueError("Diagnostic overview history limit must be at least 4")
 
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -103,6 +116,10 @@ class RuntimeDiagnostics:
         self._event_sink = event_sink
         self._sample_interval = float(sample_interval_seconds)
         self._allocation_interval = float(allocation_interval_seconds)
+        self._warning_allocation_cooldown = float(
+            warning_allocation_cooldown_seconds
+        )
+        self._warning_allocation_limit = warning_allocation_limit_per_hour
         self._warning_private_bytes = warning_private_bytes
         self._warning_growth_bytes = warning_growth_bytes
         self._warning_window = float(warning_window_seconds)
@@ -113,9 +130,13 @@ class RuntimeDiagnostics:
         self._display_history: deque[RuntimeHealthPoint] = deque(
             maxlen=display_history_limit
         )
+        self._overview_history: list[RuntimeHealthPoint] = []
+        self._overview_history_limit = overview_history_limit
         self._display_history_lock = Lock()
         self._last_warning_at: float | None = None
+        self._warning_snapshot_times: deque[float] = deque()
         self._previous_snapshot: tracemalloc.Snapshot | None = None
+        self._allocation_snapshots_disabled = False
         self._owns_tracemalloc = False
         self._logger = self._create_logger(max_bytes, backup_count)
 
@@ -178,6 +199,21 @@ class RuntimeDiagnostics:
 
         with self._display_history_lock:
             return self._display_history[-1] if self._display_history else None
+
+    def overview_health_history(self) -> tuple[RuntimeHealthPoint, ...]:
+        """Return a fixed-size, whole-run memory overview.
+
+        Older points are progressively condensed while retaining local memory
+        highs and lows, so this does not grow during an unattended run.
+        """
+
+        with self._display_history_lock:
+            return tuple(
+                _condense_health_points(
+                    self._overview_history,
+                    self._overview_history_limit,
+                )
+            )
 
     def register_metric_provider(self, name: str, provider: MetricProvider) -> None:
         """Add or replace a named source of lightweight application counters."""
@@ -248,12 +284,31 @@ class RuntimeDiagnostics:
             traced_current,
             application_metrics,
         )
-        if include_allocations and tracemalloc.is_tracing():
-            record["allocations"] = self._allocation_summary()
         warning = self._memory_warning(now, memory.private_bytes)
         if warning is not None:
             record["warning"] = warning
             self._publish_warning(warning)
+        warning_snapshot = (
+            warning is not None
+            and not include_allocations
+            and self._warning_snapshot_allowed(now, memory.private_bytes)
+        )
+        if (include_allocations or warning_snapshot) and tracemalloc.is_tracing():
+            if self._allocation_snapshots_disabled:
+                record["allocation_snapshot_skipped"] = (
+                    "disabled after an earlier MemoryError"
+                )
+            elif (
+                memory.private_bytes is not None
+                and memory.private_bytes >= self._warning_private_bytes
+            ):
+                record["allocation_snapshot_skipped"] = (
+                    "private memory is already above the safety threshold"
+                )
+            else:
+                if warning_snapshot:
+                    self._warning_snapshot_times.append(now)
+                record["allocations"] = self._safe_allocation_summary()
         self._logger.info(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
         return record
 
@@ -291,6 +346,12 @@ class RuntimeDiagnostics:
         )
         with self._display_history_lock:
             self._display_history.append(point)
+            self._overview_history.append(point)
+            if len(self._overview_history) > self._overview_history_limit * 2:
+                self._overview_history = _condense_health_points(
+                    self._overview_history,
+                    self._overview_history_limit,
+                )
 
     def _collect_application_metrics(self) -> dict[str, object]:
         metrics: dict[str, object] = {}
@@ -318,6 +379,38 @@ class RuntimeDiagnostics:
             "largest": [_statistic_dict(item) for item in current],
             "growth_since_previous": [_statistic_dict(item) for item in growth],
         }
+
+    def _safe_allocation_summary(self) -> dict[str, object]:
+        try:
+            return self._allocation_summary()
+        except MemoryError:
+            self._previous_snapshot = None
+            self._allocation_snapshots_disabled = True
+            return {
+                "diagnostic_error": (
+                    "MemoryError while taking allocation snapshot; "
+                    "further snapshots are disabled for this run"
+                )
+            }
+
+    def _warning_snapshot_allowed(
+        self,
+        now: float,
+        private_bytes: int | None,
+    ) -> bool:
+        if self._allocation_snapshots_disabled:
+            return False
+        if private_bytes is None or private_bytes >= self._warning_private_bytes:
+            return False
+        cutoff = now - 3_600
+        while self._warning_snapshot_times and self._warning_snapshot_times[0] < cutoff:
+            self._warning_snapshot_times.popleft()
+        if len(self._warning_snapshot_times) >= self._warning_allocation_limit:
+            return False
+        return not self._warning_snapshot_times or (
+            now - self._warning_snapshot_times[-1]
+            >= self._warning_allocation_cooldown
+        )
 
     def _memory_warning(self, now: float, private_bytes: int | None) -> str | None:
         if private_bytes is None:
@@ -386,6 +479,41 @@ class RuntimeDiagnostics:
         handler.setFormatter(Formatter("%(message)s"))
         logger.addHandler(handler)
         return logger
+
+
+def _condense_health_points(
+    points: list[RuntimeHealthPoint],
+    limit: int,
+) -> list[RuntimeHealthPoint]:
+    """Reduce a time series while retaining endpoints and local extrema."""
+
+    if len(points) <= limit:
+        return list(points)
+    interior = points[1:-1]
+    bucket_count = max(1, (limit - 2) // 4)
+    bucket_size = max(1, (len(interior) + bucket_count - 1) // bucket_count)
+    selected = [points[0]]
+    for start in range(0, len(interior), bucket_size):
+        bucket = interior[start : start + bucket_size]
+        candidates = {
+            min(bucket, key=_display_memory_bytes),
+            max(bucket, key=_display_memory_bytes),
+            min(bucket, key=lambda point: point.traced_python_bytes),
+            max(bucket, key=lambda point: point.traced_python_bytes),
+        }
+        selected.extend(sorted(candidates, key=lambda point: point.timestamp))
+    selected.append(points[-1])
+    if len(selected) > limit:
+        # This only trims surplus bucket boundaries; first/latest remain exact.
+        step = (len(selected) - 1) / (limit - 1)
+        selected = [selected[round(index * step)] for index in range(limit)]
+    return selected
+
+
+def _display_memory_bytes(point: RuntimeHealthPoint) -> int:
+    if point.private_bytes is not None:
+        return point.private_bytes
+    return point.resident_bytes or 0
 
 
 def sample_process_memory() -> ProcessMemory:

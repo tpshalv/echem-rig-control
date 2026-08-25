@@ -2,6 +2,7 @@
 profile_id = "esp32_hardware_poc"
 friendly_name = "ESP32 hardware PoC"
 
+
 [[connections]]
 connection_id = "main_esp32"
 connection_type = "serial_json"
@@ -11,6 +12,7 @@ port = "COM5"
 baud_rate = 115200
 timeout_seconds = 2.0
 controller_id = "esp32_main_controller"
+
 
 [[devices]]
 device_id = "esp32_main_controller"
@@ -24,7 +26,8 @@ connection_id = "main_esp32"
 
 [devices.settings]
 controller_id = "esp32_main_controller"
-heartbeat_interval_seconds = 5.0
+heartbeat_interval_seconds = 2.0
+
 
 [[devices]]
 device_id = "esp32_dht11"
@@ -34,5 +37,5 @@ driver = "esp32_dht11"
 backend = "real"
 required = true
 enabled = true
-poll_interval_seconds = 1.5
 connection_id = "main_esp32"
+poll_interval_seconds = 1.5

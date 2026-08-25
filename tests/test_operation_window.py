@@ -3,7 +3,10 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 from rig_control.ui.operation.model import LiveMeasurementRow
-from rig_control.ui.operation.window import OperationWindow
+from rig_control.ui.operation.window import (
+    OperationWindow,
+    format_operation_boolean,
+)
 
 
 class FailingModel:
@@ -68,6 +71,13 @@ def test_empty_ui_tick_does_not_redraw_display() -> None:
     assert window._ui_tick_count == 1
     assert window._ui_tick_failure_count == 0
     assert window._last_successful_ui_tick is not None
+
+
+def test_watchdog_boolean_uses_true_false_without_changing_outputs() -> None:
+    assert format_operation_boolean("watchdog_tripped", True) == "True"
+    assert format_operation_boolean("watchdog_tripped", False) == "False"
+    assert format_operation_boolean("led_enabled", True) == "On"
+    assert format_operation_boolean("output_enabled", False) == "Off"
 
 
 class FakeTree:

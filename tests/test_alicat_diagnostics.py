@@ -35,6 +35,18 @@ class ScanTransport(SerialTextTransport):
             return "A 14.7 22.5 0 0 0 Air"
         if message == "B":
             return "B 14.7 22.5 0 0 Air"
+        if message == "A??M*":
+            return "A Alicat Scientific MC-2SLPM-D SN123"
+        if message == "A??D*":
+            return "A pressure temperature volumetric_flow mass_flow setpoint gas"
+        if message == "AVE":
+            return "A 8.1.0"
+        if message == "B??M*":
+            return "B Alicat Scientific M-500SCCM-D SN456"
+        if message == "B??D*":
+            return "B pressure temperature volumetric_flow mass_flow gas"
+        if message == "BVE":
+            return "B 8.1.0"
         raise TimeoutError("no device")
 
 
@@ -129,7 +141,15 @@ def test_bus_scan_finds_addressed_devices_without_sending_commands() -> None:
 
     assert [device.address for device in found] == ["A", "B"]
     assert found[1].raw_response == "B 14.7 22.5 0 0 Air"
-    assert transport.requests == [chr(code) for code in range(ord("A"), ord("Z") + 1)]
+    assert found[0].inferred_kind == "controller"
+    assert found[0].inferred_maximum_flow_sccm == 2000.0
+    assert found[1].inferred_kind == "meter"
+    assert found[1].inferred_maximum_flow_sccm == 500.0
+    assert transport.requests == [
+        *[chr(code) for code in range(ord("A"), ord("Z") + 1)],
+        "A??M*", "A??D*", "AVE",
+        "B??M*", "B??D*", "BVE",
+    ]
     assert transport.is_open is False
 
 

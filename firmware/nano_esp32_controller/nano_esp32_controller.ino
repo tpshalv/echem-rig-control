@@ -5,7 +5,7 @@
 // Firmware / protocol configuration
 // ============================================================
 
-static const char *FIRMWARE_VERSION = "0.2.2";
+static const char *FIRMWARE_VERSION = "0.3.0";
 static const uint32_t PROTOCOL_VERSION = 1;
 
 // Never allow a USB CDC reply to block the firmware indefinitely if
@@ -329,6 +329,39 @@ void handleCommand(const String &line) {
       out
     );
 
+    return;
+  }
+
+
+  // ==========================================================
+  // describe - read-only hardware/capability discovery
+  // ==========================================================
+
+  if (strcmp(commandName, "describe") == 0) {
+
+    JsonDocument out;
+    JsonArray devices = out["devices"].to<JsonArray>();
+    JsonObject dht11Device = devices.add<JsonObject>();
+    dht11Device["id"] = "esp32_dht11";
+    dht11Device["kind"] = "dht11";
+    dht11Device["label"] = "DHT11 temperature and humidity";
+    dht11Device["recommended_poll_interval_seconds"] = 1.5;
+    JsonArray dht11Channels = dht11Device["channels"].to<JsonArray>();
+    JsonObject temperatureChannel = dht11Channels.add<JsonObject>();
+    temperatureChannel["name"] = "temperature";
+    temperatureChannel["unit"] = "degC";
+    JsonObject humidityChannel = dht11Channels.add<JsonObject>();
+    humidityChannel["name"] = "humidity";
+    humidityChannel["unit"] = "%RH";
+
+    JsonArray outputs = out["outputs"].to<JsonArray>();
+    JsonObject ledOutput = outputs.add<JsonObject>();
+    ledOutput["name"] = "led";
+    ledOutput["kind"] = "digital";
+    ledOutput["writable"] = true;
+    ledOutput["safe_value"] = false;
+
+    sendOk(messageId, out);
     return;
   }
 

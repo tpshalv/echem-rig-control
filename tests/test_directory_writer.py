@@ -91,6 +91,23 @@ def test_writer_syncs_journals_to_disk(tmp_path: Path, monkeypatch) -> None:
     assert len(syncs) >= 4
 
 
+def test_measurement_batch_uses_one_journal_sync(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    syncs = []
+    monkeypatch.setattr("rig_control.data.directory_writer.os.fsync", syncs.append)
+    writer = DirectoryExperimentWriter(tmp_path)
+    writer.open_experiment(make_metadata())
+    syncs.clear()
+
+    writer.write_measurements(
+        (make_measurement_record(), make_measurement_record())
+    )
+
+    assert len(syncs) == 1
+
+
 def test_writer_starts_closed() -> None:
     writer = DirectoryExperimentWriter("unused")
 

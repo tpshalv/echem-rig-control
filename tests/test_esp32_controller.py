@@ -14,9 +14,12 @@ class FakeClient:
         self.outputs = {"led": False}
         self.watchdog_tripped = True
         self.calls: list[object] = []
+        self.heartbeat_error: Exception | None = None
 
     def heartbeat(self) -> None:
         self.calls.append("heartbeat")
+        if self.heartbeat_error is not None:
+            raise self.heartbeat_error
 
     def get_status(self) -> dict[str, Any]:
         self.calls.append("status")
@@ -95,6 +98,41 @@ def test_connecting_controller_twice_does_not_acquire_bus_twice() -> None:
 
     controller.disconnect()
     assert bus.client_count == 0
+
+
+def test_heartbeat_failures_recovery_and_watchdog_trip_are_diagnostic() -> None:
+    session = FakeSession()
+    events = []
+    controller = Esp32Controller(
+        "esp32_main_controller",
+        Esp32Bus("main_esp32", session),  # type: ignore[arg-type]
+        heartbeat_interval_seconds=60,
+        event_sink=lambda event, details: events.append((event, details)),
+    )
+    controller.connect()
+    session.client.heartbeat_error = OSError("temporary USB failure")
+
+    controller._heartbeat_once()
+    controller._heartbeat_once()
+
+    failed = controller.heartbeat_diagnostics()
+    assert failed["consecutive_failures"] == 2
+    assert failed["total_failures"] == 2
+    assert "temporary USB failure" in failed["last_error"]
+    assert sum("heartbeat communication failed" in event.message for event, _ in events) == 1
+
+    session.client.heartbeat_error = None
+    session.client.watchdog_tripped = True
+    controller._last_status_refresh = 0.0
+    controller._heartbeat_once()
+
+    recovered = controller.heartbeat_diagnostics()
+    assert recovered["consecutive_failures"] == 0
+    assert recovered["recoveries"] == 1
+    assert recovered["watchdog_tripped"] is True
+    assert any("communication recovered" in event.message for event, _ in events)
+    assert any("watchdog tripped" in event.message for event, _ in events)
+    controller.disconnect()
 
 
 def test_control_service_and_manual_model_control_led() -> None:

@@ -98,6 +98,7 @@ def create_device_manager(
                 selected_alicat_transport_factory,
                 esp32_buses,
                 selected_esp32_transport_factory,
+                event_sink,
             )
         )
 
@@ -111,6 +112,7 @@ def _create_device(
     alicat_transport_factory: AlicatTransportFactory,
     esp32_buses: dict[str, Esp32Bus],
     esp32_transport_factory: Esp32TransportFactory,
+    event_sink: EventSink | None,
 ) -> Device:
     if role.backend is DeviceBackend.REAL:
         if (
@@ -143,13 +145,14 @@ def _create_device(
             heartbeat_interval = _optional_number(
                 role.settings,
                 "heartbeat_interval_seconds",
-                5.0,
+                2.0,
                 role.device_id,
             )
             return Esp32Controller(
                 role.device_id,
                 bus,
                 heartbeat_interval_seconds=heartbeat_interval,
+                event_sink=event_sink,
             )
 
         if role.driver == "esp32_dht11" and role.capability in {

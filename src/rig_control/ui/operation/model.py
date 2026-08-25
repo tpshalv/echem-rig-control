@@ -36,6 +36,133 @@ class LiveMeasurementRow:
     timestamp: datetime
 
 
+@dataclass(slots=True)
+class _HistoryBucket:
+    index: int
+    minimum: LiveMeasurementRow
+    maximum: LiveMeasurementRow
+    latest: LiveMeasurementRow
+
+    def add(self, row: LiveMeasurementRow) -> None:
+        if row.value < self.minimum.value:
+            self.minimum = row
+        if row.value > self.maximum.value:
+            self.maximum = row
+        self.latest = row
+
+    def representatives(self) -> tuple[LiveMeasurementRow, ...]:
+        unique = {
+            row.timestamp: row
+            for row in (self.minimum, self.maximum, self.latest)
+        }
+        return tuple(sorted(unique.values(), key=lambda row: row.timestamp))
+
+
+class _ChannelHistory:
+    """Bounded recent and multi-resolution history for one live signal."""
+
+    _LEVELS = ((10, 360), (60, 480), (600, 1_008))
+    _OVERVIEW_LIMIT = 500
+
+    def __init__(self, recent_limit: int) -> None:
+        self.recent: deque[LiveMeasurementRow] = deque(maxlen=recent_limit)
+        self.levels: dict[int, deque[_HistoryBucket]] = {
+            seconds: deque(maxlen=count) for seconds, count in self._LEVELS
+        }
+        self.overview: list[LiveMeasurementRow] = []
+
+    def append(self, row: LiveMeasurementRow) -> None:
+        self.recent.append(row)
+        timestamp = row.timestamp.timestamp()
+        for seconds, buckets in self.levels.items():
+            index = int(timestamp // seconds)
+            if buckets and buckets[-1].index == index:
+                buckets[-1].add(row)
+            else:
+                buckets.append(_HistoryBucket(index, row, row, row))
+        self.overview.append(row)
+        if len(self.overview) > self._OVERVIEW_LIMIT * 2:
+            self.overview = _condense_rows(self.overview, self._OVERVIEW_LIMIT)
+
+    def recent_rows(self) -> tuple[LiveMeasurementRow, ...]:
+        return tuple(self.recent)
+
+    def rows_for_period(
+        self,
+        seconds: int | None,
+        limit: int = 500,
+    ) -> tuple[LiveMeasurementRow, ...]:
+        if seconds is None:
+            return tuple(_condense_rows(self.overview, limit))
+        if not self.recent:
+            return ()
+        latest = self.recent[-1].timestamp.timestamp() if self.recent else 0.0
+        cutoff = latest - seconds
+        run_start = self.overview[0].timestamp.timestamp()
+        required_start = max(cutoff, run_start)
+
+        recent_rows = list(self.recent)
+        if recent_rows[0].timestamp.timestamp() <= required_start:
+            selected = [
+                row
+                for row in recent_rows
+                if row.timestamp.timestamp() >= cutoff
+            ]
+            return tuple(_condense_rows(selected, limit))
+
+        for level_seconds, _count in self._LEVELS:
+            rows = [
+                row
+                for bucket in self.levels[level_seconds]
+                for row in bucket.representatives()
+                if row.timestamp.timestamp() >= cutoff
+            ]
+            if rows and rows[0].timestamp.timestamp() <= (
+                required_start + level_seconds
+            ):
+                return tuple(_condense_rows(rows, limit))
+
+        return tuple(_condense_rows(self.overview, limit))
+
+    def set_recent_limit(self, limit: int) -> None:
+        self.recent = deque(self.recent, maxlen=limit)
+
+    def retained_count(self) -> int:
+        return (
+            len(self.recent)
+            + len(self.overview)
+            + sum(len(buckets) for buckets in self.levels.values())
+        )
+
+
+def _condense_rows(
+    rows: list[LiveMeasurementRow],
+    limit: int,
+) -> list[LiveMeasurementRow]:
+    """Preserve endpoints and local extrema while bounding display points."""
+
+    if len(rows) <= limit:
+        return list(rows)
+    interior = rows[1:-1]
+    bucket_count = max(1, (limit - 2) // 2)
+    bucket_size = max(1, (len(interior) + bucket_count - 1) // bucket_count)
+    selected = [rows[0]]
+    for start in range(0, len(interior), bucket_size):
+        bucket = interior[start : start + bucket_size]
+        extrema = {
+            min(bucket, key=lambda row: row.value).timestamp:
+                min(bucket, key=lambda row: row.value),
+            max(bucket, key=lambda row: row.value).timestamp:
+                max(bucket, key=lambda row: row.value),
+        }
+        selected.extend(sorted(extrema.values(), key=lambda row: row.timestamp))
+    selected.append(rows[-1])
+    if len(selected) > limit:
+        step = (len(selected) - 1) / (limit - 1)
+        selected = [selected[round(index * step)] for index in range(limit)]
+    return selected
+
+
 @dataclass(frozen=True, slots=True)
 class OperationChannelRow:
     """One measured or adjustable value shown on the Operation screen."""
@@ -91,7 +218,7 @@ class OperationViewModel:
         ] = {}
         self._history_limit = history_limit
         self._measurement_histories: dict[
-            tuple[str, str], deque[LiveMeasurementRow]
+            tuple[str, str], _ChannelHistory
         ] = {}
         self._warnings: dict[str, str] = {}
         self._events: deque[Event] = deque(maxlen=event_limit)
@@ -356,9 +483,19 @@ class OperationViewModel:
         device_id: str,
         channel: str,
     ) -> tuple[LiveMeasurementRow, ...]:
-        return tuple(
-            self._measurement_histories.get((device_id, channel), ())
-        )
+        history = self._measurement_histories.get((device_id, channel))
+        return () if history is None else history.recent_rows()
+
+    def measurement_history_for_period(
+        self,
+        device_id: str,
+        channel: str,
+        seconds: int | None,
+    ) -> tuple[LiveMeasurementRow, ...]:
+        """Return at most 500 representative points over a selected period."""
+
+        history = self._measurement_histories.get((device_id, channel))
+        return () if history is None else history.rows_for_period(seconds)
 
     def latest_measurement(
         self,
@@ -383,10 +520,8 @@ class OperationViewModel:
             return
 
         self._history_limit = history_limit
-        self._measurement_histories = {
-            key: deque(history, maxlen=history_limit)
-            for key, history in self._measurement_histories.items()
-        }
+        for history in self._measurement_histories.values():
+            history.set_recent_limit(history_limit)
 
     def warnings(self) -> tuple[tuple[str, str], ...]:
         return tuple(sorted(self._warnings.items()))
@@ -394,16 +529,26 @@ class OperationViewModel:
     def diagnostic_metrics(self) -> dict[str, object]:
         """Describe UI-retained state for the runtime health journal."""
 
+        heartbeat_diagnostics = {
+            device_id: device.heartbeat_diagnostics()
+            for device_id in self._device_manager.device_ids
+            if isinstance(
+                (device := self._device_manager.get(device_id)),
+                Esp32Controller,
+            )
+        }
         return {
             "latest_measurement_count": len(self._measurements),
             "history_channel_count": len(self._measurement_histories),
             "history_point_count": sum(
-                len(history) for history in self._measurement_histories.values()
+                history.retained_count()
+                for history in self._measurement_histories.values()
             ),
             "history_limit_per_channel": self._history_limit,
             "warning_count": len(self._warnings),
             "retained_event_count": len(self._events),
             "event_limit": self._events.maxlen,
+            "esp32_heartbeats": heartbeat_diagnostics,
         }
 
     def connect_all(self) -> tuple[OperationActionResult, ...]:
@@ -454,7 +599,6 @@ class OperationViewModel:
         experiment_id: str,
         operator: str,
         output_directory: str | Path,
-        sample_interval_seconds: float,
         notes: str | None = None,
     ) -> OperationActionResult:
         if not self.is_monitoring:
@@ -477,7 +621,6 @@ class OperationViewModel:
             self._experiment_recorder.start(
                 metadata=metadata,
                 root_directory=output_directory,
-                sample_interval_seconds=sample_interval_seconds,
             )
         except Exception as error:
             return self._failure("start experiment recording", error)
@@ -519,7 +662,7 @@ class OperationViewModel:
                 self._measurements[key] = row
                 history = self._measurement_histories.setdefault(
                     key,
-                    deque(maxlen=self._history_limit),
+                    _ChannelHistory(self._history_limit),
                 )
                 history.append(row)
                 successful_ids.add(record.device_id)

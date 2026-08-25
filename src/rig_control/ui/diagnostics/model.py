@@ -44,6 +44,11 @@ class DiagnosticViewModel:
             return ()
         return self._runtime_diagnostics.health_history()
 
+    def runtime_health_overview(self) -> tuple[RuntimeHealthPoint, ...]:
+        if self._runtime_diagnostics is None:
+            return ()
+        return self._runtime_diagnostics.overview_health_history()
+
     def latest_runtime_health(self) -> RuntimeHealthPoint | None:
         if self._runtime_diagnostics is None:
             return None

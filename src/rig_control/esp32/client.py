@@ -28,6 +28,24 @@ class ControllerClient:
 
         return self._request("identify")
 
+    def describe_capabilities(self) -> dict[str, Any]:
+        """Return the controller's discoverable devices, channels and outputs."""
+
+        payload = self._request("describe")
+        devices = payload.get("devices")
+        outputs = payload.get("outputs")
+        if not isinstance(devices, list) or not all(
+            isinstance(device, dict) for device in devices
+        ):
+            raise RuntimeError("Controller capability response has no device list")
+        if not isinstance(outputs, list) or not all(
+            isinstance(output, dict) for output in outputs
+        ):
+            raise RuntimeError("Controller capability response has no output list")
+        return {
+            key: value for key, value in payload.items() if key != "reply_to"
+        }
+
     def heartbeat(self) -> None:
         self._request("heartbeat")
 

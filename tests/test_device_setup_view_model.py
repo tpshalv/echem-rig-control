@@ -10,11 +10,14 @@ from rig_control.devices.keithley_2260b.configuration import (
 )
 from rig_control.devices.keithley_2260b.protocol import KeithleyIdentity
 from rig_control.diagnostics.alicat import AlicatDiagnosticResult, DiscoveredAlicat
+from rig_control.diagnostics.esp32 import Esp32ReadinessResult
+from rig_control.diagnostics.esp32 import Esp32DiscoveryResult
 from rig_control.rig_profile import DeviceBackend, DeviceCapability
 from rig_control.rig_profile_loading import load_rig_profile
 from rig_control.ui.device_setup.model import (
     AddAlicatRequest,
     AddKeithleyRequest,
+    AddEsp32Request,
     AlicatScanRow,
     DeviceSetupViewModel,
     SerialPortInfo,
@@ -51,8 +54,252 @@ def test_rows_show_configured_labels_types_and_remembered_targets() -> None:
     assert rows["nitrogen_mfc"].friendly_name == "Nitrogen"
     assert rows["nitrogen_mfc"].connection == "CHANGE_ME, address A"
     assert "alicat" in rows["nitrogen_mfc"].device_type
+    assert rows["nitrogen_mfc"].measurement_interval == "App default"
     assert rows["main_power_supply"].connection == "CHANGE_ME:2268"
     assert rows["main_power_supply"].readiness == "not checked"
+
+
+def test_disabled_devices_remain_visible_for_editing() -> None:
+    profile = load_rig_profile("rig-profile.example.toml")
+    disabled = replace(profile.get_role("nitrogen_mfc"), enabled=False)
+    profile = replace(
+        profile,
+        device_roles=tuple(
+            disabled if role.device_id == disabled.device_id else role
+            for role in profile.device_roles
+        ),
+    )
+    model = DeviceSetupViewModel(profile)
+
+    rows = {row.device_id: row for row in model.device_rows()}
+
+    assert rows["nitrogen_mfc"].enabled is False
+
+
+def test_device_editor_updates_common_connection_and_driver_values() -> None:
+    saved = []
+    model = DeviceSetupViewModel(
+        load_rig_profile("rig-profile.example.toml"),
+        profile_writer=lambda profile, _path: saved.append(profile) or None,
+    )
+    original = model.device_edit_values("nitrogen_mfc")
+    connection = dict(original.connection_parameters)
+    connection["port"] = "COM5"
+    settings = dict(original.settings)
+    settings["maximum_flow"] = 1500.0
+
+    result = model.update_device(
+        replace(
+            original,
+            friendly_name="Nitrogen inlet",
+            enabled=False,
+            poll_interval_seconds=2.0,
+            connection_parameters=connection,
+            settings=settings,
+        )
+    )
+
+    assert result.succeeded is True
+    role = saved[-1].get_role("nitrogen_mfc")
+    assert role.friendly_name == "Nitrogen inlet"
+    assert role.enabled is False
+    assert role.poll_interval_seconds == 2.0
+    assert role.settings["maximum_flow"] == 1500.0
+    assert saved[-1].get_connection(role.connection_id).parameters["port"] == "COM5"
+
+
+def test_removing_device_also_removes_its_unused_connection() -> None:
+    saved = []
+    profile = load_rig_profile("rig-profile.example.toml")
+    model = DeviceSetupViewModel(
+        profile,
+        profile_writer=lambda candidate, _path: saved.append(candidate) or None,
+    )
+    removed_connection = profile.get_role("main_power_supply").connection_id
+
+    result = model.remove_device("main_power_supply")
+
+    assert result.succeeded is True
+    assert all(role.device_id != "main_power_supply" for role in saved[-1].device_roles)
+    assert all(
+        connection.connection_id != removed_connection
+        for connection in saved[-1].connections
+    )
+
+
+def test_profile_can_be_duplicated_renamed_and_reloaded(tmp_path) -> None:
+    destination = tmp_path / "copied-rig.toml"
+    model = make_model()
+
+    saved = model.save_profile_as(destination)
+    renamed = model.update_profile_identity("copied_rig", "Copied rig")
+
+    assert saved.succeeded is True
+    assert renamed.succeeded is True
+    assert model.profile_path == destination
+    assert load_rig_profile(destination).friendly_name == "Copied rig"
+
+    switched = model.switch_profile("rig-profile.esp32.toml")
+    assert switched.succeeded is True
+    assert model.profile.profile_id == "esp32_hardware_poc"
+
+
+def test_new_profile_is_blank_saved_and_selected(tmp_path) -> None:
+    model = make_model()
+    destination = tmp_path / "rig-profile.new-cell.toml"
+
+    result = model.create_new_profile("new_cell", "New Cell", destination)
+
+    assert result.succeeded is True
+    assert model.profile_path == destination
+    assert model.profile.profile_id == "new_cell"
+    assert model.profile.friendly_name == "New Cell"
+    assert model.profile.device_roles == ()
+    assert model.profile.connections == ()
+    assert load_rig_profile(destination) == model.profile
+
+
+def test_new_profile_rejects_invalid_id_without_changing_selection(tmp_path) -> None:
+    model = make_model()
+    original_profile = model.profile
+    original_path = model.profile_path
+
+    result = model.create_new_profile(
+        "Invalid ID",
+        "Invalid rig",
+        tmp_path / "invalid.toml",
+    )
+
+    assert result.succeeded is False
+    assert model.profile is original_profile
+    assert model.profile_path == original_path
+
+
+def test_discovered_esp32_adds_controller_connection_and_supported_sensors(
+    tmp_path,
+) -> None:
+    profile_path = tmp_path / "blank.toml"
+    model = DeviceSetupViewModel(
+        load_rig_profile("rig-profile.example.toml"),
+        profile_path=profile_path,
+        serial_port_provider=lambda: (),
+    )
+    discovery = Esp32DiscoveryResult(
+        identity={
+            "controller_id": "esp32_main_controller",
+            "firmware_version": "0.1.0",
+            "protocol_version": 1,
+        },
+        capabilities={
+            "devices": [
+                {
+                    "id": "esp32_dht11",
+                    "kind": "dht11",
+                    "label": "DHT11 temperature and humidity",
+                    "channels": [
+                        {"name": "temperature", "unit": "degC"},
+                        {"name": "humidity", "unit": "%RH"},
+                    ],
+                },
+                {"id": "future_sensor", "kind": "future_type"},
+            ],
+            "outputs": [
+                {"name": "led", "kind": "digital", "writable": True}
+            ],
+        },
+    )
+
+    result = model.add_discovered_esp32(
+        AddEsp32Request(port="COM7"),
+        discovery,
+        controller_friendly_name="Reactor safety controller",
+        selected_device_names={"esp32_dht11": "Outlet humidity"},
+        selected_device_intervals={"esp32_dht11": 3.0},
+    )
+
+    assert result.succeeded is True
+    assert "future_type" in result.summary
+    controller = model.profile.get_role("esp32_main_controller")
+    sensor = model.profile.get_role("esp32_dht11")
+    assert controller.driver == "esp32_json"
+    assert controller.friendly_name == "Reactor safety controller"
+    assert sensor.driver == "esp32_dht11"
+    assert sensor.friendly_name == "Outlet humidity"
+    assert sensor.poll_interval_seconds == 3.0
+    assert sensor.connection_id == controller.connection_id
+    connection = model.profile.get_connection(controller.connection_id)
+    assert connection.parameters["port"] == "COM7"
+    assert connection.parameters["baud_rate"] == 115200
+    assert load_rig_profile(profile_path) == model.profile
+
+
+def test_discovered_esp32_only_adds_selected_sensor_devices(tmp_path) -> None:
+    profile_path = tmp_path / "controller-only.toml"
+    model = DeviceSetupViewModel(
+        load_rig_profile("rig-profile.example.toml"),
+        profile_path=profile_path,
+        serial_port_provider=lambda: (),
+    )
+    discovery = Esp32DiscoveryResult(
+        identity={"controller_id": "controller_only", "protocol_version": 1},
+        capabilities={
+            "devices": [
+                {
+                    "id": "optional_dht11",
+                    "kind": "dht11",
+                    "label": "Optional sensor",
+                }
+            ],
+            "outputs": [],
+        },
+    )
+
+    result = model.add_discovered_esp32(
+        AddEsp32Request(port="COM8"),
+        discovery,
+        selected_device_names={},
+    )
+
+    assert result.succeeded is True
+    assert model.profile.get_role("controller_only").driver == "esp32_json"
+    assert all(
+        role.device_id != "optional_dht11"
+        for role in model.profile.device_roles
+    )
+
+
+def test_measurement_interval_can_be_edited_without_hardware_check() -> None:
+    saved_profiles = []
+    model = DeviceSetupViewModel(
+        load_rig_profile("rig-profile.example.toml"),
+        profile_writer=lambda profile, _path: (
+            saved_profiles.append(profile) or None
+        ),
+    )
+
+    result = model.update_measurement_interval("main_power_supply", 0.1)
+
+    assert result.succeeded is True
+    assert model.device_poll_interval("main_power_supply") == 0.1
+    rows = {row.device_id: row for row in model.device_rows()}
+    assert rows["main_power_supply"].measurement_interval == "0.1 s"
+    assert saved_profiles[0].get_role(
+        "main_power_supply"
+    ).poll_interval_seconds == 0.1
+
+
+def test_invalid_measurement_interval_is_not_saved() -> None:
+    saved_profiles = []
+    model = DeviceSetupViewModel(
+        load_rig_profile("rig-profile.example.toml"),
+        profile_writer=lambda profile, _path: saved_profiles.append(profile),
+    )
+
+    result = model.update_measurement_interval("main_power_supply", 0)
+
+    assert result.succeeded is False
+    assert "greater than zero" in result.technical_details
+    assert saved_profiles == []
 
 
 def test_serial_port_provider_is_exposed_without_opening_ports() -> None:
@@ -197,6 +444,42 @@ def test_simulated_device_does_not_call_hardware_checker() -> None:
     assert "simulated" in result.summary
 
 
+def test_esp32_controller_readiness_uses_read_only_checker() -> None:
+    calls = []
+    model = DeviceSetupViewModel(
+        load_rig_profile("rig-profile.esp32.toml"),
+        esp32_checker=lambda profile, device_id: (
+            calls.append((profile.profile_id, device_id))
+            or Esp32ReadinessResult(
+                {"controller_id": "esp32_main_controller"},
+                {"watchdog_tripped": False},
+            )
+        ),
+    )
+
+    result = model.check_device("esp32_main_controller")
+
+    assert result.succeeded is True
+    assert calls == [("esp32_hardware_poc", "esp32_main_controller")]
+
+
+def test_esp32_sensor_readiness_reports_live_values() -> None:
+    model = DeviceSetupViewModel(
+        load_rig_profile("rig-profile.esp32.toml"),
+        esp32_checker=lambda _profile, _device_id: Esp32ReadinessResult(
+            {"controller_id": "esp32_main_controller"},
+            {},
+            (("temperature", 24.2, "degC"), ("humidity", 47.0, "%RH")),
+        ),
+    )
+
+    result = model.check_device("esp32_dht11")
+
+    assert result.succeeded is True
+    assert "temperature=24.2 degC" in result.summary
+    assert "humidity=47 %RH" in result.summary
+
+
 def test_checked_alicat_is_saved_to_new_local_profile(tmp_path) -> None:
     profile_path = tmp_path / "rig-profile.toml"
     empty_profile = replace(
@@ -248,6 +531,7 @@ def test_checked_alicat_is_saved_to_new_local_profile(tmp_path) -> None:
     assert role.settings["purpose_label"] == "Nitrogen"
     assert role.settings["maximum_flow"] == 2000.0
     assert role.settings["flow_unit"] == "SCCM"
+    assert role.poll_interval_seconds == 1.0
     assert role.connection_parameters["address"] == "A"
     assert saved.get_connection(role.connection_id).parameters["port"] == "COM5"
 
@@ -380,6 +664,7 @@ def test_identified_keithley_is_saved_to_local_profile(tmp_path) -> None:
     assert role.settings["maximum_voltage"] == 30.0
     assert role.settings["maximum_current"] == 108.0
     assert role.settings["maximum_power"] == 1080.0
+    assert role.poll_interval_seconds == 0.1
     assert connection.parameters["host"] == "192.168.1.29"
     assert connection.parameters["port"] == 2268
 

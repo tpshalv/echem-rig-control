@@ -14,14 +14,6 @@ from rig_control.polling import PollingBatch
 FIXED_TIME = datetime(2026, 8, 18, 12, 0, tzinfo=UTC)
 
 
-class AdjustableClock:
-    def __init__(self) -> None:
-        self.value = 0.0
-
-    def __call__(self) -> float:
-        return self.value
-
-
 def metadata() -> ExperimentMetadata:
     return ExperimentMetadata(
         experiment_id="EXP-001",
@@ -56,40 +48,34 @@ def batch(
 
 def make_recorder(
     writer: InMemoryExperimentWriter,
-    clock: AdjustableClock,
 ) -> ExperimentRecorder:
     return ExperimentRecorder(
         writer_factory=lambda _root: writer,
-        clock=clock,
     )
 
 
 def test_recording_has_explicit_start_and_stop() -> None:
     writer = InMemoryExperimentWriter()
-    clock = AdjustableClock()
-    recorder = make_recorder(writer, clock)
+    recorder = make_recorder(writer)
 
     assert recorder.is_recording is False
     recorder.start(
         metadata=metadata(),
         root_directory=Path("unused"),
-        sample_interval_seconds=1.0,
     )
 
     assert recorder.is_recording is True
     assert writer.metadata == metadata()
-    assert recorder.sample_interval_seconds == 1.0
 
     recorder.stop()
 
     assert recorder.is_recording is False
     assert writer.is_open is False
-    assert recorder.sample_interval_seconds is None
 
 
 def test_batches_are_ignored_until_recording_starts() -> None:
     writer = InMemoryExperimentWriter()
-    recorder = make_recorder(writer, AdjustableClock())
+    recorder = make_recorder(writer)
 
     recorder.record_batch(batch(12.0))
 
@@ -98,12 +84,10 @@ def test_batches_are_ignored_until_recording_starts() -> None:
 
 def test_first_batch_is_recorded_immediately() -> None:
     writer = InMemoryExperimentWriter()
-    clock = AdjustableClock()
-    recorder = make_recorder(writer, clock)
+    recorder = make_recorder(writer)
     recorder.start(
         metadata=metadata(),
         root_directory="unused",
-        sample_interval_seconds=2.0,
     )
 
     recorder.record_batch(batch(12.0))
@@ -113,31 +97,26 @@ def test_first_batch_is_recorded_immediately() -> None:
     ] == [12.0]
 
 
-def test_sampling_interval_does_not_duplicate_polling_batches() -> None:
+def test_every_native_batch_is_recorded_once() -> None:
     writer = InMemoryExperimentWriter()
-    clock = AdjustableClock()
-    recorder = make_recorder(writer, clock)
+    recorder = make_recorder(writer)
     recorder.start(
         metadata=metadata(),
         root_directory="unused",
-        sample_interval_seconds=2.0,
     )
 
     recorder.record_batch(batch(1.0))
-    clock.value = 1.0
     recorder.record_batch(batch(2.0))
-    clock.value = 2.0
     recorder.record_batch(batch(3.0))
 
     assert [
         record.measurement.value for record in writer.measurements
-    ] == [1.0, 3.0]
+    ] == [1.0, 2.0, 3.0]
 
 
 def test_due_batch_records_experiment_relevant_events() -> None:
     writer = InMemoryExperimentWriter()
-    clock = AdjustableClock()
-    recorder = make_recorder(writer, clock)
+    recorder = make_recorder(writer)
     event = Event(
         source="mfc_a",
         severity=EventSeverity.ERROR,
@@ -147,7 +126,6 @@ def test_due_batch_records_experiment_relevant_events() -> None:
     recorder.start(
         metadata=metadata(),
         root_directory="unused",
-        sample_interval_seconds=1.0,
     )
 
     recorder.record_batch(batch(1.0, events=(event,)))
@@ -155,10 +133,9 @@ def test_due_batch_records_experiment_relevant_events() -> None:
     assert writer.events == (event,)
 
 
-def test_events_are_not_lost_between_measurement_samples() -> None:
+def test_events_and_measurements_are_recorded_from_each_batch() -> None:
     writer = InMemoryExperimentWriter()
-    clock = AdjustableClock()
-    recorder = make_recorder(writer, clock)
+    recorder = make_recorder(writer)
     event = Event(
         source="mfc_a",
         severity=EventSeverity.ERROR,
@@ -168,22 +145,19 @@ def test_events_are_not_lost_between_measurement_samples() -> None:
     recorder.start(
         metadata=metadata(),
         root_directory="unused",
-        sample_interval_seconds=10.0,
     )
     recorder.record_batch(batch(1.0))
-    clock.value = 1.0
-
     recorder.record_batch(batch(2.0, events=(event,)))
 
     assert writer.events == (event,)
     assert [
         record.measurement.value for record in writer.measurements
-    ] == [1.0]
+    ] == [1.0, 2.0]
 
 
 def test_start_and_stop_lifecycle_errors_are_clear() -> None:
     writer = InMemoryExperimentWriter()
-    recorder = make_recorder(writer, AdjustableClock())
+    recorder = make_recorder(writer)
 
     with pytest.raises(RuntimeError, match="No experiment"):
         recorder.stop()
@@ -191,36 +165,11 @@ def test_start_and_stop_lifecycle_errors_are_clear() -> None:
     recorder.start(
         metadata=metadata(),
         root_directory="unused",
-        sample_interval_seconds=1.0,
     )
     with pytest.raises(RuntimeError, match="already"):
         recorder.start(
             metadata=metadata(),
             root_directory="unused",
-            sample_interval_seconds=1.0,
-        )
-
-
-@pytest.mark.parametrize("value", [0, -1, float("inf"), float("nan")])
-def test_invalid_sample_interval_is_rejected(value: float) -> None:
-    recorder = ExperimentRecorder()
-
-    with pytest.raises(ValueError, match="Sample interval"):
-        recorder.start(
-            metadata=metadata(),
-            root_directory="unused",
-            sample_interval_seconds=value,
-        )
-
-
-def test_non_numeric_sample_interval_is_rejected() -> None:
-    recorder = ExperimentRecorder()
-
-    with pytest.raises(TypeError, match="Sample interval"):
-        recorder.start(
-            metadata=metadata(),
-            root_directory="unused",
-            sample_interval_seconds=True,  # type: ignore[arg-type]
         )
 
 

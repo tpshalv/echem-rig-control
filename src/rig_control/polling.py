@@ -25,7 +25,7 @@ class PollingFailure:
 
 @dataclass(frozen=True, slots=True)
 class PollingBatch:
-    """One published snapshot of the latest known device state."""
+    """Measurements and events from acquisition or a display snapshot."""
 
     started_at: datetime
     finished_at: datetime
@@ -254,8 +254,6 @@ class PollingService:
                         events=tuple(pending_events),
                     )
                     pending_events.clear()
-                    batch = self._deliver_batch(batch)
-                    batch = self._publish_events(batch)
                     self._enqueue_result(batch)
                     while next_publish <= now:
                         next_publish += self._publish_interval
@@ -269,6 +267,17 @@ class PollingService:
                 wait_seconds = max(0.0, min(deadlines) - monotonic())
                 self._wake_scheduler.wait(wait_seconds)
                 self._wake_scheduler.clear()
+
+        # The executor waits for any device calls already in progress. Drain
+        # their callbacks once more so stopping monitoring cannot discard a
+        # successfully completed final acquisition.
+        self._drain_completions(
+            latest,
+            active_failures,
+            pending_events,
+            next_due,
+            in_flight,
+        )
 
     def _enqueue_result(self, batch: PollingBatch) -> None:
         if (
@@ -357,23 +366,56 @@ class PollingService:
             try:
                 records = completed.future.result()
             except Exception as error:
-                active_failures[device_id] = PollingFailure(
+                failure = PollingFailure(
                     device_id=device_id,
                     operation="read measurements",
                     error_type=type(error).__name__,
                     message=str(error),
                 )
+                active_failures[device_id] = failure
                 if device_id not in self._failed_device_ids:
-                    pending_events.append(self._failure_event(device_id, error))
+                    event = self._failure_event(device_id, error)
+                    native_batch = self._native_batch(
+                        failures=(failure,),
+                        events=(event,),
+                    )
+                    native_batch = self._deliver_batch(native_batch)
+                    self._publish_events(native_batch)
+                    pending_events.extend(native_batch.events)
                 self._failed_device_ids.add(device_id)
                 continue
 
             for record in records:
                 latest[(record.device_id, record.channel)] = record
             active_failures.pop(device_id, None)
+            events: tuple[Event, ...] = ()
             if device_id in self._failed_device_ids:
-                pending_events.append(self._recovery_event(device_id))
+                events = (self._recovery_event(device_id),)
                 self._failed_device_ids.remove(device_id)
+            if records or events:
+                native_batch = self._native_batch(
+                    measurements=records,
+                    events=events,
+                )
+                native_batch = self._deliver_batch(native_batch)
+                self._publish_events(native_batch)
+                pending_events.extend(native_batch.events)
+
+    @staticmethod
+    def _native_batch(
+        *,
+        measurements: tuple[MeasurementRecord, ...] = (),
+        failures: tuple[PollingFailure, ...] = (),
+        events: tuple[Event, ...] = (),
+    ) -> PollingBatch:
+        now = datetime.now(UTC)
+        return PollingBatch(
+            started_at=now,
+            finished_at=now,
+            measurements=measurements,
+            failures=failures,
+            events=events,
+        )
 
     def _poll_all_once(
         self,

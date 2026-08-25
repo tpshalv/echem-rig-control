@@ -1,5 +1,5 @@
 from collections import deque
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -52,7 +52,10 @@ def make_model() -> tuple[
     )
 
 
-def measurement_batch(value: float = 25.0) -> PollingBatch:
+def measurement_batch(
+    value: float = 25.0,
+    timestamp: datetime = FIXED_TIME,
+) -> PollingBatch:
     return PollingBatch(
         started_at=FIXED_TIME,
         finished_at=FIXED_TIME,
@@ -63,7 +66,7 @@ def measurement_batch(value: float = 25.0) -> PollingBatch:
                 measurement=Measurement(
                     value,
                     "degC",
-                    timestamp=FIXED_TIME,
+                    timestamp=timestamp,
                     quality=Quality.GOOD,
                 ),
             ),
@@ -100,14 +103,12 @@ def test_recording_requires_monitoring_and_output_folder() -> None:
         experiment_id="EXP-1",
         operator="operator",
         output_directory="data",
-        sample_interval_seconds=1.0,
     )
     model.start_monitoring()
     missing_folder = model.start_recording(
         experiment_id="EXP-1",
         operator="operator",
         output_directory="",
-        sample_interval_seconds=1.0,
     )
     model.stop_monitoring()
 
@@ -125,7 +126,6 @@ def test_start_and_stop_recording_use_existing_recorder() -> None:
         experiment_id="EXP-1",
         operator="operator",
         output_directory="unused",
-        sample_interval_seconds=2.0,
         notes="test notes",
     )
 
@@ -148,7 +148,6 @@ def test_monitoring_cannot_stop_while_recording() -> None:
         experiment_id="EXP-1",
         operator="operator",
         output_directory="unused",
-        sample_interval_seconds=1.0,
     )
 
     result = model.stop_monitoring()
@@ -215,6 +214,65 @@ def test_changed_history_limit_applies_to_future_readings() -> None:
             "temperature",
         )
     ] == [1.0, 2.0]
+
+
+def test_period_history_spans_time_range_and_preserves_spike() -> None:
+    model, _, polling, _ = make_model()
+    for second in range(700):
+        value = 500.0 if second == 250 else float(second % 10)
+        polling.results.put(
+            measurement_batch(value, FIXED_TIME + timedelta(seconds=second))
+        )
+        model.collect_polling_results()
+
+    recent = model.measurement_history("temperature", "temperature")
+    period = model.measurement_history_for_period(
+        "temperature", "temperature", 600
+    )
+
+    assert len(recent) == 120
+    assert len(period) <= 500
+    assert period[0].timestamp <= FIXED_TIME + timedelta(seconds=109)
+    assert period[-1].timestamp == FIXED_TIME + timedelta(seconds=699)
+    assert any(row.value == 500.0 for row in period)
+
+
+def test_whole_run_history_is_bounded_and_keeps_endpoints() -> None:
+    model, _, polling, _ = make_model()
+    for second in range(1_100):
+        polling.results.put(
+            measurement_batch(
+                float(second), FIXED_TIME + timedelta(seconds=second)
+            )
+        )
+        model.collect_polling_results()
+
+    period = model.measurement_history_for_period(
+        "temperature", "temperature", None
+    )
+
+    assert len(period) <= 500
+    assert period[0].value == 0.0
+    assert period[-1].value == 1_099.0
+
+
+def test_long_selected_period_keeps_raw_resolution_for_short_run() -> None:
+    model, _, polling, _ = make_model()
+    model.set_history_limit(500)
+    for second in range(200):
+        polling.results.put(
+            measurement_batch(
+                float(second), FIXED_TIME + timedelta(seconds=second)
+            )
+        )
+        model.collect_polling_results()
+
+    eight_hours = model.measurement_history_for_period(
+        "temperature", "temperature", 28_800
+    )
+
+    assert len(eight_hours) == 200
+    assert [row.value for row in eight_hours] == [float(i) for i in range(200)]
 
 
 @pytest.mark.parametrize("invalid", [0, 1, -1])

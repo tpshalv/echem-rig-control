@@ -95,6 +95,7 @@ def test_applying_settings_rebuilds_the_session(tmp_path: Path) -> None:
         {
             "publish_interval_seconds": "0.25",
             "technical_log_path": "logs/alternate.log",
+            "default_output_directory": "test-output",
         }
     )
 
@@ -102,6 +103,7 @@ def test_applying_settings_rebuilds_the_session(tmp_path: Path) -> None:
     assert original.closed is True
     assert model.session is not original
     assert model.settings.values["publish_interval_seconds"] == 0.25
+    assert model.settings.default_output_directory == "test-output"
 
 
 def test_device_setup_temporarily_releases_and_rebuilds_session(
@@ -117,3 +119,15 @@ def test_device_setup_temporarily_releases_and_rebuilds_session(
     assert model.resume_after_device_setup().succeeded is True
     assert model.feature_active is False
     assert model.session is not original
+
+
+def test_device_setup_can_resume_using_a_switched_profile(tmp_path: Path) -> None:
+    model = make_model(tmp_path)
+    model.suspend_for_device_setup()
+
+    result = model.resume_after_device_setup("rig-profile.esp32.toml")
+
+    assert result.succeeded is True
+    assert model.rig_profile_path == Path("rig-profile.esp32.toml")
+    assert model.profile.profile_id == "esp32_hardware_poc"
+    assert model.session.profile.profile_id == "esp32_hardware_poc"

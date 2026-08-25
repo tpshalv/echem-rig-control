@@ -13,6 +13,16 @@ from rig_control.ui.operation.model import (
     OperationViewModel,
 )
 from rig_control.ui.operation.trend_window import TrendWindow
+from rig_control.ui.operation.dashboard_window import (
+    DashboardSignal,
+    LiveDashboardWindow,
+)
+
+
+def format_operation_boolean(channel: str, value: bool) -> str:
+    if channel == "watchdog_tripped":
+        return "True" if value else "False"
+    return "On" if value else "Off"
 
 
 class OperationWindow:
@@ -24,6 +34,7 @@ class OperationWindow:
         view_model: OperationViewModel,
         *,
         profile_name: str,
+        default_output_directory: str = "",
         event_sink: EventSink | None = None,
     ) -> None:
         self._root = root
@@ -44,6 +55,7 @@ class OperationWindow:
         self._measurement_rows_deleted = 0
         self._warning_display_rebuilds = 0
         self._trend_windows: dict[tuple[str, str], TrendWindow] = {}
+        self._dashboard_window: LiveDashboardWindow | None = None
         self._channel_trees: dict[str | None, ttk.Treeview] = {}
         self._tree_item_keys: dict[tuple[str | None, str], tuple[str, str]] = {}
         self._channel_rows: dict[tuple[str, str], OperationChannelRow] = {}
@@ -58,6 +70,8 @@ class OperationWindow:
         self._root.rowconfigure(0, weight=1)
 
         self._create_widgets(profile_name)
+        if default_output_directory:
+            self._entries["output"].insert(0, default_output_directory)
         self._update_display()
         self._schedule_update()
 
@@ -117,9 +131,14 @@ class OperationWindow:
         ).grid(row=0, column=2, padx=18)
         ttk.Button(controls, text="Enter safe state — all devices",
                    command=self._enter_global_safe_state).grid(row=0, column=3)
+        ttk.Button(
+            controls,
+            text="Live dashboard",
+            command=self._open_live_dashboard,
+        ).grid(row=1, column=3, sticky="e", pady=(6, 0))
         self._action_status = ttk.Label(controls, text="Ready")
         self._action_status.grid(
-            row=1, column=0, columnspan=4, sticky="w", pady=(6, 0)
+            row=1, column=0, columnspan=3, sticky="w", pady=(6, 0)
         )
 
         left = ttk.Frame(body, style="Blueprint.TFrame")
@@ -179,7 +198,6 @@ class OperationWindow:
             ("Experiment ID", "experiment_id"),
             ("Operator", "operator"),
             ("Output folder", "output"),
-            ("Recording interval (s)", "interval"),
             ("Notes", "notes"),
         )
         self._entries: dict[str, ttk.Entry] = {}
@@ -190,13 +208,12 @@ class OperationWindow:
             entry = ttk.Entry(recording)
             entry.grid(row=row, column=1, sticky="ew", padx=(8, 4), pady=2)
             self._entries[key] = entry
-        self._entries["interval"].insert(0, "1.0")
         ttk.Button(recording, text="Browse…", command=self._browse_output).grid(
             row=2, column=2, pady=2
         )
 
         actions = ttk.Frame(recording)
-        actions.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        actions.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(8, 0))
         self._record_button = ttk.Button(
             actions, text="Start recording", command=self._toggle_recording
         )
@@ -207,10 +224,10 @@ class OperationWindow:
         self._recording_status.grid(row=0, column=1, padx=(12, 0))
         ttk.Label(
             recording,
-            text=("Saved-snapshot interval only. Device polling intervals "
-                  "are configured independently in the rig profile."),
+            text=("Every new reading is saved once. Measurement intervals "
+                  "are configured per device in Device Setup."),
             wraplength=280,
-        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(10, 0))
 
         for text, x, y, anchor in (("┌", 2, 2, "nw"), ("┐", 1, 2, "ne"),
                                     ("└", 2, 1, "sw"), ("┘", 1, 1, "se")):
@@ -293,20 +310,10 @@ class OperationWindow:
         if self._view_model.is_recording:
             result = self._view_model.stop_recording()
         else:
-            try:
-                interval = float(self._entries["interval"].get().strip())
-            except ValueError:
-                messagebox.showerror(
-                    "Invalid recording interval",
-                    "Recording interval must be a number of seconds.",
-                    parent=self._root,
-                )
-                return
             result = self._view_model.start_recording(
                 experiment_id=self._entries["experiment_id"].get().strip(),
                 operator=self._entries["operator"].get().strip(),
                 output_directory=self._entries["output"].get().strip(),
-                sample_interval_seconds=interval,
                 notes=self._entries["notes"].get().strip(),
             )
         self._show_result(result)
@@ -317,6 +324,57 @@ class OperationWindow:
         if selected:
             self._entries["output"].delete(0, "end")
             self._entries["output"].insert(0, selected)
+
+    def _open_live_dashboard(self) -> None:
+        if self._dashboard_window is not None and self._dashboard_window.exists:
+            self._dashboard_window.focus()
+            return
+        self._dashboard_window = LiveDashboardWindow(
+            self._root,
+            signal_provider=self._dashboard_signals,
+            history_provider=self._view_model.measurement_history_for_period,
+            on_close=lambda: setattr(self, "_dashboard_window", None),
+        )
+
+    def _dashboard_signals(self) -> tuple[DashboardSignal, ...]:
+        signals = []
+        rows = {row.key: row for row in self._view_model.channel_rows()}
+        for reading in self._view_model.measurement_rows():
+            row = rows.get((reading.device_id, reading.channel))
+            label = (
+                f"{row.device_name} — {row.channel_name}"
+                if row is not None
+                else f"{reading.device_id} — {reading.channel}"
+            )
+            channel = reading.channel.casefold()
+            unit = reading.unit.casefold()
+            if "temp" in channel or unit in {"degc", "°c", "k"}:
+                group = "Temperatures"
+            elif "flow" in channel or unit in {"sccm", "slpm", "lpm"}:
+                group = "Flows"
+            elif "humid" in channel or "%rh" in unit:
+                group = "Humidity"
+            elif "pressure" in channel or unit in {"pa", "kpa", "bar", "psia"}:
+                group = "Pressure"
+            elif channel in {"voltage", "current", "power"} or unit in {
+                "v",
+                "a",
+                "w",
+            }:
+                group = "Electrical"
+            else:
+                group = "All"
+            signals.append(
+                DashboardSignal(
+                    reading.device_id,
+                    reading.channel,
+                    label,
+                    reading.unit,
+                    group,
+                    "setpoint" in channel or "limit" in channel,
+                )
+            )
+        return tuple(sorted(signals, key=lambda signal: signal.label.casefold()))
 
     def _handle_channel_double_click(self, event: tk.Event, system: str | None) -> str:
         tree = self._channel_trees[system]
@@ -356,10 +414,11 @@ class OperationWindow:
             device_id=device_id,
             channel=channel,
             history_provider=(
-                lambda selected_device=device_id, selected_channel=channel:
-                self._view_model.measurement_history(
+                lambda seconds, selected_device=device_id, selected_channel=channel:
+                self._view_model.measurement_history_for_period(
                     selected_device,
                     selected_channel,
+                    seconds,
                 )
             ),
             on_close=lambda selected_key=key: self._trend_windows.pop(
@@ -579,7 +638,7 @@ class OperationWindow:
                 channel_name = getattr(row, "channel_name", row.channel.replace("_", " ").title())
                 value = row.value
                 if isinstance(value, bool):
-                    value_text = "On" if value else "Off"
+                    value_text = format_operation_boolean(row.channel, value)
                 elif isinstance(value, str):
                     value_text = value.replace("_", " ").title()
                 elif value is None:
@@ -658,9 +717,12 @@ class OperationWindow:
         if refresh_trends:
             for trend in tuple(self._trend_windows.values()):
                 trend.refresh()
+            if self._dashboard_window is not None:
+                self._dashboard_window.refresh()
 
     def diagnostic_metrics(self) -> dict[str, object]:
         metrics = dict(self._view_model.diagnostic_metrics())
+        dashboard = self._dashboard_window
         metrics.update(
             {
                 "ui_tick_count": self._ui_tick_count,
@@ -674,6 +736,16 @@ class OperationWindow:
                 "measurement_rows_updated": self._measurement_rows_updated,
                 "measurement_rows_deleted": self._measurement_rows_deleted,
                 "warning_display_rebuilds": self._warning_display_rebuilds,
+                "dashboard": (
+                    dashboard.diagnostic_metrics()
+                    if dashboard is not None and dashboard.exists
+                    else {
+                        "active_quadrants": 0,
+                        "selected_traces": 0,
+                        "visible_traces": 0,
+                        "canvas_items": 0,
+                    }
+                ),
             }
         )
         return metrics
@@ -684,3 +756,5 @@ class OperationWindow:
             self._after_id = None
         for trend in tuple(self._trend_windows.values()):
             trend.close()
+        if self._dashboard_window is not None:
+            self._dashboard_window.close()

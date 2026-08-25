@@ -260,6 +260,32 @@ def test_devices_are_read_at_independent_configured_rates() -> None:
     assert fast.read_count >= slow.read_count * 3
 
 
+def test_handler_receives_every_read_not_throttled_display_snapshots() -> None:
+    manager = DeviceManager()
+    sensor = CountingSensor("fast")
+    sensor.connect()
+    manager.register(sensor)
+    acquired = []
+    service = PollingService(
+        manager,
+        publish_interval_seconds=0.2,
+        device_intervals_seconds={"fast": 0.01},
+        batch_handler=acquired.append,
+    )
+
+    service.start()
+    try:
+        deadline = monotonic() + 1.0
+        while sensor.read_count < 6 and monotonic() < deadline:
+            Event().wait(0.005)
+    finally:
+        service.stop(timeout=1.0)
+
+    assert len(acquired) == sensor.read_count
+    assert all(len(batch.measurements) == 1 for batch in acquired)
+    assert service.results.empty()
+
+
 def test_blocked_slow_device_does_not_delay_fast_reads_or_publish() -> None:
     manager = DeviceManager()
     blocked = BlockingSensor("blocked")

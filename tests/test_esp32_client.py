@@ -164,6 +164,59 @@ def test_client_sends_identify_command() -> None:
     assert sent_request(transport).name == "identify"
 
 
+def test_client_reads_capability_description() -> None:
+    transport, client = make_client()
+    original_receive = transport.receive
+    capabilities = {
+        "devices": [
+            {
+                "id": "esp32_dht11",
+                "kind": "dht11",
+                "label": "DHT11 temperature and humidity",
+                "recommended_poll_interval_seconds": 1.5,
+                "channels": [
+                    {"name": "temperature", "unit": "degC"},
+                    {"name": "humidity", "unit": "%RH"},
+                ],
+            }
+        ],
+        "outputs": [{"name": "led", "kind": "digital", "writable": True}],
+    }
+
+    def receive_description() -> str:
+        request = sent_request(transport)
+        queue_response(
+            transport,
+            reply_to=request.message_id,
+            payload=capabilities,
+        )
+        return original_receive()
+
+    transport.receive = receive_description  # type: ignore[method-assign]
+
+    assert client.describe_capabilities() == capabilities
+    assert sent_request(transport).name == "describe"
+
+
+def test_client_rejects_invalid_capability_description() -> None:
+    transport, client = make_client()
+    original_receive = transport.receive
+
+    def receive_invalid_description() -> str:
+        request = sent_request(transport)
+        queue_response(
+            transport,
+            reply_to=request.message_id,
+            payload={"devices": [], "outputs": "led"},
+        )
+        return original_receive()
+
+    transport.receive = receive_invalid_description  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="output list"):
+        client.describe_capabilities()
+
+
 def test_client_reads_generic_sensor_channels() -> None:
     transport, client = make_client()
     original_receive = transport.receive

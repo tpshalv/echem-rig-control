@@ -193,10 +193,16 @@ class HomeViewModel:
             )
         return HomeActionResult(True, "Hardware session released for Device Setup.")
 
-    def resume_after_device_setup(self) -> HomeActionResult:
+    def resume_after_device_setup(
+        self,
+        profile_path: str | Path | None = None,
+    ) -> HomeActionResult:
         try:
+            if profile_path is not None:
+                self._rig_profile_path = Path(profile_path)
             self._profile = load_rig_profile(self._rig_profile_path)
             self._session = self._build_session()
+            self._remember_selection()
         except Exception as error:
             self._active_features.discard(FEATURE_DEVICE_SETUP)
             return HomeActionResult(False, f"Could not rebuild session: {error}")

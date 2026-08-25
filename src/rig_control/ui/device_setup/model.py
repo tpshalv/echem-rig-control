@@ -1,4 +1,4 @@
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 import re
@@ -19,6 +19,12 @@ from rig_control.diagnostics.alicat import (
     scan_alicat_bus,
 )
 from rig_control.diagnostics.keithley import identify_keithley
+from rig_control.diagnostics.esp32 import (
+    Esp32DiscoveryResult,
+    Esp32ReadinessResult,
+    discover_esp32,
+    read_esp32_state,
+)
 from rig_control.devices.keithley_2260b.protocol import KeithleyIdentity
 from rig_control.rig_profile import (
     ConnectionDefinition,
@@ -29,6 +35,7 @@ from rig_control.rig_profile import (
     RigProfile,
 )
 from rig_control.rig_profile_writing import write_rig_profile
+from rig_control.rig_profile_loading import load_rig_profile
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,7 +51,22 @@ class DeviceReadinessRow:
     friendly_name: str
     device_type: str
     connection: str
+    measurement_interval: str
     readiness: str
+    enabled: bool
+
+
+@dataclass(frozen=True, slots=True)
+class EditDeviceRequest:
+    device_id: str
+    friendly_name: str
+    enabled: bool
+    required: bool
+    system: str
+    poll_interval_seconds: float | None
+    connection_parameters: dict[str, object]
+    device_connection_parameters: dict[str, object]
+    settings: dict[str, object]
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +82,12 @@ class AlicatScanRow:
     raw_response: str
     configured_device_id: str | None = None
     configured_kind: str | None = None
+    model: str | None = None
+    inferred_kind: str | None = None
+    inferred_maximum_flow_sccm: float | None = None
+    manufacturer_response: str = ""
+    data_format_response: str = ""
+    firmware_response: str = ""
 
     @property
     def configuration_status(self) -> str:
@@ -76,6 +104,7 @@ class AddAlicatRequest:
     maximum_flow: float = 2000.0
     device_kind: str = "controller"
     flow_unit: str = "SCCM"
+    poll_interval_seconds: float = 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +121,16 @@ class AddKeithleyRequest:
     connection_method: str = "ethernet"
     resource_name: str = ""
     visa_baud_rate: int = 9600
+    poll_interval_seconds: float = 0.1
+
+
+@dataclass(frozen=True, slots=True)
+class AddEsp32Request:
+    port: str
+    baud_rate: int = 115200
+    timeout_seconds: float = 2.0
+    sensor_poll_interval_seconds: float = 1.5
+    heartbeat_interval_seconds: float = 2.0
 
 
 type SerialPortProvider = Callable[[], tuple[SerialPortInfo, ...]]
@@ -104,6 +143,8 @@ type KeithleyChecker = Callable[
     [Keithley2260BConfiguration],
     KeithleyIdentity,
 ]
+type Esp32Checker = Callable[[RigProfile, str], Esp32ReadinessResult]
+type Esp32Scanner = Callable[[str, int, float], Esp32DiscoveryResult]
 type ProfileWriter = Callable[[RigProfile, str | Path], Path | None]
 
 
@@ -119,6 +160,8 @@ class DeviceSetupViewModel:
         alicat_checker: AlicatChecker = read_alicat_state,
         alicat_scanner: AlicatScanner = scan_alicat_bus,
         keithley_checker: KeithleyChecker = identify_keithley,
+        esp32_checker: Esp32Checker = read_esp32_state,
+        esp32_scanner: Esp32Scanner = discover_esp32,
         profile_writer: ProfileWriter = write_rig_profile,
     ) -> None:
         if not isinstance(profile, RigProfile):
@@ -131,6 +174,8 @@ class DeviceSetupViewModel:
         self._alicat_checker = alicat_checker
         self._alicat_scanner = alicat_scanner
         self._keithley_checker = keithley_checker
+        self._esp32_checker = esp32_checker
+        self._esp32_scanner = esp32_scanner
         self._profile_writer = profile_writer
         self._readiness: dict[str, str] = {}
         self._serial_port_error = ""
@@ -138,6 +183,14 @@ class DeviceSetupViewModel:
     @property
     def serial_port_error(self) -> str:
         return self._serial_port_error
+
+    @property
+    def profile(self) -> RigProfile:
+        return self._profile
+
+    @property
+    def profile_path(self) -> Path:
+        return self._profile_path
 
     def device_rows(self) -> tuple[DeviceReadinessRow, ...]:
         return tuple(
@@ -148,12 +201,468 @@ class DeviceSetupViewModel:
                     f"{role.capability.value} ({role.driver})"
                 ),
                 connection=self._connection_description(role.device_id),
+                measurement_interval=(
+                    f"{role.poll_interval_seconds:g} s"
+                    if role.poll_interval_seconds is not None
+                    else "App default"
+                ),
                 readiness=self._readiness.get(
                     role.device_id,
                     "not checked",
                 ),
+                enabled=role.enabled,
             )
-            for role in self._profile.enabled_roles
+            for role in self._profile.device_roles
+        )
+
+    def switch_profile(self, path: str | Path) -> ReadinessCheckResult:
+        try:
+            selected = Path(path)
+            profile = load_rig_profile(selected)
+        except Exception as error:
+            return ReadinessCheckResult(
+                False,
+                "The selected rig profile could not be loaded.",
+                f"{type(error).__name__}: {error}",
+            )
+        self._profile = profile
+        self._profile_path = selected
+        self._readiness.clear()
+        return ReadinessCheckResult(
+            True,
+            f"Loaded rig profile {profile.friendly_name!r} from {selected}.",
+        )
+
+    def save_profile_as(self, path: str | Path) -> ReadinessCheckResult:
+        try:
+            selected = Path(path)
+            backup = self._profile_writer(self._profile, selected)
+        except Exception as error:
+            return ReadinessCheckResult(
+                False,
+                "The rig profile could not be saved to the selected file.",
+                f"{type(error).__name__}: {error}",
+            )
+        self._profile_path = selected
+        return ReadinessCheckResult(
+            True,
+            f"Saved rig profile to {selected}."
+            + (f" Previous file backed up to {backup}." if backup else ""),
+        )
+
+    def update_profile_identity(
+        self,
+        profile_id: str,
+        friendly_name: str,
+    ) -> ReadinessCheckResult:
+        try:
+            selected_id = profile_id.strip()
+            selected_name = friendly_name.strip()
+            if not re.fullmatch(r"[a-z][a-z0-9_-]*", selected_id):
+                raise ValueError(
+                    "Internal ID must start with a lowercase letter and use "
+                    "only lowercase letters, numbers, underscores or hyphens"
+                )
+            if not selected_name:
+                raise ValueError("Display name cannot be empty")
+            candidate = replace(
+                self._profile,
+                profile_id=selected_id,
+                friendly_name=selected_name,
+            )
+            backup = self._profile_writer(candidate, self._profile_path)
+        except Exception as error:
+            return ReadinessCheckResult(
+                False,
+                "The profile details were not changed.",
+                f"{type(error).__name__}: {error}",
+            )
+        self._profile = candidate
+        return ReadinessCheckResult(
+            True,
+            "Updated rig profile details."
+            + (f" Previous profile backed up to {backup}." if backup else ""),
+        )
+
+    def create_new_profile(
+        self,
+        profile_id: str,
+        friendly_name: str,
+        path: str | Path,
+    ) -> ReadinessCheckResult:
+        """Create, save and select a blank rig profile."""
+
+        try:
+            selected_id = profile_id.strip()
+            selected_name = friendly_name.strip()
+            selected_path = Path(path)
+            if not re.fullmatch(r"[a-z][a-z0-9_-]*", selected_id):
+                raise ValueError(
+                    "Internal ID must start with a lowercase letter and use "
+                    "only lowercase letters, numbers, underscores or hyphens"
+                )
+            if not selected_name:
+                raise ValueError("Display name cannot be empty")
+            if not str(path).strip():
+                raise ValueError("Profile file cannot be empty")
+            candidate = RigProfile(
+                profile_id=selected_id,
+                friendly_name=selected_name,
+                device_roles=(),
+                connections=(),
+            )
+            backup = self._profile_writer(candidate, selected_path)
+        except Exception as error:
+            return ReadinessCheckResult(
+                False,
+                "The new rig profile could not be created.",
+                f"{type(error).__name__}: {error}",
+            )
+        self._profile = candidate
+        self._profile_path = selected_path
+        self._readiness.clear()
+        return ReadinessCheckResult(
+            True,
+            f"Created blank rig profile {selected_name!r} at {selected_path}."
+            + (f" Previous file backed up to {backup}." if backup else ""),
+        )
+
+    def device_edit_values(self, device_id: str) -> EditDeviceRequest:
+        role = self._profile.get_role(device_id)
+        connection_values: dict[str, object] = {}
+        if role.connection_id is not None:
+            connection_values = dict(
+                self._profile.get_connection(role.connection_id).parameters
+            )
+        return EditDeviceRequest(
+            role.device_id,
+            role.friendly_name,
+            role.enabled,
+            role.required,
+            role.system or "",
+            role.poll_interval_seconds,
+            connection_values,
+            dict(role.connection_parameters),
+            dict(role.settings),
+        )
+
+    def update_device(self, request: EditDeviceRequest) -> ReadinessCheckResult:
+        try:
+            role = self._profile.get_role(request.device_id)
+            friendly_name = request.friendly_name.strip()
+            if not friendly_name:
+                raise ValueError("Device friendly name cannot be empty")
+            system = request.system.strip() or None
+            updated_role = replace(
+                role,
+                friendly_name=friendly_name,
+                enabled=request.enabled,
+                required=request.required,
+                system=system,
+                poll_interval_seconds=request.poll_interval_seconds,
+                connection_parameters=request.device_connection_parameters,
+                settings=request.settings,
+            )
+            connections = self._profile.connections
+            if role.connection_id is not None:
+                current = self._profile.get_connection(role.connection_id)
+                updated_connection = replace(
+                    current,
+                    parameters=request.connection_parameters,
+                )
+                connections = tuple(
+                    updated_connection
+                    if item.connection_id == current.connection_id
+                    else item
+                    for item in connections
+                )
+            candidate = replace(
+                self._profile,
+                connections=connections,
+                device_roles=tuple(
+                    updated_role if item.device_id == role.device_id else item
+                    for item in self._profile.device_roles
+                ),
+            )
+            self._validate_device_configuration(candidate, role.device_id)
+            backup = self._profile_writer(candidate, self._profile_path)
+        except Exception as error:
+            return ReadinessCheckResult(
+                False,
+                f"Device {request.device_id!r} was not changed.",
+                f"{type(error).__name__}: {error}",
+            )
+        self._profile = candidate
+        self._readiness.pop(role.device_id, None)
+        return ReadinessCheckResult(
+            True,
+            f"Updated device {role.device_id!r}. Changes take effect when "
+            "Device Setup is closed."
+            + (f" Previous profile backed up to {backup}." if backup else ""),
+        )
+
+    @staticmethod
+    def _validate_device_configuration(
+        profile: RigProfile,
+        device_id: str,
+    ) -> None:
+        role = profile.get_role(device_id)
+        validation_profile = profile
+        if not role.enabled:
+            enabled_role = replace(role, enabled=True)
+            validation_profile = replace(
+                profile,
+                device_roles=tuple(
+                    enabled_role if item.device_id == device_id else item
+                    for item in profile.device_roles
+                ),
+            )
+        if role.driver == "alicat":
+            alicat_configuration_from_profile(validation_profile, device_id)
+        elif role.driver == "keithley_2260b":
+            keithley_configuration_from_profile(validation_profile, device_id)
+        elif role.driver in {"esp32_json", "esp32_dht11"}:
+            if role.connection_id is None:
+                raise ValueError("ESP32 device requires a connection")
+            connection = profile.get_connection(role.connection_id)
+            port = connection.parameters.get("port")
+            baud_rate = connection.parameters.get("baud_rate")
+            timeout = connection.parameters.get("timeout_seconds")
+            if not isinstance(port, str) or not port.strip():
+                raise ValueError("ESP32 COM port cannot be empty")
+            if (
+                not isinstance(baud_rate, int)
+                or isinstance(baud_rate, bool)
+                or baud_rate <= 0
+            ):
+                raise ValueError("ESP32 baud rate must be a positive integer")
+            if (
+                isinstance(timeout, bool)
+                or not isinstance(timeout, (int, float))
+                or timeout <= 0
+            ):
+                raise ValueError("ESP32 timeout must be positive")
+
+    def remove_device(self, device_id: str) -> ReadinessCheckResult:
+        try:
+            role = self._profile.get_role(device_id)
+            remaining = tuple(
+                item for item in self._profile.device_roles
+                if item.device_id != device_id
+            )
+            connection_still_used = any(
+                item.connection_id == role.connection_id for item in remaining
+            )
+            connections = (
+                self._profile.connections
+                if role.connection_id is None or connection_still_used
+                else tuple(
+                    item for item in self._profile.connections
+                    if item.connection_id != role.connection_id
+                )
+            )
+            candidate = replace(
+                self._profile,
+                device_roles=remaining,
+                connections=connections,
+            )
+            backup = self._profile_writer(candidate, self._profile_path)
+        except Exception as error:
+            return ReadinessCheckResult(
+                False,
+                f"Device {device_id!r} was not removed.",
+                f"{type(error).__name__}: {error}",
+            )
+        self._profile = candidate
+        self._readiness.pop(device_id, None)
+        return ReadinessCheckResult(
+            True,
+            f"Removed device {device_id!r}."
+            + (f" Previous profile backed up to {backup}." if backup else ""),
+        )
+
+    def scan_esp32(self, request: AddEsp32Request) -> Esp32DiscoveryResult:
+        port = request.port.strip()
+        if not port:
+            raise ValueError("ESP32 COM port cannot be empty")
+        if request.baud_rate <= 0:
+            raise ValueError("ESP32 baud rate must be positive")
+        if request.timeout_seconds <= 0:
+            raise ValueError("ESP32 timeout must be positive")
+        return self._esp32_scanner(
+            port,
+            request.baud_rate,
+            request.timeout_seconds,
+        )
+
+    def add_discovered_esp32(
+        self,
+        request: AddEsp32Request,
+        discovery: Esp32DiscoveryResult,
+        *,
+        controller_friendly_name: str | None = None,
+        selected_device_names: Mapping[str, str] | None = None,
+        selected_device_intervals: Mapping[str, float] | None = None,
+    ) -> ReadinessCheckResult:
+        """Add a discovered controller and all supported logical devices."""
+
+        try:
+            controller_id = discovery.identity.get("controller_id")
+            if not isinstance(controller_id, str) or not controller_id.strip():
+                raise ValueError("ESP32 identity has no controller ID")
+            controller_id = controller_id.strip()
+            selected_controller_name = (
+                controller_friendly_name.strip()
+                if controller_friendly_name is not None
+                else f"ESP32 controller ({controller_id})"
+            )
+            if not selected_controller_name:
+                raise ValueError("Controller display name cannot be empty")
+            if any(
+                role.device_id == controller_id
+                for role in self._profile.device_roles
+            ):
+                raise ValueError(
+                    f"ESP32 controller {controller_id!r} is already configured"
+                )
+            if request.sensor_poll_interval_seconds <= 0:
+                raise ValueError("Sensor interval must be positive")
+            if request.heartbeat_interval_seconds <= 0:
+                raise ValueError("Heartbeat interval must be positive")
+
+            connection_id = f"{controller_id}_serial"
+            used_connections = {
+                connection.connection_id for connection in self._profile.connections
+            }
+            suffix = 2
+            base_connection_id = connection_id
+            while connection_id in used_connections:
+                connection_id = f"{base_connection_id}_{suffix}"
+                suffix += 1
+            connection = ConnectionDefinition(
+                connection_id=connection_id,
+                connection_type="serial_json",
+                parameters={
+                    "port": request.port.strip(),
+                    "baud_rate": request.baud_rate,
+                    "timeout_seconds": request.timeout_seconds,
+                    "controller_id": controller_id,
+                },
+            )
+            roles = [
+                DeviceRole(
+                    device_id=controller_id,
+                    friendly_name=selected_controller_name,
+                    capability=DeviceCapability.REMOTE_CONTROLLER,
+                    driver="esp32_json",
+                    backend=DeviceBackend.REAL,
+                    required=True,
+                    enabled=True,
+                    connection_id=connection_id,
+                    settings={
+                        "controller_id": controller_id,
+                        "heartbeat_interval_seconds": (
+                            request.heartbeat_interval_seconds
+                        ),
+                    },
+                )
+            ]
+            devices = discovery.capabilities.get("devices")
+            if not isinstance(devices, list):
+                raise ValueError("ESP32 capability response has no device list")
+            existing_ids = {role.device_id for role in self._profile.device_roles}
+            added_sensor_ids: list[str] = []
+            unsupported_kinds: list[str] = []
+            for item in devices:
+                if not isinstance(item, dict):
+                    raise TypeError("ESP32 capability devices must be objects")
+                kind = item.get("kind")
+                if kind != "dht11":
+                    unsupported_kinds.append(str(kind or "unknown"))
+                    continue
+                device_id = item.get("id")
+                label = item.get("label", "DHT11 temperature and humidity")
+                if not isinstance(device_id, str) or not device_id.strip():
+                    raise ValueError("Discovered ESP32 device has no ID")
+                if not isinstance(label, str) or not label.strip():
+                    raise ValueError(
+                        f"Discovered ESP32 device {device_id!r} has no label"
+                    )
+                device_id = device_id.strip()
+                if (
+                    selected_device_names is not None
+                    and device_id not in selected_device_names
+                ):
+                    continue
+                selected_label = (
+                    selected_device_names[device_id].strip()
+                    if selected_device_names is not None
+                    else label.strip()
+                )
+                if not selected_label:
+                    raise ValueError(
+                        f"Display name for discovered device {device_id!r} "
+                        "cannot be empty"
+                    )
+                interval = (
+                    selected_device_intervals[device_id]
+                    if selected_device_intervals is not None
+                    and device_id in selected_device_intervals
+                    else request.sensor_poll_interval_seconds
+                )
+                if (
+                    isinstance(interval, bool)
+                    or not isinstance(interval, (int, float))
+                    or interval <= 0
+                ):
+                    raise ValueError(
+                        f"Measurement interval for {device_id!r} must be positive"
+                    )
+                if device_id in existing_ids or any(
+                    role.device_id == device_id for role in roles
+                ):
+                    raise ValueError(
+                        f"Discovered device ID {device_id!r} is already configured"
+                    )
+                roles.append(
+                    DeviceRole(
+                        device_id=device_id,
+                        friendly_name=selected_label,
+                        capability=DeviceCapability.TEMPERATURE_SENSOR,
+                        driver="esp32_dht11",
+                        backend=DeviceBackend.REAL,
+                        required=True,
+                        enabled=True,
+                        poll_interval_seconds=float(interval),
+                        connection_id=connection_id,
+                        settings={"controller_id": controller_id},
+                    )
+                )
+                added_sensor_ids.append(device_id)
+            candidate = replace(
+                self._profile,
+                connections=(*self._profile.connections, connection),
+                device_roles=(*self._profile.device_roles, *roles),
+            )
+            backup = self._profile_writer(candidate, self._profile_path)
+        except Exception as error:
+            return ReadinessCheckResult(
+                False,
+                "The discovered ESP32 was not added.",
+                f"{type(error).__name__}: {error}",
+            )
+        self._profile = candidate
+        details = (
+            f" Added {len(added_sensor_ids)} supported sensor device(s)."
+        )
+        if unsupported_kinds:
+            details += " Unsupported types were left out: " + ", ".join(
+                sorted(set(unsupported_kinds))
+            ) + "."
+        return ReadinessCheckResult(
+            True,
+            f"Added ESP32 controller {controller_id!r}.{details}"
+            + (f" Previous profile backed up to {backup}." if backup else ""),
         )
 
     def serial_ports(self) -> tuple[SerialPortInfo, ...]:
@@ -175,6 +684,56 @@ class DeviceSetupViewModel:
 
         self._serial_port_error = ""
         return ports
+
+    def device_poll_interval(self, device_id: str) -> float | None:
+        """Return the configured interval, or None for the app default."""
+
+        return self._profile.get_role(device_id).poll_interval_seconds
+
+    def update_measurement_interval(
+        self,
+        device_id: str,
+        interval_seconds: float | None,
+    ) -> ReadinessCheckResult:
+        """Save a device's acquisition rate without reconnecting hardware."""
+
+        try:
+            role = self._profile.get_role(device_id)
+            updated_role = replace(
+                role,
+                poll_interval_seconds=interval_seconds,
+            )
+            candidate = replace(
+                self._profile,
+                device_roles=tuple(
+                    updated_role if item.device_id == device_id else item
+                    for item in self._profile.device_roles
+                ),
+            )
+            backup = self._profile_writer(candidate, self._profile_path)
+        except Exception as error:
+            return ReadinessCheckResult(
+                False,
+                f"Measurement interval was not changed for {device_id!r}.",
+                f"{type(error).__name__}: {error}",
+            )
+
+        self._profile = candidate
+        interval_text = (
+            f"{updated_role.poll_interval_seconds:g} seconds"
+            if updated_role.poll_interval_seconds is not None
+            else "the application default"
+        )
+        backup_text = (
+            f" Previous profile backed up to {backup}." if backup else ""
+        )
+        return ReadinessCheckResult(
+            True,
+            f"Set {role.friendly_name!r} measurement interval to "
+            f"{interval_text}. The new rate takes effect when Device Setup "
+            "is closed."
+            + backup_text,
+        )
 
     def scan_alicats(
         self,
@@ -210,9 +769,18 @@ class DeviceSetupViewModel:
                 configured[address.strip().upper()] = (role.device_id, kind)
         return tuple(
             AlicatScanRow(
-                device.address,
-                device.raw_response,
-                *(configured.get(device.address, (None, None))),
+                address=device.address,
+                raw_response=device.raw_response,
+                configured_device_id=configured.get(device.address, (None, None))[0],
+                configured_kind=configured.get(device.address, (None, None))[1],
+                model=device.model,
+                inferred_kind=device.inferred_kind,
+                inferred_maximum_flow_sccm=(
+                    device.inferred_maximum_flow_sccm
+                ),
+                manufacturer_response=device.manufacturer_response,
+                data_format_response=device.data_format_response,
+                firmware_response=device.firmware_response,
             )
             for device in self._alicat_scanner(selected_port, baud_rate)
         )
@@ -231,6 +799,23 @@ class DeviceSetupViewModel:
                 result = self._check_alicat(device_id)
             elif role.driver == "keithley_2260b":
                 result = self._check_keithley(device_id)
+            elif role.driver in {"esp32_json", "esp32_dht11"}:
+                diagnostic = self._esp32_checker(self._profile, device_id)
+                sensor_text = (
+                    "; readings "
+                    + ", ".join(
+                        f"{name}={value:g} {unit}"
+                        for name, value, unit in diagnostic.sensors
+                    )
+                    if diagnostic.sensors
+                    else ""
+                )
+                result = ReadinessCheckResult(
+                    True,
+                    f"{role.friendly_name} responded correctly{sensor_text}.",
+                    f"Identity: {diagnostic.identity}; status: "
+                    f"{diagnostic.status}",
+                )
             else:
                 raise ValueError(
                     f"No read-only readiness check is available for "
@@ -427,6 +1012,7 @@ class DeviceSetupViewModel:
             connection_id=connection.connection_id,
             connection_parameters={"address": address},
             settings=settings,
+            poll_interval_seconds=request.poll_interval_seconds,
         )
         return replace(
             self._profile,
@@ -553,6 +1139,7 @@ class DeviceSetupViewModel:
             ),
             connection_id=connection_id,
             settings=settings,
+            poll_interval_seconds=request.poll_interval_seconds,
         )
         return replace(
             self._profile,

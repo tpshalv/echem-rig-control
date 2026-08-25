@@ -4,6 +4,7 @@ from rig_control.app_settings import AppSettings
 from rig_control.control.service import RigControlService
 from rig_control.device_factory import create_device_manager
 from rig_control.devices.manager import DeviceManager
+from rig_control.devices.esp32_controller import Esp32Controller
 from rig_control.event_logging import TechnicalEventLogger
 from rig_control.experiment_recording import ExperimentRecorder
 from rig_control.models import Event
@@ -54,11 +55,22 @@ class ApplicationSession:
             metric_providers={
                 "polling": self.polling_service.diagnostic_metrics,
                 "recorder": self.experiment_recorder.diagnostic_metrics,
+                "esp32_heartbeats": self._esp32_heartbeat_metrics,
             },
             event_sink=self.technical_log.record,
         )
         self.runtime_diagnostics.start()
         self._closed = False
+
+    def _esp32_heartbeat_metrics(self) -> dict[str, object]:
+        return {
+            device_id: device.heartbeat_diagnostics()
+            for device_id in self.device_manager.device_ids
+            if isinstance(
+                (device := self.device_manager.get(device_id)),
+                Esp32Controller,
+            )
+        }
 
     @property
     def is_closed(self) -> bool:

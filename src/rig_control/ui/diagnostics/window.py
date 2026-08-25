@@ -25,6 +25,73 @@ from rig_control.ui.common.theme import (
     WARNING_TEXT,
 )
 
+
+class _MemoryChart:
+    """Small bounded chart that updates existing Tk canvas objects in place."""
+
+    def __init__(self, parent) -> None:
+        self.canvas = tk.Canvas(
+            parent, height=170, background="#ffffff", highlightthickness=1
+        )
+        self._axis = self.canvas.create_line(42, 8, 42, 142, 900, 142, fill="#888888")
+        self._private_line = self.canvas.create_line(0, 0, 0, 0, fill="#2563a8", width=2)
+        self._python_line = self.canvas.create_line(0, 0, 0, 0, fill="#2d8a4e", width=2)
+        self._top_label = self.canvas.create_text(6, 8, anchor="nw", fill="#555555")
+        self._bottom_label = self.canvas.create_text(6, 142, anchor="sw", fill="#555555")
+        self._time_label = self.canvas.create_text(46, 162, anchor="sw", fill="#666666")
+
+    def render(self, points) -> None:
+        width = max(160, self.canvas.winfo_width())
+        height = max(120, self.canvas.winfo_height())
+        left, right, top, bottom = 46, width - 10, 8, height - 27
+        self.canvas.coords(self._axis, left, top, left, bottom, right, bottom)
+        values = [
+            value
+            for point in points
+            for value in (point.private_bytes, point.traced_python_bytes)
+            if value is not None
+        ]
+        if not points or not values:
+            self.canvas.coords(self._private_line, 0, 0, 0, 0)
+            self.canvas.coords(self._python_line, 0, 0, 0, 0)
+            self.canvas.itemconfigure(self._top_label, text="")
+            self.canvas.itemconfigure(self._bottom_label, text="")
+            self.canvas.itemconfigure(self._time_label, text="Waiting for samples")
+            return
+        low, high = min(values), max(values)
+        padding = max((high - low) * 0.08, 1_000_000)
+        low, high = max(0, low - padding), high + padding
+        start = points[0].timestamp.timestamp()
+        duration = max(1.0, points[-1].timestamp.timestamp() - start)
+
+        def coords(attribute: str) -> list[float]:
+            result: list[float] = []
+            for point in points:
+                value = getattr(point, attribute)
+                if value is None:
+                    continue
+                x = left + (point.timestamp.timestamp() - start) / duration * (right - left)
+                y = bottom - (value - low) / (high - low) * (bottom - top)
+                result.extend((x, y))
+            return result if len(result) >= 4 else [0, 0, 0, 0]
+
+        self.canvas.coords(self._private_line, *coords("private_bytes"))
+        self.canvas.coords(self._python_line, *coords("traced_python_bytes"))
+        self.canvas.coords(self._top_label, 6, top)
+        self.canvas.coords(self._bottom_label, 6, bottom)
+        self.canvas.coords(self._time_label, left, height - 4)
+        self.canvas.itemconfigure(self._top_label, text=f"{high / 1_000_000:.0f} MB")
+        self.canvas.itemconfigure(self._bottom_label, text=f"{low / 1_000_000:.0f} MB")
+        self.canvas.itemconfigure(
+            self._time_label,
+            text=(
+                f"{points[0].timestamp.astimezone():%d %b %H:%M}  to  "
+                f"{points[-1].timestamp.astimezone():%d %b %H:%M}   "
+                "— private memory (blue), Python tracked (green)"
+            ),
+        )
+
+
 class DiagnosticWindow:
     """Tkinter diagnostic screen backed by DiagnosticViewModel."""
 
@@ -40,6 +107,7 @@ class DiagnosticWindow:
         self._action_results: Queue[DiagnosticActionResult] = Queue()
         self._action_in_progress = False
         self._last_health_timestamp: datetime | None = None
+        self._health_points = ()
         self._after_id: str | None = None
 
         self._configure_window()
@@ -188,6 +256,22 @@ class DiagnosticWindow:
             justify="left",
         )
         self._health_summary.grid(row=0, column=0, sticky="w")
+        chart_controls = ttk.Frame(health)
+        chart_controls.grid(row=1, column=0, sticky="ew", pady=(8, 3))
+        ttk.Label(chart_controls, text="Memory history:").grid(row=0, column=0)
+        self._memory_range = tk.StringVar(value="Whole run")
+        range_picker = ttk.Combobox(
+            chart_controls,
+            textvariable=self._memory_range,
+            values=("Whole run", "Last hour", "Last 10 minutes"),
+            state="readonly",
+            width=16,
+        )
+        range_picker.grid(row=0, column=1, padx=(6, 0))
+        range_picker.bind("<<ComboboxSelected>>", lambda _event: self._render_memory_chart())
+        self._memory_chart = _MemoryChart(health)
+        self._memory_chart.canvas.grid(row=2, column=0, sticky="ew")
+        self._memory_chart.canvas.bind("<Configure>", lambda _event: self._render_memory_chart())
 
         details_label = ttk.Label(
             main,
@@ -332,6 +416,7 @@ class DiagnosticWindow:
             return
         self._last_health_timestamp = latest.timestamp
         history = self._view_model.runtime_health_history()
+        self._health_points = history
         hour_ago = latest.timestamp.timestamp() - 3600
         comparison = next(
             (
@@ -372,6 +457,18 @@ class DiagnosticWindow:
                 f"{latest.timestamp.astimezone().isoformat(timespec='seconds')}"
             )
         )
+        self._render_memory_chart()
+
+    def _render_memory_chart(self) -> None:
+        points = self._health_points
+        selected = self._memory_range.get()
+        if selected == "Whole run":
+            points = self._view_model.runtime_health_overview()
+        elif points:
+            seconds = 600 if selected == "Last 10 minutes" else 3600
+            cutoff = points[-1].timestamp.timestamp() - seconds
+            points = tuple(point for point in points if point.timestamp.timestamp() >= cutoff)
+        self._memory_chart.render(points)
 
     def _require_selection(self) -> str | None:
         device_id = self._selected_device_id()

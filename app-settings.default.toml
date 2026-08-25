@@ -4,5 +4,6 @@ friendly_name = "Default application settings"
 
 [values]
 publish_interval_seconds = 1.0
-trend_history_readings = 120
+trend_history_readings = 500
+default_output_directory = "experiments"
 technical_log_path = "logs/rig-control.log"

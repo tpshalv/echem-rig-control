@@ -1,10 +1,11 @@
 import json
 import os
 import re
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TextIO
 from time import sleep
+from typing import TextIO
 
 from rig_control.data.experiment import ExperimentMetadata
 from rig_control.data.records import MeasurementRecord
@@ -127,9 +128,22 @@ class DirectoryExperimentWriter(ExperimentWriter):
 
         assert self._measurement_file is not None
 
-        self._write_json_line(
+        self.write_measurements((record,))
+
+    def write_measurements(
+        self,
+        records: Iterable[MeasurementRecord],
+    ) -> None:
+        self._require_open()
+        prepared = tuple(records)
+        if any(not isinstance(record, MeasurementRecord) for record in prepared):
+            raise TypeError("Experiment writer requires MeasurementRecord")
+        if not prepared:
+            return
+        assert self._measurement_file is not None
+        self._write_json_lines(
             self._measurement_file,
-            measurement_record_to_dict(record),
+            (measurement_record_to_dict(record) for record in prepared),
         )
 
     def write_event(self, event: Event) -> None:
@@ -142,9 +156,19 @@ class DirectoryExperimentWriter(ExperimentWriter):
 
         assert self._event_file is not None
 
-        self._write_json_line(
+        self.write_events((event,))
+
+    def write_events(self, events: Iterable[Event]) -> None:
+        self._require_open()
+        prepared = tuple(events)
+        if any(not isinstance(event, Event) for event in prepared):
+            raise TypeError("Experiment writer requires Event")
+        if not prepared:
+            return
+        assert self._event_file is not None
+        self._write_json_lines(
             self._event_file,
-            event_to_dict(event),
+            (event_to_dict(event) for event in prepared),
         )
 
     def close_experiment(self) -> None:
@@ -206,16 +230,17 @@ class DirectoryExperimentWriter(ExperimentWriter):
         return f"{timestamp}_{safe_experiment_id}"
 
     @staticmethod
-    def _write_json_line(
+    def _write_json_lines(
         file: TextIO,
-        data: dict[str, object],
+        data_items: Iterable[dict[str, object]],
     ) -> None:
-        line = json.dumps(
-            data,
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        file.write(f"{line}\n")
+        for data in data_items:
+            line = json.dumps(
+                data,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            file.write(f"{line}\n")
         file.flush()
         os.fsync(file.fileno())
 

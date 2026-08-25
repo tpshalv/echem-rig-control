@@ -12,7 +12,8 @@ def test_defaults_are_safe_and_explicit() -> None:
 
     assert settings.publish_interval_seconds == 1.0
     assert settings.technical_log_path == "logs/rig-control.log"
-    assert settings.trend_history_readings == 120
+    assert settings.trend_history_readings == 500
+    assert settings.default_output_directory == "experiments"
 
 
 def test_default_settings_file_loads() -> None:
@@ -40,6 +41,7 @@ def test_settings_round_trip_and_backup(tmp_path: Path) -> None:
         {
             "publish_interval_seconds": 0.2,
             "technical_log_path": "other/app.log",
+            "default_output_directory": "recordings",
         },
     )
     path = tmp_path / "app-settings.toml"

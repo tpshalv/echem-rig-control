@@ -46,15 +46,25 @@ SETTING_DEFINITIONS = (
         key="trend_history_readings",
         label="Default trend history (readings)",
         description="Initial retained history for each newly opened trend chart.",
-        default=120,
+        default=500,
         validator=_history_limit,
     ),
     SettingDefinition(
         key="publish_interval_seconds",
         label="Screen publish interval (seconds)",
-        description="How often cached readings reach the UI and recorder.",
+        description=(
+            "How often cached readings redraw on screen; recording remains "
+            "at each device's own measurement interval."
+        ),
         default=1.0,
         validator=_positive_number,
+    ),
+    SettingDefinition(
+        key="default_output_directory",
+        label="Default recording output folder",
+        description="Folder initially offered when starting an experiment recording.",
+        default="experiments",
+        validator=_non_empty_text,
     ),
     SettingDefinition(
         key="technical_log_path",
@@ -110,6 +120,10 @@ class AppSettings:
     @property
     def technical_log_path(self) -> str:
         return str(self.values["technical_log_path"])
+
+    @property
+    def default_output_directory(self) -> str:
+        return str(self.values["default_output_directory"])
 
     @property
     def trend_history_readings(self) -> int:

@@ -30,10 +30,13 @@ from rig_control.models import (
 )
 
 from rig_control.ui.manual_control.types import (
+    DEFAULT_WIRING_CURRENT_CEILING_AMPS,
     ManualActionResult,
     MeasurementReadFailure,
     MfcControlRow,
     PowerSupplyControlRow,
+    PowerSupplyManualSafety,
+    default_power_supply_manual_safety,
     ControllerControlRow,
 )
 
@@ -46,10 +49,16 @@ class ManualControlViewModel:
         device_manager: DeviceManager,
         control_service: RigControlService,
         measurement_provider: Callable[[str, str], Measurement | None] | None = None,
+        power_supply_safety: PowerSupplyManualSafety | None = None,
     ) -> None:
         self._device_manager = device_manager
         self._control_service = control_service
         self._measurement_provider = measurement_provider
+        self._power_supply_safety = (
+            power_supply_safety
+            if power_supply_safety is not None
+            else default_power_supply_manual_safety()
+        )
         self._read_failures: list[MeasurementReadFailure] = []
         self._events: list[Event] = []
         self._active_read_failures: set[
@@ -86,9 +95,14 @@ class ManualControlViewModel:
                     PowerSupplyOperatingMode.CONSTANT_VOLTAGE,
                 )
             ] = 0.0
+
     @property
     def control_mode(self) -> str:
         return self._control_service.mode.value
+
+    @property
+    def high_current_mode(self) -> bool:
+        return self._power_supply_safety.high_current_mode
 
     @property
     def read_failures(
@@ -159,6 +173,48 @@ class ManualControlViewModel:
             0.0,
         )
 
+    def effective_current_ceiling(self) -> float:
+        """Return the current ceiling manual control is allowed to reach.
+
+        Outside High current mode this is always the fixed wiring-safe
+        default, regardless of what the (inaccessible in that state)
+        wiring ceiling setting is stored as - see decisions/0014.
+        """
+
+        if self._power_supply_safety.high_current_mode:
+            return self._power_supply_safety.wiring_current_ceiling_amps
+        return DEFAULT_WIRING_CURRENT_CEILING_AMPS
+
+    def _execute_current_limit(
+        self,
+        device_id: str,
+        current: float,
+    ) -> ManualActionResult:
+        ceiling = self.effective_current_ceiling()
+
+        if current > ceiling:
+            guidance = (
+                ""
+                if self._power_supply_safety.high_current_mode
+                else " Enable High current mode in Settings to raise this ceiling."
+            )
+            return ManualActionResult(
+                succeeded=False,
+                summary=(
+                    f"Requested current {current:g} A for {device_id!r} "
+                    f"exceeds the active current ceiling of {ceiling:g} A."
+                    + guidance
+                ),
+            )
+
+        return self._execute(
+            SetPowerSupplyCurrentLimit(
+                device_id=device_id,
+                current=current,
+                source=CommandSource.MANUAL,
+            )
+        )
+
     def initialize_manual_power_supply_defaults(
         self,
     ) -> tuple[ManualActionResult, ...]:
@@ -190,17 +246,31 @@ class ManualControlViewModel:
             )
 
             if mode is PowerSupplyOperatingMode.CONSTANT_CURRENT:
+                # Current is the setpoint in this mode (left as remembered/
+                # 0.0 - untouched here). Voltage is the protective compliance
+                # limit: default to the low starting value rather than
+                # jumping straight to the instrument's true maximum.
                 results.append(
                     self.set_power_supply_voltage(
                         device_id,
-                        device.limits.maximum_voltage,
+                        min(
+                            self._power_supply_safety.default_voltage_volts,
+                            device.limits.maximum_voltage,
+                        ),
                     )
                 )
             else:
+                # Voltage is the setpoint here (left untouched). Current is
+                # the protective compliance limit: default to the low
+                # starting value, itself still bounded by whichever wiring
+                # ceiling is currently active.
                 results.append(
                     self.set_power_supply_current(
                         device_id,
-                        device.limits.maximum_current,
+                        min(
+                            self._power_supply_safety.default_current_amps,
+                            self.effective_current_ceiling(),
+                        ),
                     )
                 )
 
@@ -384,21 +454,22 @@ class ManualControlViewModel:
         )
 
         if mode is PowerSupplyOperatingMode.CONSTANT_CURRENT:
-            target_result = self._execute(
-                SetPowerSupplyCurrentLimit(
-                    device_id=device_id,
-                    current=remembered_target,
-                    source=CommandSource.MANUAL,
-                )
+            target_result = self._execute_current_limit(
+                device_id,
+                remembered_target,
             )
 
             if not target_result.succeeded:
                 return target_result
 
+            voltage_limit = min(
+                self._power_supply_safety.default_voltage_volts,
+                device.limits.maximum_voltage,
+            )
             limit_result = self._execute(
                 SetPowerSupplyVoltage(
                     device_id=device_id,
-                    voltage=device.limits.maximum_voltage,
+                    voltage=voltage_limit,
                     source=CommandSource.MANUAL,
                 )
             )
@@ -407,8 +478,7 @@ class ManualControlViewModel:
                 f"current setpoint {remembered_target} A"
             )
             limit_description = (
-                f"voltage limit "
-                f"{device.limits.maximum_voltage} V"
+                f"voltage limit {voltage_limit} V"
             )
         else:
             target_result = self._execute(
@@ -422,20 +492,20 @@ class ManualControlViewModel:
             if not target_result.succeeded:
                 return target_result
 
-            limit_result = self._execute(
-                SetPowerSupplyCurrentLimit(
-                    device_id=device_id,
-                    current=device.limits.maximum_current,
-                    source=CommandSource.MANUAL,
-                )
+            current_limit = min(
+                self._power_supply_safety.default_current_amps,
+                self.effective_current_ceiling(),
+            )
+            limit_result = self._execute_current_limit(
+                device_id,
+                current_limit,
             )
 
             target_description = (
                 f"voltage setpoint {remembered_target} V"
             )
             limit_description = (
-                f"current limit "
-                f"{device.limits.maximum_current} A"
+                f"current limit {current_limit} A"
             )
 
         if not limit_result.succeeded:
@@ -485,13 +555,7 @@ class ManualControlViewModel:
         device_id: str,
         current: float,
     ) -> ManualActionResult:
-        result = self._execute(
-            SetPowerSupplyCurrentLimit(
-                device_id=device_id,
-                current=current,
-                source=CommandSource.MANUAL,
-            )
-        )
+        result = self._execute_current_limit(device_id, current)
 
         if (
             result.succeeded

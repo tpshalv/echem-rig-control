@@ -1,3 +1,5 @@
+import threading
+
 import pytest
 
 from rig_control.devices.manager import (
@@ -32,6 +34,25 @@ class FailingConnectSupply(SimulatedPowerSupply):
 class FailingDisconnectSupply(SimulatedPowerSupply):
     def disconnect(self) -> None:
         raise OSError("simulated disconnection failure")
+
+
+class HangingDisconnectSupply(SimulatedPowerSupply):
+    """A device whose disconnect() blocks until the test releases it."""
+
+    def __init__(self, device_id: str, release_event: threading.Event) -> None:
+        super().__init__(
+            device_id=device_id,
+            limits=PowerSupplyLimits(
+                maximum_voltage=30.0,
+                maximum_current=108.0,
+                maximum_power=1080.0,
+            ),
+        )
+        self._release_event = release_event
+
+    def disconnect(self) -> None:
+        self._release_event.wait()
+        super().disconnect()
 
 
 class RecordingDisconnectSupply(SimulatedPowerSupply):
@@ -304,3 +325,26 @@ def test_disconnect_all_uses_reverse_order_and_continues() -> None:
     assert "second" in str(failures[0])
     assert third.status is DeviceStatus.DISCONNECTED
     assert first.status is DeviceStatus.DISCONNECTED
+
+
+def test_disconnect_all_times_out_a_hung_device_and_continues() -> None:
+    manager = DeviceManager()
+    release_event = threading.Event()
+    hung = HangingDisconnectSupply("hung_supply", release_event)
+    healthy = make_supply("healthy_supply")
+
+    hung.connect()
+    healthy.connect()
+    manager.register(hung)
+    manager.register(healthy)
+
+    try:
+        failures = manager.disconnect_all(per_device_timeout=0.2)
+
+        assert len(failures) == 1
+        assert "hung_supply" in str(failures[0])
+        assert "did not disconnect within" in str(failures[0])
+        # The other device isn't blocked by the hung one.
+        assert healthy.status is DeviceStatus.DISCONNECTED
+    finally:
+        release_event.set()

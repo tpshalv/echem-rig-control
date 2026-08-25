@@ -11,7 +11,10 @@ from rig_control.devices.simulated_sensor import SimulatedSensor
 from rig_control.devices.simulated_mfc import SimulatedMassFlowController
 from rig_control.devices.simulated_power_supply import SimulatedPowerSupply
 from rig_control.devices.mass_flow_controller import MassFlowControllerLimits
-from rig_control.devices.power_supply import PowerSupplyLimits
+from rig_control.devices.power_supply import (
+    PowerSupplyLimits,
+    PowerSupplyOperatingMode,
+)
 from rig_control.experiment_recording import ExperimentRecorder
 from rig_control.models import Event, Measurement, Quality
 from rig_control.polling import PollingBatch, PollingFailure, PollingService
@@ -395,6 +398,49 @@ def test_unified_channels_separate_measurements_from_limits_and_setpoints() -> N
     assert rows[("supply", "current_limit")].writable is True
     assert rows[("mfc", "mass_flow")].writable is False
     assert rows[("mfc", "setpoint")].writable is True
+
+
+def test_channel_labels_swap_with_power_supply_operating_mode() -> None:
+    manager = DeviceManager()
+    manager.register(SimulatedPowerSupply("supply", PowerSupplyLimits(30, 108, 1080)))
+    writer = InMemoryExperimentWriter()
+    recorder = ExperimentRecorder(writer_factory=lambda _root: writer)
+    polling = PollingService(manager, interval_seconds=60, batch_handler=recorder.record_batch)
+    profile = RigProfile("rig", "Rig", (
+        DeviceRole("supply", "Main supply", DeviceCapability.DC_POWER_SUPPLY,
+                   "simulated", DeviceBackend.SIMULATED),
+    ))
+    model = OperationViewModel(
+        manager, polling, recorder, RigControlService(manager),
+        profile_id="rig", profile=profile,
+    )
+    model.connect_all()
+
+    default_rows = {
+        (row.device_id, row.channel): row for row in model.channel_rows()
+    }
+    assert default_rows[("supply", "voltage")].channel_name == "Voltage limit"
+    assert default_rows[("supply", "current_limit")].channel_name == "Current setpoint"
+    # connect_all() applies manual power-supply defaults itself - this was
+    # previously never called anywhere, so these values never fed through.
+    # Voltage is the protective limit in constant current mode, so it gets
+    # the low starting default; current is the setpoint here and is left
+    # untouched.
+    assert default_rows[("supply", "voltage")].value == 10.0
+    assert default_rows[("supply", "current_limit")].value == 0.0
+
+    result = model.manual_control.set_power_supply_operating_mode(
+        "supply", PowerSupplyOperatingMode.CONSTANT_VOLTAGE,
+    )
+    assert result.succeeded is True
+
+    switched_rows = {
+        (row.device_id, row.channel): row for row in model.channel_rows()
+    }
+    assert switched_rows[("supply", "voltage")].channel_name == "Voltage setpoint"
+    assert switched_rows[("supply", "current_limit")].channel_name == "Current limit"
+
+
 def test_connected_device_channels_are_visible_before_monitoring_starts() -> None:
     model, _, _, _ = make_model()
 

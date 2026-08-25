@@ -1,6 +1,6 @@
 import argparse
 import tkinter as tk
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -18,6 +18,7 @@ from rig_control.ui.home.model import (
     HomeViewModel,
 )
 from rig_control.ui.home.settings_window import SettingsWindow
+from rig_control.ui.manual_control.types import PowerSupplyManualSafety
 from rig_control.ui.operation.model import OperationViewModel
 from rig_control.ui.operation.window import OperationWindow
 
@@ -33,6 +34,8 @@ class HomeWindow:
         self._diagnostics_child: tk.Toplevel | None = None
         self._device_setup_child: tk.Toplevel | None = None
         self._settings_child: tk.Toplevel | None = None
+        self._operation_close: Callable[[], None] | None = None
+        self._diagnostics_close: Callable[[], None] | None = None
         root.title("Echem Rig Control")
         root.geometry("1100x620")
         root.minsize(900, 520)
@@ -152,6 +155,7 @@ class HomeWindow:
             window.cancel_updates()
             self._close_diagnostics()
 
+        self._diagnostics_close = close
         child.protocol("WM_DELETE_WINDOW", close)
 
     def _open_operation(self) -> None:
@@ -168,6 +172,14 @@ class HomeWindow:
             profile_id=session.profile.profile_id,
             profile=session.profile,
             history_limit=session.settings.trend_history_readings,
+            power_supply_safety=PowerSupplyManualSafety(
+                high_current_mode=session.settings.power_supply_high_current_mode,
+                wiring_current_ceiling_amps=(
+                    session.settings.power_supply_wiring_current_ceiling_amps
+                ),
+                default_current_amps=session.settings.power_supply_default_current_amps,
+                default_voltage_volts=session.settings.power_supply_default_voltage_volts,
+            ),
         )
         window = OperationWindow(
             child,
@@ -187,6 +199,7 @@ class HomeWindow:
             session.runtime_diagnostics.unregister_metric_provider("operation_ui")
             self._close_operation()
 
+        self._operation_close = close
         child.protocol("WM_DELETE_WINDOW", close)
 
     def _open_device_setup(self) -> None:
@@ -221,6 +234,7 @@ class HomeWindow:
         if self._operation_child is not None:
             self._operation_child.destroy()
             self._operation_child = None
+        self._operation_close = None
         self._view_model.end_feature(FEATURE_OPERATION)
         self.refresh()
 
@@ -228,8 +242,30 @@ class HomeWindow:
         if self._diagnostics_child is not None:
             self._diagnostics_child.destroy()
             self._diagnostics_child = None
+        self._diagnostics_close = None
         self._view_model.end_feature(FEATURE_DIAGNOSTICS)
         self.refresh()
+
+    def close_all_features(self) -> None:
+        """Close any open feature screens as part of a full application exit.
+
+        Reuses each screen's own close handling (stop polling/recording,
+        cancel scheduled UI updates) rather than duplicating it. Device
+        Setup is handled separately: unlike its normal close, this does not
+        rebuild/reconnect a session, since the whole application is exiting.
+        """
+
+        if self._diagnostics_close is not None:
+            self._diagnostics_close()
+        if self._operation_close is not None:
+            self._operation_close()
+        if self._device_setup_child is not None:
+            self._device_setup_child.destroy()
+            self._device_setup_child = None
+            self._view_model.end_feature(FEATURE_DEVICE_SETUP)
+        if self._settings_child is not None:
+            self._settings_child.destroy()
+            self._settings_child = None
 
     def _close_device_setup(self) -> None:
         profile_path = getattr(
@@ -275,16 +311,20 @@ def main(arguments: Sequence[str] | None = None) -> int:
         selection_path=parsed.selection,
     )
     root = tk.Tk()
-    HomeWindow(root, model)
+    home_window = HomeWindow(root, model)
 
     def close() -> None:
-        if model.feature_active:
-            messagebox.showwarning(
-                "Close feature first",
-                "Close the active feature screen before exiting.",
-                parent=root,
-            )
+        confirmed = messagebox.askyesno(
+            "Close Echem Rig Control",
+            "Close the application?\n\n"
+            "This will attempt to bring every connected device to a safe "
+            "state and disconnect it.",
+            parent=root,
+        )
+        if not confirmed:
             return
+        if model.feature_active:
+            home_window.close_all_features()
         failures = model.close()
         if failures:
             messagebox.showerror("Shutdown problems", "\n".join(failures), parent=root)

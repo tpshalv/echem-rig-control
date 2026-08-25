@@ -16,10 +16,13 @@ from rig_control.devices.power_supply import (
 from rig_control.ui.manual_control.model import (
     ManualControlViewModel,
 )
+from rig_control.ui.manual_control.types import PowerSupplyManualSafety
 
 
 
-def make_model() -> tuple[
+def make_model(
+    power_supply_safety: PowerSupplyManualSafety | None = None,
+) -> tuple[
     ManualControlViewModel,
     RigControlService,
     SimulatedPowerSupply,
@@ -45,7 +48,9 @@ def make_model() -> tuple[
     service = RigControlService(manager)
 
     return (
-        ManualControlViewModel(manager, service),
+        ManualControlViewModel(
+            manager, service, power_supply_safety=power_supply_safety
+        ),
         service,
         supply,
         mfc,
@@ -342,7 +347,7 @@ def test_switching_to_constant_voltage_uses_safe_initial_target() -> None:
 
     assert result.succeeded is True
     assert supply.voltage_setpoint == 0.0
-    assert supply.current_limit == 108.0
+    assert supply.current_limit == 20.0
     assert supply.output_enabled is False
     assert (
         model.power_supply_rows()[0].operating_mode
@@ -373,7 +378,7 @@ def test_switching_modes_restores_separate_targets() -> None:
     )
 
     assert supply.current_limit == 15.0
-    assert supply.voltage_setpoint == 30.0
+    assert supply.voltage_setpoint == 10.0
 
     model.set_power_supply_operating_mode(
         "main_supply",
@@ -381,7 +386,7 @@ def test_switching_modes_restores_separate_targets() -> None:
     )
 
     assert supply.voltage_setpoint == 2.0
-    assert supply.current_limit == 108.0
+    assert supply.current_limit == 20.0
 
 def test_manual_mode_cannot_change_while_output_is_enabled() -> None:
     model, _, supply, _ = make_model()
@@ -428,14 +433,40 @@ def test_supply_row_exposes_separate_remembered_targets() -> None:
     assert row.constant_current_target == 15.0
     assert row.constant_voltage_target == 2.0
 
-def test_manual_defaults_use_maximum_voltage_compliance() -> None:
+def test_manual_defaults_use_safe_starting_values_in_constant_current() -> None:
     model, _, supply, _ = make_model()
 
     results = model.initialize_manual_power_supply_defaults()
 
     assert all(result.succeeded for result in results)
+    # Current is the setpoint in this mode - left untouched (remembered/0),
+    # not defaulted here.
     assert supply.current_limit == 0.0
-    assert supply.voltage_setpoint == 30.0
+    # Voltage is the protective compliance limit in this mode: the low
+    # starting default, not the instrument's own true maximum - this was
+    # the original reported bug (108 A applied the same mistake to current
+    # in constant voltage mode).
+    assert supply.voltage_setpoint == 10.0
+    assert supply.output_enabled is False
+
+
+def test_manual_defaults_use_safe_starting_values_in_constant_voltage() -> None:
+    model, _, supply, _ = make_model()
+    model.set_power_supply_operating_mode(
+        "main_supply",
+        PowerSupplyOperatingMode.CONSTANT_VOLTAGE,
+    )
+
+    results = model.initialize_manual_power_supply_defaults()
+
+    assert all(result.succeeded for result in results)
+    # Current is the protective compliance limit in this mode: the low
+    # starting default (20 A), not the full 45 A wiring ceiling and
+    # nowhere near the instrument's 108 A maximum - this was the original
+    # reported bug.
+    assert supply.current_limit == 20.0
+    # Voltage is the setpoint in this mode - left untouched.
+    assert supply.voltage_setpoint == 0.0
     assert supply.output_enabled is False
 
 def test_constant_current_output_rejects_zero_voltage_limit() -> None:
@@ -464,7 +495,7 @@ def test_constant_voltage_output_rejects_zero_current_limit() -> None:
         PowerSupplyOperatingMode.CONSTANT_VOLTAGE,
     )
 
-    # Deliberately override the normal 108 A default compliance.
+    # Deliberately override the normal 20 A default compliance limit.
     model.set_power_supply_current(
         "main_supply",
         0.0,
@@ -482,3 +513,59 @@ def test_constant_voltage_output_rejects_zero_current_limit() -> None:
     assert result.succeeded is False
     assert "current compliance limit is zero" in result.summary
     assert supply.output_enabled is False
+
+
+def test_default_current_ceiling_is_45_amps() -> None:
+    model, _, _, _ = make_model()
+
+    assert model.effective_current_ceiling() == 45.0
+    assert model.high_current_mode is False
+
+
+def test_current_above_default_ceiling_is_rejected() -> None:
+    model, _, supply, _ = make_model()
+
+    result = model.set_power_supply_current("main_supply", 60.0)
+
+    assert result.succeeded is False
+    assert "exceeds the active current ceiling of 45" in result.summary
+    assert supply.current_limit == 0.0
+
+
+def test_high_current_mode_raises_the_ceiling() -> None:
+    model, _, supply, _ = make_model(
+        PowerSupplyManualSafety(
+            high_current_mode=True,
+            wiring_current_ceiling_amps=80.0,
+            default_current_amps=20.0,
+            default_voltage_volts=10.0,
+        )
+    )
+
+    assert model.effective_current_ceiling() == 80.0
+
+    accepted = model.set_power_supply_current("main_supply", 60.0)
+    assert accepted.succeeded is True
+    assert supply.current_limit == 60.0
+
+    rejected = model.set_power_supply_current("main_supply", 90.0)
+    assert rejected.succeeded is False
+    assert "exceeds the active current ceiling of 80" in rejected.summary
+
+
+def test_high_current_mode_off_ignores_a_stored_raised_ceiling() -> None:
+    # Outside High current mode the ceiling is always the fixed 45 A
+    # default, regardless of whatever the (inaccessible) ceiling setting
+    # happens to be stored as - decisions/0014.
+    model, _, _, _ = make_model(
+        PowerSupplyManualSafety(
+            high_current_mode=False,
+            wiring_current_ceiling_amps=80.0,
+            default_current_amps=20.0,
+            default_voltage_volts=10.0,
+        )
+    )
+
+    assert model.effective_current_ceiling() == 45.0
+    result = model.set_power_supply_current("main_supply", 60.0)
+    assert result.succeeded is False

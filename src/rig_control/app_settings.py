@@ -41,6 +41,12 @@ def _non_empty_text(value: object) -> AppSettingValue:
     return value
 
 
+def _boolean(value: object) -> AppSettingValue:
+    if not isinstance(value, bool):
+        raise TypeError("must be true or false")
+    return value
+
+
 SETTING_DEFINITIONS = (
     SettingDefinition(
         key="trend_history_readings",
@@ -72,6 +78,48 @@ SETTING_DEFINITIONS = (
         description="Rotating application event-log location.",
         default="logs/rig-control.log",
         validator=_non_empty_text,
+    ),
+    SettingDefinition(
+        key="power_supply_default_current_amps",
+        label="Default manual current setpoint (A)",
+        description=(
+            "Low, everyday starting current applied when manual power-supply "
+            "control begins. Always clamped to the active current ceiling."
+        ),
+        default=20.0,
+        validator=_positive_number,
+    ),
+    SettingDefinition(
+        key="power_supply_default_voltage_volts",
+        label="Default manual voltage setpoint (V)",
+        description=(
+            "Low, everyday starting voltage applied when manual power-supply "
+            "control begins."
+        ),
+        default=10.0,
+        validator=_positive_number,
+    ),
+    SettingDefinition(
+        key="power_supply_high_current_mode",
+        label="High current mode",
+        description=(
+            "Allows the manual power-supply current ceiling to be raised "
+            "above the normal 45 A wiring rating. Only enable this if the "
+            "cables in use are actually rated for it."
+        ),
+        default=False,
+        validator=_boolean,
+    ),
+    SettingDefinition(
+        key="power_supply_wiring_current_ceiling_amps",
+        label="High current mode ceiling (A)",
+        description=(
+            "Current ceiling used only while High current mode is enabled. "
+            "Has no effect and is not shown anywhere else while High "
+            "current mode is off, when the ceiling is always 45 A."
+        ),
+        default=45.0,
+        validator=_positive_number,
     ),
 )
 _DEFINITIONS_BY_KEY = {
@@ -129,6 +177,22 @@ class AppSettings:
     def trend_history_readings(self) -> int:
         return int(self.values["trend_history_readings"])
 
+    @property
+    def power_supply_default_current_amps(self) -> float:
+        return float(self.values["power_supply_default_current_amps"])
+
+    @property
+    def power_supply_default_voltage_volts(self) -> float:
+        return float(self.values["power_supply_default_voltage_volts"])
+
+    @property
+    def power_supply_high_current_mode(self) -> bool:
+        return bool(self.values["power_supply_high_current_mode"])
+
+    @property
+    def power_supply_wiring_current_ceiling_amps(self) -> float:
+        return float(self.values["power_supply_wiring_current_ceiling_amps"])
+
 
 def default_app_settings() -> AppSettings:
     return AppSettings(
@@ -142,9 +206,16 @@ def parse_setting_text(key: str, text: str) -> AppSettingValue:
         definition = _DEFINITIONS_BY_KEY[key]
     except KeyError as error:
         raise KeyError(f"Unknown application setting {key!r}") from error
-    if isinstance(definition.default, float):
+    if isinstance(definition.default, bool):
+        # Checked before int: bool is a subclass of int in Python, so this
+        # branch would otherwise be unreachable for boolean settings.
+        normalized = text.strip().casefold()
+        if normalized not in {"true", "false"}:
+            raise ValueError(f"Application setting {key!r} must be true or false")
+        value: object = normalized == "true"
+    elif isinstance(definition.default, float):
         try:
-            value: object = float(text)
+            value = float(text)
         except ValueError as error:
             raise ValueError(f"Application setting {key!r} must be a number") from error
     elif isinstance(definition.default, int):
@@ -152,11 +223,6 @@ def parse_setting_text(key: str, text: str) -> AppSettingValue:
             value = int(text)
         except ValueError as error:
             raise ValueError(f"Application setting {key!r} must be an integer") from error
-    elif isinstance(definition.default, bool):
-        normalized = text.strip().casefold()
-        if normalized not in {"true", "false"}:
-            raise ValueError(f"Application setting {key!r} must be true or false")
-        value = normalized == "true"
     else:
         value = text
     return definition.validator(value)

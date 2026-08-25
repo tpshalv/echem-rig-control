@@ -17,6 +17,7 @@ from rig_control.devices.esp32_controller import Esp32Controller
 from rig_control.models import DeviceStatus
 from rig_control.rig_profile import DeviceCapability, RigProfile
 from rig_control.ui.manual_control.model import ManualControlViewModel
+from rig_control.ui.manual_control.types import PowerSupplyManualSafety
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,6 +201,7 @@ class OperationViewModel:
         profile: RigProfile | None = None,
         history_limit: int = 120,
         event_limit: int = 1_000,
+        power_supply_safety: PowerSupplyManualSafety | None = None,
     ) -> None:
         self._validate_history_limit(history_limit)
         self._validate_event_limit(event_limit)
@@ -210,6 +212,7 @@ class OperationViewModel:
             device_manager,
             control_service,
             measurement_provider=self.latest_measurement,
+            power_supply_safety=power_supply_safety,
         )
         self._profile_id = profile_id
         self._profile = profile
@@ -276,15 +279,22 @@ class OperationViewModel:
                 and reading.channel == "setpoint"
             )
             maximum = None
+            channel_name = self._channel_name(reading.channel)
             if isinstance(device, PowerSupply) and reading.channel == "voltage":
                 maximum = device.limits.maximum_voltage
+                mode = self.manual_control.power_supply_mode(reading.device_id)
+                channel_name = (
+                    "Voltage setpoint"
+                    if mode is PowerSupplyOperatingMode.CONSTANT_VOLTAGE
+                    else "Voltage limit"
+                )
             elif isinstance(device, MassFlowController) and reading.channel == "setpoint":
                 maximum = device.limits.maximum_flow
             row = OperationChannelRow(
                 device_id=reading.device_id,
                 device_name=self._device_name(reading.device_id),
                 channel=reading.channel,
-                channel_name=self._channel_name(reading.channel),
+                channel_name=channel_name,
                 value=reading.value,
                 unit=reading.unit,
                 quality=reading.quality,
@@ -302,16 +312,31 @@ class OperationViewModel:
                 continue
             device_name = self._device_name(device_id)
             device_system = self._system_for_device(device_id)
+            supply_mode = (
+                self.manual_control.power_supply_mode(device_id)
+                if isinstance(device, PowerSupply)
+                else None
+            )
             for channel, channel_name, unit in self._expected_measurements(
                 device_id, device
             ):
+                if channel == "voltage" and supply_mode is not None:
+                    channel_name = (
+                        "Voltage setpoint"
+                        if supply_mode is PowerSupplyOperatingMode.CONSTANT_VOLTAGE
+                        else "Voltage limit"
+                    )
                 if (device_id, channel) not in rows:
+                    is_power_supply_voltage = (
+                        isinstance(device, PowerSupply) and channel == "voltage"
+                    )
                     rows[(device_id, channel)] = OperationChannelRow(
                         device_id, device_name, channel, channel_name,
-                        None, unit, "", None, device_system,
-                        isinstance(device, PowerSupply) and channel == "voltage",
-                        "number", 0.0 if isinstance(device, PowerSupply) and channel == "voltage" else None,
-                        device.limits.maximum_voltage if isinstance(device, PowerSupply) and channel == "voltage" else None,
+                        device.voltage_setpoint if is_power_supply_voltage else None,
+                        unit, "", None, device_system,
+                        is_power_supply_voltage,
+                        "number", 0.0 if is_power_supply_voltage else None,
+                        device.limits.maximum_voltage if is_power_supply_voltage else None,
                     )
             if isinstance(device, MassFlowController):
                 key = (device_id, "setpoint")
@@ -323,8 +348,14 @@ class OperationViewModel:
                         device.limits.maximum_flow,
                     )
             if isinstance(device, PowerSupply):
+                mode = supply_mode
+                current_limit_name = (
+                    "Current setpoint"
+                    if mode is PowerSupplyOperatingMode.CONSTANT_CURRENT
+                    else "Current limit"
+                )
                 rows[(device_id, "current_limit")] = OperationChannelRow(
-                    device_id, device_name, "current_limit", "Current limit",
+                    device_id, device_name, "current_limit", current_limit_name,
                     device.current_limit, "A", "good", None, device_system,
                     True, "number", 0.0, device.limits.maximum_current,
                 )
@@ -333,7 +364,6 @@ class OperationViewModel:
                     device.output_enabled, "", "good", None, device_system,
                     True, "boolean",
                 )
-                mode = self.manual_control.power_supply_mode(device_id)
                 rows[(device_id, "operating_mode")] = OperationChannelRow(
                     device_id, device_name, "operating_mode", "Operating mode",
                     mode.value, "", "good", None, device_system, True, "mode",
@@ -572,6 +602,14 @@ class OperationViewModel:
                     f"Connected {device_id!r}.",
                 )
             )
+        for default_result in self.manual_control.initialize_manual_power_supply_defaults():
+            results.append(
+                OperationActionResult(
+                    default_result.succeeded,
+                    default_result.summary,
+                    default_result.technical_details,
+                )
+            )
         return tuple(results)
 
     def start_monitoring(self) -> OperationActionResult:
@@ -682,7 +720,12 @@ class OperationViewModel:
             self._events.extend(batch.events)
 
     def shutdown(self) -> tuple[str, ...]:
-        """Stop recording/polling and disconnect all devices."""
+        """Stop recording and polling for this screen.
+
+        Does not disconnect devices - Operation and Diagnostics share one
+        device manager, so device disconnection is only ever done centrally
+        by ApplicationSession.close() (see HomeViewModel.close()).
+        """
 
         failures: list[str] = []
         if self.is_recording:

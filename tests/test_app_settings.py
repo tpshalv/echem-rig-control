@@ -2,7 +2,11 @@ from pathlib import Path
 
 import pytest
 
-from rig_control.app_settings import AppSettings, default_app_settings
+from rig_control.app_settings import (
+    AppSettings,
+    default_app_settings,
+    parse_setting_text,
+)
 from rig_control.app_settings_loading import load_app_settings
 from rig_control.app_settings_writing import write_app_settings
 
@@ -14,6 +18,22 @@ def test_defaults_are_safe_and_explicit() -> None:
     assert settings.technical_log_path == "logs/rig-control.log"
     assert settings.trend_history_readings == 500
     assert settings.default_output_directory == "experiments"
+    assert settings.power_supply_default_current_amps == 20.0
+    assert settings.power_supply_default_voltage_volts == 10.0
+    assert settings.power_supply_high_current_mode is False
+    assert settings.power_supply_wiring_current_ceiling_amps == 45.0
+
+
+def test_boolean_setting_text_is_parsed_as_boolean_not_int() -> None:
+    # Regression: bool is a subclass of int in Python, so a naive
+    # isinstance(default, int) check placed before the bool check would
+    # make every boolean setting unreachable and fail with a confusing
+    # "must be an integer" error.
+    assert parse_setting_text("power_supply_high_current_mode", "true") is True
+    assert parse_setting_text("power_supply_high_current_mode", "False") is False
+
+    with pytest.raises(ValueError, match="must be true or false"):
+        parse_setting_text("power_supply_high_current_mode", "1")
 
 
 def test_default_settings_file_loads() -> None:

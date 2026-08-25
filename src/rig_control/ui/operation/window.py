@@ -7,6 +7,7 @@ from traceback import format_exc
 
 from rig_control.models import Event, EventSeverity, EventSink
 from rig_control.ui.common.theme import ERROR_TEXT, SECTION_FONT, TITLE_FONT
+from rig_control.ui.manual_control.types import DEFAULT_WIRING_CURRENT_CEILING_AMPS
 from rig_control.ui.operation.model import (
     OperationActionResult,
     OperationChannelRow,
@@ -506,6 +507,23 @@ class OperationWindow:
                     raise ValueError(f"Value must not exceed {row.maximum:g} {row.unit}")
         except ValueError as error:
             messagebox.showerror("Invalid value", str(error), parent=self._root)
+            return "break"
+        if (
+            row.channel == "current_limit"
+            and isinstance(value, float)
+            and value > DEFAULT_WIRING_CURRENT_CEILING_AMPS
+            and self._view_model.manual_control.high_current_mode
+            and not messagebox.askyesno(
+                "Exceeding normal wiring rating",
+                f"{value:g} A exceeds the normal "
+                f"{DEFAULT_WIRING_CURRENT_CEILING_AMPS:g} A wiring rating "
+                "for this rig.\n\nOnly continue if the cables in use are "
+                "actually rated for this current.\n\nContinue?",
+                icon="warning",
+                parent=self._root,
+            )
+        ):
+            self._cancel_cell_edit()
             return "break"
         result = self._view_model.apply_channel_value(row.device_id, row.channel, value)
         self._cancel_cell_edit()

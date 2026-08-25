@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from contextlib import contextmanager
 from collections.abc import Iterator
-from threading import RLock
+from threading import RLock, Thread
 from traceback import format_exc
 
 from rig_control.devices.base import Device
@@ -158,18 +158,61 @@ class DeviceManager:
             )
         )
 
-    def disconnect_all(self) -> tuple[DeviceOperationError, ...]:
-        """Disconnect every device, continuing after individual failures."""
+    def disconnect_all(
+        self,
+        *,
+        per_device_timeout: float = 5.0,
+    ) -> tuple[DeviceOperationError, ...]:
+        """Disconnect every device, continuing past individual failures.
+
+        Each device is disconnected on its own daemon thread with a bounded
+        join, so one device whose driver hangs (e.g. blocked serial I/O)
+        cannot stall the rest of shutdown. An abandoned thread is left to
+        finish or die on its own; the daemon flag keeps it from blocking
+        process exit.
+        """
 
         failures: list[DeviceOperationError] = []
 
         # Reverse order is useful when devices are later registered
         # after the shared services on which they depend.
         for device_id in reversed(self.device_ids):
-            try:
-                self.disconnect(device_id)
-            except DeviceOperationError as error:
-                failures.append(error)
+            error_box: list[DeviceOperationError] = []
+
+            def _disconnect_one(
+                device_id: str = device_id,
+                error_box: list[DeviceOperationError] = error_box,
+            ) -> None:
+                try:
+                    self.disconnect(device_id)
+                except DeviceOperationError as error:
+                    error_box.append(error)
+
+            thread = Thread(
+                target=_disconnect_one,
+                name=f"disconnect-{device_id}",
+                daemon=True,
+            )
+            thread.start()
+            thread.join(per_device_timeout)
+
+            if thread.is_alive():
+                message = (
+                    f"Device {device_id!r} did not disconnect within "
+                    f"{per_device_timeout:g} seconds; abandoning it to "
+                    "continue shutdown."
+                )
+                failures.append(DeviceOperationError(message))
+                self._emit(
+                    Event(
+                        source=device_id,
+                        severity=EventSeverity.ERROR,
+                        message=message,
+                    )
+                )
+                continue
+
+            failures.extend(error_box)
 
         return tuple(failures)
 

@@ -8,7 +8,11 @@ from rig_control.control.commands.power_supply import (
     SetPowerSupplyOutput,
     SetPowerSupplyVoltage,
 )
-from rig_control.control.commands.esp32 import RearmController, SetControllerOutput
+from rig_control.control.commands.esp32 import (
+    RearmController,
+    SetControllerOutput,
+    SetTemperatureSetpoint,
+)
 
 
 ControlCommand = (
@@ -19,6 +23,7 @@ ControlCommand = (
     | EnterDeviceSafeState
     | SetControllerOutput
     | RearmController
+    | SetTemperatureSetpoint
 )
 
 
@@ -32,4 +37,5 @@ __all__ = [
     "SetPowerSupplyVoltage",
     "SetControllerOutput",
     "RearmController",
+    "SetTemperatureSetpoint",
 ]

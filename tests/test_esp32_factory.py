@@ -63,7 +63,7 @@ def make_profile() -> RigProfile:
 
 def test_factory_shares_one_connection_and_polling_reads_both_channels() -> None:
     simulated = SimulatedController(
-        {"led": False},
+        {},
         15,
         sensor_channels=[
             {"name": "temperature", "value": 21.5, "unit": "degC", "quality": "good"},

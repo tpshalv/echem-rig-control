@@ -13,8 +13,10 @@ from rig_control.control.commands import (
     SetPowerSupplyVoltage,
     SetControllerOutput,
     RearmController,
+    SetTemperatureSetpoint,
 )
 from rig_control.devices.esp32_controller import Esp32Controller
+from rig_control.devices.lumel_re72 import LumelRe72
 from rig_control.devices.manager import DeviceManager
 from rig_control.devices.mass_flow_controller import (
     MassFlowController,
@@ -313,6 +315,15 @@ class RigControlService:
             controller.rearm()
             return f"Controller {command.device_id!r} watchdog rearmed."
 
+        if isinstance(command, SetTemperatureSetpoint):
+            if not isinstance(device, LumelRe72):
+                raise TypeError(f"Device {command.device_id!r} is not an RE72")
+            device.set_target_setpoint(command.value)
+            return (
+                f"Set RE72 {command.device_id!r} target setpoint to "
+                f"{command.value:g} degC."
+            )
+
         if isinstance(command, EnterDeviceSafeState):
             if not isinstance(device, SafeStateCapable):
                 raise TypeError(
@@ -360,6 +371,7 @@ class RigControlService:
             EnterDeviceSafeState,
             SetControllerOutput,
             RearmController,
+            SetTemperatureSetpoint,
         )
 
         if not isinstance(command, supported_types):

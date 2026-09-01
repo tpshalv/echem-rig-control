@@ -83,20 +83,20 @@ SETTING_DEFINITIONS = (
     ),
     SettingDefinition(
         key="power_supply_default_current_amps",
-        label="Default manual current setpoint (A)",
+        label="Default current limit (A)",
         description=(
-            "Low, everyday starting current applied when manual power-supply "
-            "control begins. Always clamped to the active current ceiling."
+            "Default current limit applied whenever constant voltage mode "
+            "is intially entered. Can be adjusted in the power-supply control panel."
         ),
         default=20.0,
         validator=_positive_number,
     ),
     SettingDefinition(
         key="power_supply_default_voltage_volts",
-        label="Default manual voltage setpoint (V)",
+        label="Default voltage limit (V)",
         description=(
-            "Low, everyday starting voltage applied when manual power-supply "
-            "control begins."
+            "Default voltage limit applied whenever constant current mode "
+            "is intially entered. Can be adjusted in the power-supply control panel."
         ),
         default=10.0,
         validator=_positive_number,

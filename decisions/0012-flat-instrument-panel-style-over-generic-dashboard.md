@@ -48,7 +48,7 @@ stylised.
 
 Four genuinely different directions were sketched before narrowing:
 an "oscilloscope" (near-black, glowing phosphor-green), a "blueprint"
-(the one chosen), an "industrial SCADA" (dark, beveled, LED-style status
+(the one chosen), an "industrial SCADA" (dark, beveled, indicator-style status
 dots), and a "bench instrument" (graphite, single restrained accent, no
 borders at all, spacing-only hierarchy). Blueprint was picked by the
 maintainer directly, not inferred by Claude.

@@ -76,7 +76,7 @@ def test_empty_ui_tick_does_not_redraw_display() -> None:
 def test_watchdog_boolean_uses_true_false_without_changing_outputs() -> None:
     assert format_operation_boolean("watchdog_tripped", True) == "True"
     assert format_operation_boolean("watchdog_tripped", False) == "False"
-    assert format_operation_boolean("led_enabled", True) == "On"
+    assert format_operation_boolean("output_enabled", True) == "On"
     assert format_operation_boolean("output_enabled", False) == "Off"
 
 

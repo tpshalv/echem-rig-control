@@ -25,3 +25,15 @@ class RearmController:
 
     def __post_init__(self) -> None:
         validate_device_id(self.device_id)
+
+
+@dataclass(frozen=True, slots=True)
+class SetTemperatureSetpoint:
+    device_id: str
+    value: float
+    source: CommandSource
+
+    def __post_init__(self) -> None:
+        validate_device_id(self.device_id)
+        if isinstance(self.value, bool) or not isinstance(self.value, (int, float)):
+            raise TypeError("Temperature setpoint must be numeric")

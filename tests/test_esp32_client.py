@@ -180,7 +180,7 @@ def test_client_reads_capability_description() -> None:
                 ],
             }
         ],
-        "outputs": [{"name": "led", "kind": "digital", "writable": True}],
+        "outputs": [],
     }
 
     def receive_description() -> str:
@@ -207,7 +207,7 @@ def test_client_rejects_invalid_capability_description() -> None:
         queue_response(
             transport,
             reply_to=request.message_id,
-            payload={"devices": [], "outputs": "led"},
+            payload={"devices": [], "outputs": "invalid"},
         )
         return original_receive()
 

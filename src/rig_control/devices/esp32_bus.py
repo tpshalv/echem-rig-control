@@ -78,7 +78,20 @@ class Esp32Bus:
             self._require_connected()
             return self._session.client.read_sensors()
 
+    def read_holding_registers(
+        self, slave: int, address: int, count: int
+    ) -> list[int]:
+        with self._lock:
+            self._require_connected()
+            return self._session.client.read_holding_registers(
+                slave, address, count
+            )
+
+    def write_register(self, slave: int, address: int, value: int) -> None:
+        with self._lock:
+            self._require_connected()
+            self._session.client.write_register(slave, address, value)
+
     def _require_connected(self) -> None:
         if self._client_count <= 0 or not self.is_connected:
             raise RuntimeError(f"ESP32 bus {self.bus_id!r} is not connected")
-

@@ -80,6 +80,33 @@ class ControllerClient:
             raise RuntimeError("Controller sensor channels must be objects")
         return channels
 
+    def read_holding_registers(
+        self, slave: int, address: int, count: int
+    ) -> list[int]:
+        payload = retry_read(
+            lambda: self._request(
+                "modbus_read_holding",
+                {"slave": slave, "address": address, "count": count},
+            ),
+            attempts=self._read_attempts,
+            initial_delay_seconds=self._read_retry_delay_seconds,
+        )
+        values = payload.get("values")
+        if not isinstance(values, list) or not all(
+            isinstance(value, int) and not isinstance(value, bool)
+            for value in values
+        ):
+            raise RuntimeError("Controller Modbus response has invalid values")
+        if len(values) != count:
+            raise RuntimeError("Controller Modbus response has wrong value count")
+        return values
+
+    def write_register(self, slave: int, address: int, value: int) -> None:
+        self._request(
+            "modbus_write_register",
+            {"slave": slave, "address": address, "value": value},
+        )
+
     def _request(
         self,
         name: str,

@@ -232,19 +232,13 @@ class ManualControlPanel(ttk.Frame):
             ttk.Label(frame, text=f"Connection: {row.status}").grid(row=0, column=0, sticky="w")
             ttk.Label(frame, text=f"Watchdog: {'TRIPPED' if row.watchdog_tripped else 'armed'}").grid(row=1, column=0, sticky="w")
             ttk.Label(frame, text=f"Safe state: {'active' if row.safe_state_active else 'inactive'}").grid(row=2, column=0, sticky="w")
-            ttk.Label(frame, text=f"LED: {'ON' if row.led_enabled else 'OFF'}").grid(row=3, column=0, sticky="w")
             buttons = ttk.Frame(frame)
-            buttons.grid(row=0, column=1, rowspan=4, padx=(20, 0))
+            buttons.grid(row=0, column=1, rowspan=3, padx=(20, 0))
             state = "normal" if row.is_available else "disabled"
-            ttk.Button(buttons, text="Rearm watchdog", state=state, command=lambda device_id=row.device_id: self._rearm_controller(device_id)).grid(row=0, column=0, columnspan=2, pady=(0, 6))
-            ttk.Button(buttons, text="LED ON", state=state, command=lambda device_id=row.device_id: self._set_controller_led(device_id, True)).grid(row=1, column=0, padx=(0, 6))
-            ttk.Button(buttons, text="LED OFF", state=state, command=lambda device_id=row.device_id: self._set_controller_led(device_id, False)).grid(row=1, column=1)
+            ttk.Button(buttons, text="Rearm watchdog", state=state, command=lambda device_id=row.device_id: self._rearm_controller(device_id)).grid(row=0, column=0)
 
     def _rearm_controller(self, device_id: str) -> None:
         self._record_result(self._view_model.rearm_controller(device_id))
-
-    def _set_controller_led(self, device_id: str, enabled: bool) -> None:
-        self._record_result(self._view_model.set_controller_output(device_id, "led", enabled))
 
     def _request_supply_mode_change(
         self,

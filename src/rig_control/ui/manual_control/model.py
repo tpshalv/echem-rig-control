@@ -11,6 +11,7 @@ from rig_control.control.commands import (
     SetPowerSupplyVoltage,
     SetControllerOutput,
     RearmController,
+    SetTemperatureSetpoint,
 )
 from rig_control.control.service import RigControlService
 from rig_control.devices.manager import DeviceManager
@@ -901,12 +902,10 @@ class ManualControlViewModel:
                 continue
             available = self._is_available(device.status)
             status = device.controller_status
-            outputs = status.get("outputs", {})
             rows.append(ControllerControlRow(
                 device_id=device.device_id,
                 status=device.status.value,
                 is_available=available,
-                led_enabled=bool(outputs.get("led", False)) if isinstance(outputs, dict) else False,
                 safe_state_active=status.get("safe_state_active") is True,
                 watchdog_tripped=status.get("watchdog_tripped") is True,
             ))
@@ -917,3 +916,10 @@ class ManualControlViewModel:
 
     def rearm_controller(self, device_id: str) -> ManualActionResult:
         return self._execute(RearmController(device_id, CommandSource.MANUAL))
+
+    def set_temperature_setpoint(
+        self, device_id: str, value: float
+    ) -> ManualActionResult:
+        return self._execute(
+            SetTemperatureSetpoint(device_id, value, CommandSource.MANUAL)
+        )

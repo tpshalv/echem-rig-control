@@ -1116,7 +1116,7 @@ class DeviceSetupWindow:
         ):
             device_id = str(item.get("id", "unnamed"))
             kind = str(item.get("kind", "unknown"))
-            supported = kind == "dht11"
+            supported = kind in {"dht11", "lumel_re72"}
             selected = tk.BooleanVar(value=supported)
             display_name = tk.StringVar(
                 value=str(item.get("label", device_id))

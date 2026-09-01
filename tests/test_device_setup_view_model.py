@@ -203,9 +203,7 @@ def test_discovered_esp32_adds_controller_connection_and_supported_sensors(
                 },
                 {"id": "future_sensor", "kind": "future_type"},
             ],
-            "outputs": [
-                {"name": "led", "kind": "digital", "writable": True}
-            ],
+            "outputs": [],
         },
     )
 
@@ -266,6 +264,53 @@ def test_discovered_esp32_only_adds_selected_sensor_devices(tmp_path) -> None:
         role.device_id != "optional_dht11"
         for role in model.profile.device_roles
     )
+
+
+def test_rediscovery_reuses_existing_esp32_and_adds_new_re72() -> None:
+    saved = []
+    original = load_rig_profile("rig-profile.esp32.toml")
+    model = DeviceSetupViewModel(
+        original,
+        profile_writer=lambda profile, _path: saved.append(profile) or None,
+    )
+    discovery = Esp32DiscoveryResult(
+        identity={"controller_id": "esp32_main_controller", "protocol_version": 1},
+        capabilities={
+            "devices": [
+                {"id": "esp32_dht11", "kind": "dht11", "label": "DHT11"},
+                {
+                    "id": "re72_1",
+                    "kind": "lumel_re72",
+                    "label": "Lumel RE72 controller 1",
+                    "slave": 1,
+                },
+            ],
+            "outputs": [],
+        },
+    )
+
+    result = model.add_discovered_esp32(
+        AddEsp32Request(port="COM5"),
+        discovery,
+        selected_device_names={
+            "esp32_dht11": "DHT11",
+            "re72_1": "Heater controller 1",
+        },
+    )
+
+    assert result.succeeded is True
+    assert len(saved) == 1
+    assert len(model.profile.connections) == len(original.connections)
+    assert sum(
+        role.device_id == "esp32_main_controller"
+        for role in model.profile.device_roles
+    ) == 1
+    re72 = model.profile.get_role("re72_1")
+    assert re72.driver == "lumel_re72"
+    assert re72.settings["slave"] == 1
+    assert re72.connection_id == original.get_role(
+        "esp32_main_controller"
+    ).connection_id
 
 
 def test_measurement_interval_can_be_edited_without_hardware_check() -> None:

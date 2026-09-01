@@ -14,6 +14,7 @@ from rig_control.control.service import RigControlService
 from rig_control.devices.mass_flow_controller import MassFlowController
 from rig_control.devices.power_supply import PowerSupply, PowerSupplyOperatingMode
 from rig_control.devices.esp32_controller import Esp32Controller
+from rig_control.devices.lumel_re72 import LumelRe72
 from rig_control.models import DeviceStatus
 from rig_control.rig_profile import DeviceCapability, RigProfile
 from rig_control.ui.manual_control.model import ManualControlViewModel
@@ -277,6 +278,9 @@ class OperationViewModel:
             ) or (
                 isinstance(device, MassFlowController)
                 and reading.channel == "setpoint"
+            ) or (
+                isinstance(device, LumelRe72)
+                and reading.channel == "target_setpoint"
             )
             maximum = None
             channel_name = self._channel_name(reading.channel)
@@ -370,12 +374,6 @@ class OperationViewModel:
                 )
             if isinstance(device, Esp32Controller):
                 status = device.controller_status
-                outputs = status.get("outputs", {})
-                led_enabled = bool(outputs.get("led", False)) if isinstance(outputs, dict) else False
-                rows[(device_id, "controller_led")] = OperationChannelRow(
-                    device_id, device_name, "controller_led", "Controller LED",
-                    led_enabled, "", "good", None, device_system, True, "boolean",
-                )
                 rows[(device_id, "watchdog_tripped")] = OperationChannelRow(
                     device_id, device_name, "watchdog_tripped", "Watchdog tripped",
                     status.get("watchdog_tripped") is True, "", "good", None,
@@ -416,12 +414,12 @@ class OperationViewModel:
             result = self.manual_control.set_power_supply_operating_mode(
                 device_id, PowerSupplyOperatingMode(str(value))
             )
-        elif channel == "controller_led":
-            result = self.manual_control.set_controller_output(
-                device_id, "led", bool(value)
-            )
         elif channel == "watchdog_rearm":
             result = self.manual_control.rearm_controller(device_id)
+        elif channel == "target_setpoint":
+            result = self.manual_control.set_temperature_setpoint(
+                device_id, float(value)
+            )
         else:
             return OperationActionResult(False, f"Channel {channel!r} is read-only.")
         return OperationActionResult(

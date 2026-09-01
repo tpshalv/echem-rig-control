@@ -39,3 +39,19 @@ required = true
 enabled = true
 connection_id = "main_esp32"
 poll_interval_seconds = 1.5
+
+
+[[devices]]
+device_id = "re72_1"
+friendly_name = "Lumel RE72 controller 1"
+capability = "temperature_controller"
+driver = "lumel_re72"
+backend = "real"
+required = true
+enabled = true
+connection_id = "main_esp32"
+poll_interval_seconds = 1.0
+
+[devices.settings]
+controller_id = "esp32_main_controller"
+slave = 1

@@ -98,6 +98,5 @@ class ControllerControlRow:
     device_id: str
     status: str
     is_available: bool
-    led_enabled: bool
     safe_state_active: bool
     watchdog_tripped: bool

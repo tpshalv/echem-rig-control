@@ -11,7 +11,7 @@ from rig_control.devices.esp32_bus import Esp32Bus
 
 class FakeClient:
     def __init__(self) -> None:
-        self.outputs = {"led": False}
+        self.outputs = {"auxiliary_output": False}
         self.watchdog_tripped = True
         self.calls: list[object] = []
         self.heartbeat_error: Exception | None = None
@@ -39,7 +39,7 @@ class FakeClient:
 
     def apply_safe_state(self) -> None:
         self.calls.append("safe_state")
-        self.outputs["led"] = False
+        self.outputs["auxiliary_output"] = False
 
 
 class FakeSession:
@@ -68,16 +68,16 @@ def test_controller_rearms_controls_output_and_disconnects_safe() -> None:
     controller.connect()
     controller.rearm()
     assert controller.controller_status["watchdog_tripped"] is False
-    controller.set_output("led", True)
+    controller.set_output("auxiliary_output", True)
 
     assert controller.status is DeviceStatus.READY
-    assert controller.controller_status["outputs"]["led"] is True
+    assert controller.controller_status["outputs"]["auxiliary_output"] is True
     assert controller.controller_status["watchdog_tripped"] is False
 
     controller.disconnect()
 
     assert session.connected is False
-    assert session.client.outputs["led"] is False
+    assert session.client.outputs["auxiliary_output"] is False
     assert controller.status is DeviceStatus.DISCONNECTED
     assert "safe_state" in session.client.calls
 
@@ -148,10 +148,10 @@ def test_control_service_and_manual_model_control_led() -> None:
     service = RigControlService(manager)
 
     service.execute(RearmController(controller.device_id, CommandSource.MANUAL))
-    service.execute(SetControllerOutput(controller.device_id, "led", True, CommandSource.MANUAL))
+    service.execute(SetControllerOutput(controller.device_id, "auxiliary_output", True, CommandSource.MANUAL))
     row = ManualControlViewModel(manager, service).controller_rows()[0]
 
-    assert row.led_enabled is True
+    assert row.safe_state_active is False
     assert row.watchdog_tripped is False
     assert row.safe_state_active is False
 

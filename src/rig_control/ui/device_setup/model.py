@@ -518,39 +518,62 @@ class DeviceSetupViewModel:
             )
             if not selected_controller_name:
                 raise ValueError("Controller display name cannot be empty")
-            if any(
-                role.device_id == controller_id
-                for role in self._profile.device_roles
-            ):
-                raise ValueError(
-                    f"ESP32 controller {controller_id!r} is already configured"
-                )
             if request.sensor_poll_interval_seconds <= 0:
                 raise ValueError("Sensor interval must be positive")
             if request.heartbeat_interval_seconds <= 0:
                 raise ValueError("Heartbeat interval must be positive")
 
-            connection_id = f"{controller_id}_serial"
-            used_connections = {
-                connection.connection_id for connection in self._profile.connections
-            }
-            suffix = 2
-            base_connection_id = connection_id
-            while connection_id in used_connections:
-                connection_id = f"{base_connection_id}_{suffix}"
-                suffix += 1
-            connection = ConnectionDefinition(
-                connection_id=connection_id,
-                connection_type="serial_json",
-                parameters={
-                    "port": request.port.strip(),
-                    "baud_rate": request.baud_rate,
-                    "timeout_seconds": request.timeout_seconds,
-                    "controller_id": controller_id,
-                },
+            existing_controller = next(
+                (
+                    role
+                    for role in self._profile.device_roles
+                    if role.device_id == controller_id
+                ),
+                None,
             )
-            roles = [
-                DeviceRole(
+            connection: ConnectionDefinition | None
+            if existing_controller is not None:
+                if (
+                    existing_controller.driver != "esp32_json"
+                    or existing_controller.connection_id is None
+                ):
+                    raise ValueError(
+                        f"Existing device {controller_id!r} is not a valid ESP32 controller"
+                    )
+                connection_id = existing_controller.connection_id
+                existing_connection = self._profile.get_connection(connection_id)
+                configured_port = existing_connection.parameters.get("port")
+                if (
+                    isinstance(configured_port, str)
+                    and configured_port.casefold() != request.port.strip().casefold()
+                ):
+                    raise ValueError(
+                        f"ESP32 controller {controller_id!r} is configured on "
+                        f"{configured_port}, not {request.port.strip()}"
+                    )
+                connection = None
+                roles: list[DeviceRole] = []
+            else:
+                connection_id = f"{controller_id}_serial"
+                used_connections = {
+                    item.connection_id for item in self._profile.connections
+                }
+                suffix = 2
+                base_connection_id = connection_id
+                while connection_id in used_connections:
+                    connection_id = f"{base_connection_id}_{suffix}"
+                    suffix += 1
+                connection = ConnectionDefinition(
+                    connection_id=connection_id,
+                    connection_type="serial_json",
+                    parameters={
+                        "port": request.port.strip(),
+                        "baud_rate": request.baud_rate,
+                        "timeout_seconds": request.timeout_seconds,
+                        "controller_id": controller_id,
+                    },
+                )
+                roles = [DeviceRole(
                     device_id=controller_id,
                     friendly_name=selected_controller_name,
                     capability=DeviceCapability.REMOTE_CONTROLLER,
@@ -565,8 +588,7 @@ class DeviceSetupViewModel:
                             request.heartbeat_interval_seconds
                         ),
                     },
-                )
-            ]
+                )]
             devices = discovery.capabilities.get("devices")
             if not isinstance(devices, list):
                 raise ValueError("ESP32 capability response has no device list")
@@ -577,11 +599,11 @@ class DeviceSetupViewModel:
                 if not isinstance(item, dict):
                     raise TypeError("ESP32 capability devices must be objects")
                 kind = item.get("kind")
-                if kind != "dht11":
+                if kind not in {"dht11", "lumel_re72"}:
                     unsupported_kinds.append(str(kind or "unknown"))
                     continue
                 device_id = item.get("id")
-                label = item.get("label", "DHT11 temperature and humidity")
+                label = item.get("label", "Discovered ESP32 device")
                 if not isinstance(device_id, str) or not device_id.strip():
                     raise ValueError("Discovered ESP32 device has no ID")
                 if not isinstance(label, str) or not label.strip():
@@ -618,33 +640,57 @@ class DeviceSetupViewModel:
                     raise ValueError(
                         f"Measurement interval for {device_id!r} must be positive"
                     )
-                if device_id in existing_ids or any(
-                    role.device_id == device_id for role in roles
-                ):
-                    raise ValueError(
-                        f"Discovered device ID {device_id!r} is already configured"
-                    )
+                if device_id in existing_ids:
+                    continue
+                if any(role.device_id == device_id for role in roles):
+                    continue
+                settings: dict[str, str | int | float | bool] = {
+                    "controller_id": controller_id
+                }
+                if kind == "lumel_re72":
+                    slave = item.get("slave")
+                    if isinstance(slave, bool) or not isinstance(slave, int):
+                        raise ValueError(
+                            f"Discovered RE72 {device_id!r} has no integer slave address"
+                        )
+                    settings["slave"] = slave
                 roles.append(
                     DeviceRole(
                         device_id=device_id,
                         friendly_name=selected_label,
-                        capability=DeviceCapability.TEMPERATURE_SENSOR,
-                        driver="esp32_dht11",
+                        capability=(
+                            DeviceCapability.TEMPERATURE_CONTROLLER
+                            if kind == "lumel_re72"
+                            else DeviceCapability.TEMPERATURE_SENSOR
+                        ),
+                        driver=(
+                            "lumel_re72"
+                            if kind == "lumel_re72"
+                            else "esp32_dht11"
+                        ),
                         backend=DeviceBackend.REAL,
                         required=True,
                         enabled=True,
                         poll_interval_seconds=float(interval),
                         connection_id=connection_id,
-                        settings={"controller_id": controller_id},
+                        settings=settings,
                     )
                 )
                 added_sensor_ids.append(device_id)
             candidate = replace(
                 self._profile,
-                connections=(*self._profile.connections, connection),
+                connections=(
+                    self._profile.connections
+                    if connection is None
+                    else (*self._profile.connections, connection)
+                ),
                 device_roles=(*self._profile.device_roles, *roles),
             )
-            backup = self._profile_writer(candidate, self._profile_path)
+            backup = (
+                self._profile_writer(candidate, self._profile_path)
+                if roles
+                else None
+            )
         except Exception as error:
             return ReadinessCheckResult(
                 False,
@@ -799,7 +845,7 @@ class DeviceSetupViewModel:
                 result = self._check_alicat(device_id)
             elif role.driver == "keithley_2260b":
                 result = self._check_keithley(device_id)
-            elif role.driver in {"esp32_json", "esp32_dht11"}:
+            elif role.driver in {"esp32_json", "esp32_dht11", "lumel_re72"}:
                 diagnostic = self._esp32_checker(self._profile, device_id)
                 sensor_text = (
                     "; readings "

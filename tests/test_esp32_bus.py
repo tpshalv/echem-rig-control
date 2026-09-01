@@ -21,7 +21,7 @@ class FakeClient:
         sleep(0.01)
         with self.lock:
             self.active -= 1
-        return {"outputs": {"led": False}}
+        return {"outputs": {}}
 
     def heartbeat(self) -> None: pass
     def set_output(self, name: str, enabled: bool) -> None: pass

@@ -5,25 +5,28 @@
 // Firmware / protocol configuration
 // ============================================================
 
-static const char *FIRMWARE_VERSION = "0.3.0";
+static const char *FIRMWARE_VERSION = "0.5.0";
 static const uint32_t PROTOCOL_VERSION = 1;
 
 // Never allow a USB CDC reply to block the firmware indefinitely if
 // the PC closes COM5 or temporarily stops accepting serial data.
 static const uint32_t SERIAL_TX_TIMEOUT_MS = 100;
 
-// Arduino Nano ESP32 physical header pin D2.
-// D2 corresponds to ESP32 GPIO5 on this board.
-static const uint8_t LED_PIN = D2;
-
-// DHT11 data uses a separate physical header pin so the D2 LED
-// remains independently controllable during sensor polling.
+// DHT11 data uses Arduino Nano ESP32 physical header pin D3.
 static const uint8_t DHT11_PIN = D3;
 static const uint8_t DHT11_TYPE = DHT11;
 static const uint32_t DHT11_MIN_READ_INTERVAL_MS = 1100;
 
-// LED safe state = OFF.
-static const bool LED_SAFE_VALUE = false;
+// Shared RS485 bus for up to two Lumel RE72 controllers. The Grove
+// MAX13478E interface handles transmit/receive direction automatically.
+// Proven physical wiring: Grove A -> RE72 terminal 7, Grove B -> terminal 8,
+// with the Grove module powered from the Nano's 3V3 supply.
+static const uint8_t RS485_RX_PIN = D6;
+static const uint8_t RS485_TX_PIN = D7;
+static const uint32_t RS485_BAUD_RATE = 9600;
+static const uint32_t MODBUS_RESPONSE_TIMEOUT_MS = 600;
+static const uint16_t MODBUS_MAX_READ_REGISTERS = 64;
+static const uint8_t RE72_PROBE_ADDRESSES[] = {1, 2};
 
 // Five seconds for easy watchdog testing.
 static const uint32_t WATCHDOG_TIMEOUT_MS = 15000;
@@ -38,8 +41,6 @@ static const size_t MAX_LINE_LENGTH = 512;
 
 String inputLine;
 bool discardingOverlongLine = false;
-
-bool ledEnabled = LED_SAFE_VALUE;
 
 bool heartbeatReceived = false;
 bool watchdogTripped = false;
@@ -56,6 +57,14 @@ bool humidityGood = false;
 float lastTemperatureC = 0.0f;
 float lastHumidityRh = 0.0f;
 uint32_t lastDhtReadAttemptMs = 0;
+
+enum ModbusResult {
+  MODBUS_OK,
+  MODBUS_TIMEOUT,
+  MODBUS_CRC_ERROR,
+  MODBUS_INVALID_RESPONSE,
+  MODBUS_EXCEPTION
+};
 
 
 // ============================================================
@@ -95,31 +104,172 @@ void refreshDht11IfDue() {
 
 
 // ============================================================
-// Output / safety helpers
+// Modbus RTU helpers
 // ============================================================
 
-bool safeStateActive() {
-  // This is DERIVED state, not a latch.
-  //
-  // For this proof-of-concept there is only one output,
-  // and its configured safe value is OFF.
-  return ledEnabled == LED_SAFE_VALUE;
+uint16_t modbusCrc(const uint8_t *data, size_t length) {
+  uint16_t crc = 0xFFFF;
+  for (size_t index = 0; index < length; index++) {
+    crc ^= data[index];
+    for (uint8_t bit = 0; bit < 8; bit++) {
+      if ((crc & 0x0001) != 0) {
+        crc = (crc >> 1) ^ 0xA001;
+      } else {
+        crc >>= 1;
+      }
+    }
+  }
+  return crc;
 }
 
 
-void writeLed(bool enabled) {
-  ledEnabled = enabled;
-
-  if (enabled) {
-    digitalWrite(LED_PIN, HIGH);
-  } else {
-    digitalWrite(LED_PIN, LOW);
+void clearRs485Input() {
+  while (Serial1.available() > 0) {
+    Serial1.read();
   }
 }
 
 
+ModbusResult receiveModbusFrame(
+  uint8_t slave,
+  uint8_t functionCode,
+  uint8_t *response,
+  size_t responseCapacity,
+  size_t &responseLength,
+  uint8_t &exceptionCode
+) {
+  responseLength = 0;
+  exceptionCode = 0;
+  size_t expectedLength = 0;
+  uint32_t startedAt = millis();
+
+  while ((uint32_t)(millis() - startedAt) <= MODBUS_RESPONSE_TIMEOUT_MS) {
+    while (Serial1.available() > 0 && responseLength < responseCapacity) {
+      response[responseLength++] = (uint8_t)Serial1.read();
+      if (responseLength == 2 && response[1] == (uint8_t)(functionCode | 0x80)) {
+        expectedLength = 5;
+      } else if (responseLength == 3) {
+        expectedLength = functionCode == 0x03
+          ? (size_t)response[2] + 5
+          : 8;
+        if (expectedLength > responseCapacity) {
+          return MODBUS_INVALID_RESPONSE;
+        }
+      }
+      if (expectedLength > 0 && responseLength >= expectedLength) {
+        uint16_t receivedCrc = (uint16_t)response[responseLength - 2]
+          | ((uint16_t)response[responseLength - 1] << 8);
+        if (modbusCrc(response, responseLength - 2) != receivedCrc) {
+          return MODBUS_CRC_ERROR;
+        }
+        if (response[0] != slave) {
+          return MODBUS_INVALID_RESPONSE;
+        }
+        if (response[1] == (uint8_t)(functionCode | 0x80)) {
+          exceptionCode = response[2];
+          return MODBUS_EXCEPTION;
+        }
+        if (response[1] != functionCode) {
+          return MODBUS_INVALID_RESPONSE;
+        }
+        return MODBUS_OK;
+      }
+    }
+    delay(1);
+  }
+  return MODBUS_TIMEOUT;
+}
+
+
+ModbusResult modbusReadHoldingRegisters(
+  uint8_t slave,
+  uint16_t address,
+  uint16_t count,
+  uint16_t *values,
+  uint8_t &exceptionCode
+) {
+  uint8_t request[8] = {
+    slave, 0x03,
+    (uint8_t)(address >> 8), (uint8_t)(address & 0xFF),
+    (uint8_t)(count >> 8), (uint8_t)(count & 0xFF),
+    0, 0
+  };
+  uint16_t crc = modbusCrc(request, 6);
+  request[6] = (uint8_t)(crc & 0xFF);
+  request[7] = (uint8_t)(crc >> 8);
+
+  clearRs485Input();
+  Serial1.write(request, sizeof(request));
+  Serial1.flush();
+
+  uint8_t response[5 + MODBUS_MAX_READ_REGISTERS * 2];
+  size_t responseLength = 0;
+  ModbusResult result = receiveModbusFrame(
+    slave, 0x03, response, sizeof(response), responseLength, exceptionCode
+  );
+  if (result != MODBUS_OK) {
+    return result;
+  }
+  if (response[2] != count * 2 || responseLength != (size_t)(count * 2 + 5)) {
+    return MODBUS_INVALID_RESPONSE;
+  }
+  for (uint16_t index = 0; index < count; index++) {
+    values[index] = ((uint16_t)response[3 + index * 2] << 8)
+      | response[4 + index * 2];
+  }
+  return MODBUS_OK;
+}
+
+
+ModbusResult modbusWriteSingleRegister(
+  uint8_t slave,
+  uint16_t address,
+  uint16_t value,
+  uint8_t &exceptionCode
+) {
+  uint8_t request[8] = {
+    slave, 0x06,
+    (uint8_t)(address >> 8), (uint8_t)(address & 0xFF),
+    (uint8_t)(value >> 8), (uint8_t)(value & 0xFF),
+    0, 0
+  };
+  uint16_t crc = modbusCrc(request, 6);
+  request[6] = (uint8_t)(crc & 0xFF);
+  request[7] = (uint8_t)(crc >> 8);
+
+  clearRs485Input();
+  Serial1.write(request, sizeof(request));
+  Serial1.flush();
+
+  uint8_t response[8];
+  size_t responseLength = 0;
+  ModbusResult result = receiveModbusFrame(
+    slave, 0x06, response, sizeof(response), responseLength, exceptionCode
+  );
+  if (result != MODBUS_OK) {
+    return result;
+  }
+  for (size_t index = 0; index < sizeof(request); index++) {
+    if (response[index] != request[index]) {
+      return MODBUS_INVALID_RESPONSE;
+    }
+  }
+  return MODBUS_OK;
+}
+
+
+// ============================================================
+// Output / safety helpers
+// ============================================================
+
+bool safeStateActive() {
+  // There are currently no controllable outputs.
+  return true;
+}
+
+
 void applySafeState() {
-  writeLed(LED_SAFE_VALUE);
+  // There are currently no controllable outputs.
 }
 
 
@@ -217,6 +367,81 @@ void sendError(
     replyTo,
     payload
   );
+}
+
+
+void sendModbusError(
+  const String &replyTo,
+  ModbusResult result,
+  uint8_t exceptionCode
+) {
+  JsonDocument payload;
+  payload["retryable"] = result == MODBUS_TIMEOUT || result == MODBUS_CRC_ERROR;
+  switch (result) {
+    case MODBUS_TIMEOUT:
+      payload["error"] = "Modbus device did not respond";
+      payload["error_kind"] = "timeout";
+      payload["code"] = "0xE2";
+      break;
+    case MODBUS_CRC_ERROR:
+      payload["error"] = "Modbus response CRC check failed";
+      payload["error_kind"] = "crc";
+      break;
+    case MODBUS_EXCEPTION:
+      payload["error"] = "Modbus device returned an exception";
+      payload["error_kind"] = "modbus_exception";
+      payload["code"] = exceptionCode;
+      break;
+    default:
+      payload["error"] = "Invalid Modbus response";
+      payload["error_kind"] = "invalid_response";
+      break;
+  }
+  sendResponse("error", replyTo, payload);
+}
+
+
+void addRe72Capability(JsonArray &devices, uint8_t slave) {
+  String deviceId = "re72_";
+  deviceId += slave;
+  String label = "Lumel RE72 controller ";
+  label += slave;
+
+  JsonObject device = devices.add<JsonObject>();
+  device["id"] = deviceId;
+  device["kind"] = "lumel_re72";
+  device["label"] = label;
+  device["slave"] = slave;
+  device["bus"] = "rs485_1";
+  device["recommended_poll_interval_seconds"] = 1.0;
+  JsonArray channels = device["channels"].to<JsonArray>();
+
+  JsonObject pv = channels.add<JsonObject>();
+  pv["name"] = "process_value";
+  pv["unit"] = "scaled_temperature";
+  pv["register"] = 4006;
+  JsonObject sp = channels.add<JsonObject>();
+  sp["name"] = "active_setpoint";
+  sp["unit"] = "scaled_temperature";
+  sp["register"] = 4008;
+  JsonObject output1 = channels.add<JsonObject>();
+  output1["name"] = "output_1";
+  output1["unit"] = "%";
+  output1["register"] = 4009;
+  output1["scale"] = 0.1;
+  JsonObject output2 = channels.add<JsonObject>();
+  output2["name"] = "output_2";
+  output2["unit"] = "%";
+  output2["register"] = 4010;
+  output2["scale"] = 0.1;
+  JsonObject alarm = channels.add<JsonObject>();
+  alarm["name"] = "alarm_state";
+  alarm["unit"] = "bitfield";
+  alarm["register"] = 4004;
+  JsonObject errors = channels.add<JsonObject>();
+  errors["name"] = "error_status";
+  errors["unit"] = "bitfield";
+  errors["register"] = 4005;
 }
 
 
@@ -354,12 +579,19 @@ void handleCommand(const String &line) {
     humidityChannel["name"] = "humidity";
     humidityChannel["unit"] = "%RH";
 
-    JsonArray outputs = out["outputs"].to<JsonArray>();
-    JsonObject ledOutput = outputs.add<JsonObject>();
-    ledOutput["name"] = "led";
-    ledOutput["kind"] = "digital";
-    ledOutput["writable"] = true;
-    ledOutput["safe_value"] = false;
+    // Probe the two planned RE72 slave addresses by reading controller
+    // status. A missing second controller is normal and is simply omitted.
+    for (uint8_t slave : RE72_PROBE_ADDRESSES) {
+      uint16_t statusValue = 0;
+      uint8_t exceptionCode = 0;
+      if (modbusReadHoldingRegisters(
+        slave, 4003, 1, &statusValue, exceptionCode
+      ) == MODBUS_OK) {
+        addRe72Capability(devices, slave);
+      }
+    }
+
+    out["outputs"].to<JsonArray>();
 
     sendOk(messageId, out);
     return;
@@ -399,8 +631,7 @@ void handleCommand(const String &line) {
 
     JsonDocument out;
 
-    out["outputs"]["led"] =
-      ledEnabled;
+    out["outputs"].to<JsonObject>();
 
     out["safe_state_active"] =
       safeStateActive();
@@ -466,81 +697,106 @@ void handleCommand(const String &line) {
 
 
   // ==========================================================
-  // set_output
+  // modbus_read_holding
   // ==========================================================
 
-  if (strcmp(commandName, "set_output") == 0) {
-
-    const char *outputName =
-      payload["name"].as<const char *>();
-
-
-    // Only "led" exists in this proof-of-concept.
+  if (strcmp(commandName, "modbus_read_holding") == 0) {
     if (
-      outputName == nullptr ||
-      strcmp(outputName, "led") != 0
+      !payload["slave"].is<int>() ||
+      !payload["address"].is<int>() ||
+      !payload["count"].is<int>()
     ) {
-      sendError(
-        messageId,
-        "unknown output name"
-      );
-
+      sendError(messageId, "slave, address and count must be integers");
+      return;
+    }
+    int slaveValue = payload["slave"].as<int>();
+    int addressValue = payload["address"].as<int>();
+    int countValue = payload["count"].as<int>();
+    if (slaveValue < 1 || slaveValue > 247) {
+      sendError(messageId, "slave must be between 1 and 247");
+      return;
+    }
+    if (addressValue < 0 || addressValue > 65535) {
+      sendError(messageId, "address must be between 0 and 65535");
+      return;
+    }
+    if (countValue < 1 || countValue > MODBUS_MAX_READ_REGISTERS) {
+      sendError(messageId, "count must be between 1 and 64");
       return;
     }
 
-
-    // enabled must literally be JSON true or false.
-    if (!payload["enabled"].is<bool>()) {
-      sendError(
-        messageId,
-        "enabled must be true or false"
-      );
-
+    uint16_t values[MODBUS_MAX_READ_REGISTERS];
+    uint8_t exceptionCode = 0;
+    ModbusResult result = modbusReadHoldingRegisters(
+      (uint8_t)slaveValue,
+      (uint16_t)addressValue,
+      (uint16_t)countValue,
+      values,
+      exceptionCode
+    );
+    if (result != MODBUS_OK) {
+      sendModbusError(messageId, result, exceptionCode);
       return;
     }
-
-
-    // No outputs may be enabled before communication
-    // has demonstrated a heartbeat at least once.
-    if (!heartbeatReceived) {
-      sendError(
-        messageId,
-        "no heartbeat has been received yet"
-      );
-
-      return;
-    }
-
-
-    // watchdogTripped is the actual safety latch.
-    if (watchdogTripped) {
-      sendError(
-        messageId,
-        "watchdog is tripped; rearm is required"
-      );
-
-      return;
-    }
-
-
-    bool enabled =
-      payload["enabled"].as<bool>();
-
-
-    writeLed(enabled);
-
 
     JsonDocument out;
+    out["slave"] = slaveValue;
+    out["address"] = addressValue;
+    JsonArray responseValues = out["values"].to<JsonArray>();
+    for (int index = 0; index < countValue; index++) {
+      responseValues.add(values[index]);
+    }
+    sendOk(messageId, out);
+    return;
+  }
 
-    out["name"] = "led";
-    out["enabled"] = enabled;
 
+  // ==========================================================
+  // modbus_write_register
+  // ==========================================================
 
-    sendOk(
-      messageId,
-      out
+  if (strcmp(commandName, "modbus_write_register") == 0) {
+    if (
+      !payload["slave"].is<int>() ||
+      !payload["address"].is<int>() ||
+      !payload["value"].is<int>()
+    ) {
+      sendError(messageId, "slave, address and value must be integers");
+      return;
+    }
+    int slaveValue = payload["slave"].as<int>();
+    int addressValue = payload["address"].as<int>();
+    int value = payload["value"].as<int>();
+    if (slaveValue < 1 || slaveValue > 247) {
+      sendError(messageId, "slave must be between 1 and 247");
+      return;
+    }
+    if (addressValue < 0 || addressValue > 65535) {
+      sendError(messageId, "address must be between 0 and 65535");
+      return;
+    }
+    if (value < 0 || value > 65535) {
+      sendError(messageId, "value must be between 0 and 65535");
+      return;
+    }
+
+    uint8_t exceptionCode = 0;
+    ModbusResult result = modbusWriteSingleRegister(
+      (uint8_t)slaveValue,
+      (uint16_t)addressValue,
+      (uint16_t)value,
+      exceptionCode
     );
+    if (result != MODBUS_OK) {
+      sendModbusError(messageId, result, exceptionCode);
+      return;
+    }
 
+    JsonDocument out;
+    out["slave"] = slaveValue;
+    out["address"] = addressValue;
+    out["value"] = value;
+    sendOk(messageId, out);
     return;
   }
 
@@ -599,7 +855,7 @@ void handleCommand(const String &line) {
 
     // Rearm clears ONLY the watchdog latch.
     //
-    // It deliberately does NOT change the LED/output state.
+    // It deliberately does not apply or change output state.
     watchdogTripped = false;
 
 
@@ -647,16 +903,6 @@ void checkWatchdog() {
   }
 
 
-  // Defensive second layer:
-  //
-  // If the watchdog is latched, continuously make sure
-  // the output physically remains at its safe value.
-  if (
-    watchdogTripped &&
-    ledEnabled != LED_SAFE_VALUE
-  ) {
-    applySafeState();
-  }
 }
 
 
@@ -740,12 +986,6 @@ void serviceSerial() {
 
 void setup() {
 
-  pinMode(
-    LED_PIN,
-    OUTPUT
-  );
-
-
   // Power-up state is safe.
   applySafeState();
 
@@ -756,6 +996,13 @@ void setup() {
   // A positive bounded timeout lets loop() resume and keeps both the
   // command processor and output watchdog alive.
   Serial.setTxTimeoutMs(SERIAL_TX_TIMEOUT_MS);
+
+  Serial1.begin(
+    RS485_BAUD_RATE,
+    SERIAL_8N2,
+    RS485_RX_PIN,
+    RS485_TX_PIN
+  );
 
   dht.begin();
 

@@ -17,6 +17,7 @@ from rig_control.devices.manager import DeviceManager
 from rig_control.devices.esp32_controller import Esp32Controller
 from rig_control.devices.esp32_bus import Esp32Bus
 from rig_control.devices.esp32_dht11 import Esp32Dht11
+from rig_control.devices.lumel_re72 import LumelRe72
 from rig_control.esp32.session import ControllerSession
 from rig_control.devices.mass_flow_controller import (
     MassFlowControllerLimits,
@@ -164,6 +165,23 @@ def _create_device(
                 _get_or_create_esp32_bus(
                     profile, role, esp32_buses, esp32_transport_factory
                 ),
+            )
+
+        if (
+            role.driver == "lumel_re72"
+            and role.capability is DeviceCapability.TEMPERATURE_CONTROLLER
+        ):
+            slave = role.settings.get("slave")
+            if isinstance(slave, bool) or not isinstance(slave, int):
+                raise DeviceFactoryError(
+                    f"RE72 device {role.device_id!r} requires an integer slave setting"
+                )
+            return LumelRe72(
+                role.device_id,
+                _get_or_create_esp32_bus(
+                    profile, role, esp32_buses, esp32_transport_factory
+                ),
+                slave,
             )
 
         raise DeviceFactoryError(

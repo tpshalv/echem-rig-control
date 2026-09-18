@@ -81,7 +81,7 @@ def read_json_lines(
 def test_writer_syncs_journals_to_disk(tmp_path: Path, monkeypatch) -> None:
     syncs = []
     monkeypatch.setattr("rig_control.data.directory_writer.os.fsync", syncs.append)
-    writer = DirectoryExperimentWriter(tmp_path)
+    writer = DirectoryExperimentWriter(tmp_path, live_export_interval_seconds=0)
 
     writer.open_experiment(make_metadata())
     writer.write_measurement(make_measurement_record())
@@ -97,7 +97,7 @@ def test_measurement_batch_uses_one_journal_sync(
 ) -> None:
     syncs = []
     monkeypatch.setattr("rig_control.data.directory_writer.os.fsync", syncs.append)
-    writer = DirectoryExperimentWriter(tmp_path)
+    writer = DirectoryExperimentWriter(tmp_path, live_export_interval_seconds=0)
     writer.open_experiment(make_metadata())
     syncs.clear()
 
@@ -200,6 +200,25 @@ def test_measurements_are_appended_as_complete_lines(
     assert records[0]["channel"] == "temperature"
     assert records[0]["value"] == 25.4
     assert records[0]["quality"] == "good"
+
+
+def test_live_wide_csv_is_refreshed_while_recording(tmp_path: Path) -> None:
+    writer = DirectoryExperimentWriter(
+        tmp_path,
+        export_bin_seconds=0.5,
+        live_export_interval_seconds=1,
+    )
+    writer.open_experiment(make_metadata())
+
+    writer.write_measurement(make_measurement_record())
+
+    assert writer.experiment_directory is not None
+    csv_path = writer.experiment_directory / "measurements-wide.csv"
+    assert csv_path.is_file()
+    assert "outlet_temperature.temperature [degC]" in csv_path.read_text(
+        encoding="utf-8-sig"
+    )
+    writer.close_experiment()
 
 
 def test_events_are_appended_as_complete_lines(

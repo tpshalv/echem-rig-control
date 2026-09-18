@@ -103,6 +103,62 @@ class VerticalScrolledFrame(ttk.Frame):
         self._canvas.yview_scroll(direction, "units")
         return "break"
 
+    def scroll_from_event(self, event: tk.Event) -> str | None:
+        """Scroll this frame from a child that suppresses its own wheel action."""
+        return self._on_mouse_wheel(event)
+
+
+class HoverToolTip:
+    """Small delayed help popup for compact forms."""
+
+    def __init__(self, widget: tk.Misc, text: str, *, delay_ms: int = 450) -> None:
+        self._widget = widget
+        self._text = text
+        self._delay_ms = delay_ms
+        self._after_id: str | None = None
+        self._popup: tk.Toplevel | None = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _schedule(self, _event: tk.Event) -> None:
+        self._cancel()
+        self._after_id = self._widget.after(self._delay_ms, self._show)
+
+    def _show(self) -> None:
+        self._after_id = None
+        if self._popup is not None or not self._text:
+            return
+        popup = tk.Toplevel(self._widget)
+        popup.wm_overrideredirect(True)
+        popup.wm_geometry(
+            f"+{self._widget.winfo_pointerx() + 12}+"
+            f"{self._widget.winfo_pointery() + 16}"
+        )
+        tk.Label(
+            popup,
+            text=self._text,
+            justify="left",
+            wraplength=360,
+            relief="solid",
+            borderwidth=1,
+            padx=7,
+            pady=5,
+            background="#ffffe0",
+        ).pack()
+        self._popup = popup
+
+    def _cancel(self) -> None:
+        if self._after_id is not None:
+            self._widget.after_cancel(self._after_id)
+            self._after_id = None
+
+    def _hide(self, _event: tk.Event | None = None) -> None:
+        self._cancel()
+        if self._popup is not None:
+            self._popup.destroy()
+            self._popup = None
+
 
 def create_device_status_indicator(
     parent: tk.Misc,

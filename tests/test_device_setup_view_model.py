@@ -5,8 +5,14 @@ from rig_control.devices.alicat.protocol import (
     AlicatFrameField,
     AlicatInstrumentState,
 )
+from rig_control.devices.ametek_asterion.configuration import (
+    AmetekAsterionConfiguration,
+)
 from rig_control.devices.keithley_2260b.configuration import (
     Keithley2260BConfiguration,
+)
+from rig_control.devices.keithley_2280s.configuration import (
+    Keithley2280SConfiguration,
 )
 from rig_control.devices.keithley_2260b.protocol import KeithleyIdentity
 from rig_control.diagnostics.alicat import AlicatDiagnosticResult, DiscoveredAlicat
@@ -828,6 +834,104 @@ def test_identified_visa_keithley_is_saved_to_local_profile(tmp_path) -> None:
     assert connection.connection_type == "visa_scpi"
     assert connection.parameters["resource_name"] == "ASRL4::INSTR"
     assert connection.parameters["baud_rate"] == 9600
+
+
+def test_identified_keithley_2280s_is_saved_to_local_profile(tmp_path) -> None:
+    profile_path = tmp_path / "rig-profile.toml"
+    empty_profile = replace(
+        load_rig_profile("rig-profile.example.toml"),
+        connections=(),
+        device_roles=(),
+    )
+
+    def identify(configuration) -> KeithleyIdentity:
+        assert isinstance(configuration, Keithley2280SConfiguration)
+        assert configuration.connection.host == "192.168.1.30"
+        assert configuration.limits.maximum_voltage == 32.0
+        return KeithleyIdentity(
+            "Keithley Instruments",
+            "2280S-32-6",
+            "7654321",
+            "1.00",
+        )
+
+    model = DeviceSetupViewModel(
+        empty_profile,
+        profile_path=profile_path,
+        keithley_checker=identify,
+    )
+
+    result = model.add_keithley_and_check(
+        AddKeithleyRequest(
+            "precision_supply",
+            "Precision supply",
+            "Electrolysis supply",
+            "192.168.1.30",
+            port=5025,
+            maximum_voltage=32.0,
+            maximum_current=6.0,
+            maximum_power=192.0,
+            driver="keithley_2280s",
+        )
+    )
+
+    assert result.succeeded is True
+    saved = load_rig_profile(profile_path)
+    role = saved.get_role("precision_supply")
+    connection = saved.get_connection(role.connection_id)
+    assert role.driver == "keithley_2280s"
+    assert role.expected_identity.model == "2280S-32-6"
+    assert connection.parameters["host"] == "192.168.1.30"
+    assert connection.parameters["port"] == 5025
+
+
+def test_identified_ametek_asterion_is_saved_to_local_profile(tmp_path) -> None:
+    profile_path = tmp_path / "rig-profile.toml"
+    empty_profile = replace(
+        load_rig_profile("rig-profile.example.toml"),
+        connections=(),
+        device_roles=(),
+    )
+
+    def identify(configuration):
+        assert isinstance(configuration, AmetekAsterionConfiguration)
+        assert configuration.connection.resource_name == "USB0::ASTERION::INSTR"
+        return KeithleyIdentity(
+            "AMETEK",
+            "ASTERION DC",
+            "A12345",
+            "1.00",
+        )
+
+    model = DeviceSetupViewModel(
+        empty_profile,
+        profile_path=profile_path,
+        keithley_checker=identify,
+    )
+
+    result = model.add_keithley_and_check(
+        AddKeithleyRequest(
+            "asterion_supply",
+            "Asterion supply",
+            "",
+            "",
+            connection_method="visa",
+            resource_name="USB0::ASTERION::INSTR",
+            maximum_voltage=30.0,
+            maximum_current=5.0,
+            maximum_power=100.0,
+            driver="ametek_asterion",
+        )
+    )
+
+    assert result.succeeded is True
+    saved = load_rig_profile(profile_path)
+    role = saved.get_role("asterion_supply")
+    connection = saved.get_connection(role.connection_id)
+    assert role.driver == "ametek_asterion"
+    assert role.expected_identity.manufacturer == "AMETEK"
+    assert connection.connection_type == "visa_scpi"
+    assert connection.parameters["resource_name"] == "USB0::ASTERION::INSTR"
 
 
 def test_duplicate_keithley_network_target_is_rejected_before_check() -> None:

@@ -1,18 +1,32 @@
-from rig_control.devices.keithley_2260b.protocol import (
-    Keithley2260BProtocol,
-    KeithleyIdentity,
+from dataclasses import dataclass
+from typing import Final
+
+from rig_control.devices.ametek_asterion.protocol import (
+    AmetekAsterionIdentity,
+    AmetekAsterionProtocol,
 )
 from rig_control.devices.power_supply import PowerSupply, PowerSupplyLimits
 from rig_control.models import DeviceStatus, Measurement
-from rig_control.transports.scpi import ScpiTransport
 from rig_control.read_retry import retry_read
+from rig_control.transports.scpi import ScpiTransport
 
 
-class Keithley2260B(PowerSupply):
-    """Driver for a Keithley 2260B programmable DC power supply."""
+@dataclass(frozen=True, slots=True)
+class HardwareLimits:
+    """Rated model capabilities, independent of profile and run limits."""
 
-    _protocol = Keithley2260BProtocol
-    _model_name = "Keithley 2260B"
+    maximum_voltage: float
+    maximum_current: float
+    maximum_power: float
+
+
+HARDWARE_LIMITS_BY_MODEL: Final[dict[str, HardwareLimits]] = {}
+
+
+class AmetekAsterion(PowerSupply):
+    """Driver for AMETEK Sorensen Asterion DC Series power supplies."""
+
+    _protocol = AmetekAsterionProtocol
 
     def __init__(
         self,
@@ -27,7 +41,7 @@ class Keithley2260B(PowerSupply):
         self._limits = limits
         self._transport = transport
         self._status = DeviceStatus.DISCONNECTED
-        self._identity: KeithleyIdentity | None = None
+        self._identity: AmetekAsterionIdentity | None = None
         self._voltage_setpoint = 0.0
         self._current_limit = 0.0
         self._output_enabled = False
@@ -47,7 +61,13 @@ class Keithley2260B(PowerSupply):
         return self._limits
 
     @property
-    def identity(self) -> KeithleyIdentity | None:
+    def hardware_limits(self) -> HardwareLimits | None:
+        if self._identity is None:
+            return None
+        return HARDWARE_LIMITS_BY_MODEL.get(self._normalise_model(self._identity.model))
+
+    @property
+    def identity(self) -> AmetekAsterionIdentity | None:
         """Return the identity reported by the connected instrument."""
 
         return self._identity
@@ -75,45 +95,31 @@ class Keithley2260B(PowerSupply):
         try:
             self._transport.open()
 
-            identity_response = self._transport.query(
-                self._protocol.IDENTIFY_QUERY
-            )
             identity = self._protocol.parse_identity(
-                identity_response
+                self._transport.query(self._protocol.IDENTIFY_QUERY)
             )
 
             if not self._accepts_identity(identity):
                 raise RuntimeError(
-                    f"Connected instrument is not a {self._model_name}: "
+                    "Connected instrument is not an AMETEK Sorensen "
+                    "Asterion DC supply: "
                     f"manufacturer={identity.manufacturer!r}, "
                     f"model={identity.model!r}, "
                     f"serial_number={identity.serial_number!r}"
                 )
 
-            voltage_response = self._transport.query(
-                self._protocol.VOLTAGE_SETPOINT_QUERY
-            )
-            current_response = self._transport.query(
-                self._protocol.CURRENT_LIMIT_QUERY
-            )
-            output_response = self._transport.query(
-                self._protocol.OUTPUT_STATE_QUERY
-            )
-
             voltage = self._protocol.parse_number(
-                voltage_response
+                self._transport.query(self._protocol.VOLTAGE_SETPOINT_QUERY)
             )
             current = self._protocol.parse_number(
-                current_response
+                self._transport.query(self._protocol.CURRENT_LIMIT_QUERY)
             )
             output_enabled = self._protocol.parse_boolean(
-                output_response
+                self._transport.query(self._protocol.OUTPUT_STATE_QUERY)
             )
 
-            self._validate_operating_point(voltage, current)
-            self._configure_instrument()
-
             self._identity = identity
+            self._validate_operating_point(voltage, current)
             self._voltage_setpoint = voltage
             self._current_limit = current
             self._output_enabled = output_enabled
@@ -121,15 +127,15 @@ class Keithley2260B(PowerSupply):
 
         except Exception:
             self._transport.close()
-            self._identity = None
-            self._status = DeviceStatus.DISCONNECTED
+            self._clear_local_state()
             raise
 
-    def _accepts_identity(self, identity: KeithleyIdentity) -> bool:
-        return "2260B" in identity.model.upper()
-
-    def _configure_instrument(self) -> None:
-        """Apply model-specific settings after validating the initial state."""
+    def _accepts_identity(self, identity: AmetekAsterionIdentity) -> bool:
+        manufacturer = identity.manufacturer.upper()
+        model = identity.model.upper()
+        vendor_ok = "AMETEK" in manufacturer or "SORENSEN" in manufacturer
+        model_ok = "ASTERION" in model or model.startswith("AST")
+        return vendor_ok and model_ok
 
     def disconnect(self) -> None:
         """Request a safe state and close the connection."""
@@ -148,32 +154,31 @@ class Keithley2260B(PowerSupply):
         self._require_ready()
         self._validate_operating_point(voltage, self._current_limit)
 
-        command = self._protocol.set_voltage(voltage)
-        self._transport.write(command)
+        self._transport.write(self._protocol.set_voltage(voltage))
         self._voltage_setpoint = float(voltage)
 
     def set_current_limit(self, current: float) -> None:
         self._require_ready()
         self._validate_operating_point(self._voltage_setpoint, current)
 
-        command = self._protocol.set_current_limit(current)
-        self._transport.write(command)
+        self._transport.write(self._protocol.set_current_limit(current))
         self._current_limit = float(current)
 
     def set_output_enabled(self, enabled: bool) -> None:
         self._require_ready()
+        if enabled:
+            self._validate_operating_point(self._voltage_setpoint, self._current_limit)
 
-        command = self._protocol.set_output_enabled(enabled)
-        self._transport.write(command)
+        self._transport.write(self._protocol.set_output_enabled(enabled))
         self._output_enabled = enabled
 
     def measure_voltage(self) -> Measurement:
         self._require_ready()
 
         value = retry_read(
-            lambda: self._protocol.parse_number(self._transport.query(
-                self._protocol.MEASURE_VOLTAGE_QUERY
-            )),
+            lambda: self._protocol.parse_number(
+                self._transport.query(self._protocol.MEASURE_VOLTAGE_QUERY)
+            ),
             attempts=self._read_attempts,
             initial_delay_seconds=self._read_retry_delay_seconds,
         )
@@ -184,9 +189,9 @@ class Keithley2260B(PowerSupply):
         self._require_ready()
 
         value = retry_read(
-            lambda: self._protocol.parse_number(self._transport.query(
-                self._protocol.MEASURE_CURRENT_QUERY
-            )),
+            lambda: self._protocol.parse_number(
+                self._transport.query(self._protocol.MEASURE_CURRENT_QUERY)
+            ),
             attempts=self._read_attempts,
             initial_delay_seconds=self._read_retry_delay_seconds,
         )
@@ -202,31 +207,18 @@ class Keithley2260B(PowerSupply):
             self._output_enabled = False
             return
 
-        # Output is disabled first so that clearing the setpoints cannot
-        # unexpectedly affect an energised experiment.
-        self._transport.write(
-            self._protocol.set_output_enabled(False)
-        )
+        self._transport.write(self._protocol.set_output_enabled(False))
         self._output_enabled = False
 
-        self._transport.write(
-            self._protocol.set_voltage(0.0)
-        )
+        self._transport.write(self._protocol.set_voltage(0.0))
         self._voltage_setpoint = 0.0
 
-        self._transport.write(
-            self._protocol.set_current_limit(0.0)
-        )
+        self._transport.write(self._protocol.set_current_limit(0.0))
         self._current_limit = 0.0
 
     def _require_ready(self) -> None:
-        if (
-            self.status is not DeviceStatus.READY
-            or not self._transport.is_open
-        ):
-            raise RuntimeError(
-                f"Power supply {self.device_id!r} is not ready"
-            )
+        if self.status is not DeviceStatus.READY or not self._transport.is_open:
+            raise RuntimeError(f"Power supply {self.device_id!r} is not ready")
 
     def _clear_local_state(self) -> None:
         self._identity = None
@@ -235,25 +227,58 @@ class Keithley2260B(PowerSupply):
         self._output_enabled = False
         self._status = DeviceStatus.DISCONNECTED
 
-    def _validate_operating_point(
-        self,
-        voltage: float,
-        current: float,
-    ) -> None:
+    def _validate_operating_point(self, voltage: float, current: float) -> None:
+        self._protocol._format_number(voltage)
+        self._protocol._format_number(current)
+
         if voltage < 0:
             raise ValueError("Voltage cannot be negative")
-
         if current < 0:
             raise ValueError("Current cannot be negative")
 
-        if voltage > self.limits.maximum_voltage:
-            raise ValueError(
-                f"Voltage {voltage} V exceeds configured maximum "
-                f"{self.limits.maximum_voltage} V"
+        self._validate_limit("Voltage", voltage, "V", self.limits.maximum_voltage)
+        self._validate_limit("Current", current, "A", self.limits.maximum_current)
+        self._validate_limit("Power", voltage * current, "W", self.limits.maximum_power)
+
+        hardware_limits = self.hardware_limits
+        if hardware_limits is not None:
+            self._validate_limit(
+                "Voltage",
+                voltage,
+                "V",
+                hardware_limits.maximum_voltage,
+                limit_kind="hardware",
+            )
+            self._validate_limit(
+                "Current",
+                current,
+                "A",
+                hardware_limits.maximum_current,
+                limit_kind="hardware",
+            )
+            self._validate_limit(
+                "Power",
+                voltage * current,
+                "W",
+                hardware_limits.maximum_power,
+                limit_kind="hardware",
             )
 
-        if current > self.limits.maximum_current:
+    @staticmethod
+    def _validate_limit(
+        name: str,
+        value: float,
+        unit: str,
+        limit: float,
+        *,
+        limit_kind: str = "configured",
+    ) -> None:
+        if value > limit:
             raise ValueError(
-                f"Current {current} A exceeds configured maximum "
-                f"{self.limits.maximum_current} A"
+                f"{name} {value} {unit} exceeds {limit_kind} maximum "
+                f"{limit} {unit}"
             )
+
+    @staticmethod
+    def _normalise_model(model: str) -> str:
+        return model.upper().removeprefix("MODEL ").strip()

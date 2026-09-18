@@ -2,6 +2,7 @@ from pathlib import Path
 
 from rig_control.app_settings import AppSettings
 from rig_control.control.service import RigControlService
+from rig_control.data.directory_writer import DirectoryExperimentWriter
 from rig_control.device_factory import create_device_manager
 from rig_control.devices.manager import DeviceManager
 from rig_control.devices.esp32_controller import Esp32Controller
@@ -37,7 +38,15 @@ class ApplicationSession:
             event_sink=self.technical_log.record,
         )
         self.control_service = RigControlService(self.device_manager)
-        self.experiment_recorder = ExperimentRecorder()
+        self.experiment_recorder = ExperimentRecorder(
+            writer_factory=lambda root_directory: DirectoryExperimentWriter(
+                root_directory,
+                export_bin_seconds=settings.export_bin_seconds,
+                live_export_interval_seconds=(
+                    settings.live_export_interval_seconds
+                ),
+            )
+        )
         self.polling_service = PollingService(
             self.device_manager,
             publish_interval_seconds=settings.publish_interval_seconds,

@@ -4,7 +4,7 @@ import re
 from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
-from time import sleep
+from time import monotonic, sleep
 from typing import TextIO
 
 from rig_control.data.experiment import ExperimentMetadata
@@ -15,6 +15,7 @@ from rig_control.data.serialization import (
     experiment_metadata_to_dict,
     measurement_record_to_dict,
 )
+from rig_control.data.export import export_experiment_files, export_wide_csv
 from rig_control.data.writer import ExperimentWriter
 from rig_control.models import Event
 
@@ -22,8 +23,23 @@ from rig_control.models import Event
 class DirectoryExperimentWriter(ExperimentWriter):
     """Write one experiment into a self-contained directory."""
 
-    def __init__(self, root_directory: str | Path) -> None:
+    def __init__(
+        self,
+        root_directory: str | Path,
+        *,
+        export_bin_seconds: float = 1.0,
+        live_export_interval_seconds: float = 60.0,
+    ) -> None:
         self._root_directory = Path(root_directory)
+        self._export_bin_seconds = self._validate_export_bin_seconds(
+            export_bin_seconds
+        )
+        self._live_export_interval_seconds = (
+            self._validate_live_export_interval_seconds(
+                live_export_interval_seconds
+            )
+        )
+        self._last_live_export_at: float | None = None
         self._experiment_directory: Path | None = None
         self._metadata: ExperimentMetadata | None = None
         self._measurement_file: TextIO | None = None
@@ -145,6 +161,7 @@ class DirectoryExperimentWriter(ExperimentWriter):
             self._measurement_file,
             (measurement_record_to_dict(record) for record in prepared),
         )
+        self._refresh_live_export_if_due()
 
     def write_event(self, event: Event) -> None:
         self._require_open()
@@ -170,6 +187,7 @@ class DirectoryExperimentWriter(ExperimentWriter):
             self._event_file,
             (event_to_dict(event) for event in prepared),
         )
+        self._refresh_live_export_if_due()
 
     def close_experiment(self) -> None:
         self._require_open()
@@ -194,6 +212,10 @@ class DirectoryExperimentWriter(ExperimentWriter):
                 ).isoformat(),
             },
         )
+        export_experiment_files(
+            experiment_directory,
+            bin_seconds=self._export_bin_seconds,
+        )
 
     def _require_open(self) -> None:
         if not self.is_open:
@@ -209,6 +231,32 @@ class DirectoryExperimentWriter(ExperimentWriter):
         if self._event_file is not None:
             self._event_file.close()
             self._event_file = None
+
+    def _refresh_live_export_if_due(self) -> None:
+        if self._live_export_interval_seconds <= 0:
+            return
+        if self._experiment_directory is None:
+            return
+        now = monotonic()
+        if (
+            self._last_live_export_at is not None
+            and now - self._last_live_export_at
+            < self._live_export_interval_seconds
+        ):
+            return
+        self._flush_files()
+        export_wide_csv(
+            self._experiment_directory,
+            bin_seconds=self._export_bin_seconds,
+        )
+        self._last_live_export_at = now
+
+    def _flush_files(self) -> None:
+        for file in (self._measurement_file, self._event_file):
+            if file is None:
+                continue
+            file.flush()
+            os.fsync(file.fileno())
 
     @staticmethod
     def _make_directory_name(
@@ -279,3 +327,21 @@ class DirectoryExperimentWriter(ExperimentWriter):
                 # existing JSON file open. Retrying preserves the
                 # atomic replacement rather than deleting it first.
                 sleep(0.05)
+
+    @staticmethod
+    def _validate_export_bin_seconds(value: float) -> float:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError("Export bin size must be a number")
+        number = float(value)
+        if number <= 0:
+            raise ValueError("Export bin size must be greater than zero")
+        return number
+
+    @staticmethod
+    def _validate_live_export_interval_seconds(value: float) -> float:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError("Live export interval must be a number")
+        number = float(value)
+        if number < 0:
+            raise ValueError("Live export interval cannot be negative")
+        return number

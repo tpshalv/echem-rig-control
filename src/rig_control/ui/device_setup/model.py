@@ -7,10 +7,25 @@ from rig_control.devices.alicat.configuration import (
     AlicatMfcConfiguration,
     configuration_from_profile as alicat_configuration_from_profile,
 )
+from rig_control.devices.ametek_asterion.configuration import (
+    AmetekAsterionConfiguration,
+    configuration_from_profile as ametek_asterion_configuration_from_profile,
+)
+from rig_control.devices.ametek_asterion.protocol import (
+    AmetekAsterionIdentity,
+    AmetekAsterionProtocol,
+)
 from rig_control.devices.keithley_2260b.configuration import (
     Keithley2260BConfiguration,
     VisaScpiConfiguration,
     configuration_from_profile as keithley_configuration_from_profile,
+)
+from rig_control.devices.keithley_2280s.configuration import (
+    Keithley2280SConfiguration,
+    configuration_from_profile as keithley_2280s_configuration_from_profile,
+)
+from rig_control.devices.keithley_2280s.protocol import (
+    Keithley2280SProtocol,
 )
 from rig_control.diagnostics.alicat import (
     AlicatDiagnosticResult,
@@ -18,14 +33,16 @@ from rig_control.diagnostics.alicat import (
     read_alicat_state,
     scan_alicat_bus,
 )
-from rig_control.diagnostics.keithley import identify_keithley
 from rig_control.diagnostics.esp32 import (
     Esp32DiscoveryResult,
     Esp32ReadinessResult,
     discover_esp32,
     read_esp32_state,
 )
-from rig_control.devices.keithley_2260b.protocol import KeithleyIdentity
+from rig_control.devices.keithley_2260b.protocol import (
+    Keithley2260BProtocol,
+    KeithleyIdentity,
+)
 from rig_control.rig_profile import (
     ConnectionDefinition,
     DeviceBackend,
@@ -36,6 +53,52 @@ from rig_control.rig_profile import (
 )
 from rig_control.rig_profile_writing import write_rig_profile
 from rig_control.rig_profile_loading import load_rig_profile
+from rig_control.transports.pyvisa_scpi import PyVisaScpiTransport
+from rig_control.transports.scpi import ScpiTransport
+from rig_control.transports.socket_scpi import SocketScpiTransport
+
+
+SCPI_POWER_SUPPLY_DRIVERS = {
+    "keithley_2260b": {
+        "display_name": "Keithley 2260B",
+        "connection_prefix": "keithley",
+        "manufacturer": "Keithley Instruments",
+        "model": "2260B-30-108",
+        "default_port": 2268,
+        "default_voltage": 30.0,
+        "default_current": 108.0,
+        "default_power": 1080.0,
+    },
+    "keithley_2280s": {
+        "display_name": "Keithley 2280S-32-6",
+        "connection_prefix": "keithley",
+        "manufacturer": "Keithley Instruments",
+        "model": "2280S-32-6",
+        "default_port": 5025,
+        "default_voltage": 32.0,
+        "default_current": 6.0,
+        "default_power": 192.0,
+    },
+    "ametek_asterion": {
+        "display_name": "AMETEK Sorensen Asterion DC",
+        "connection_prefix": "ametek_asterion",
+        "manufacturer": "AMETEK",
+        "model": "Asterion DC",
+        "default_port": 5025,
+        "default_voltage": 30.0,
+        "default_current": 5.0,
+        "default_power": 100.0,
+    },
+}
+
+SCPI_POWER_SUPPLY_DRIVER_LABELS = tuple(
+    str(metadata["display_name"])
+    for metadata in SCPI_POWER_SUPPLY_DRIVERS.values()
+)
+SCPI_POWER_SUPPLY_LABEL_TO_DRIVER = {
+    str(metadata["display_name"]): driver
+    for driver, metadata in SCPI_POWER_SUPPLY_DRIVERS.items()
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +185,7 @@ class AddKeithleyRequest:
     resource_name: str = ""
     visa_baud_rate: int = 9600
     poll_interval_seconds: float = 0.1
+    driver: str = "keithley_2260b"
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,12 +204,107 @@ type AlicatChecker = Callable[
 ]
 type AlicatScanner = Callable[[str, int], tuple[DiscoveredAlicat, ...]]
 type KeithleyChecker = Callable[
-    [Keithley2260BConfiguration],
-    KeithleyIdentity,
+    [Keithley2260BConfiguration | Keithley2280SConfiguration | AmetekAsterionConfiguration],
+    KeithleyIdentity | AmetekAsterionIdentity,
 ]
 type Esp32Checker = Callable[[RigProfile, str], Esp32ReadinessResult]
 type Esp32Scanner = Callable[[str, int, float], Esp32DiscoveryResult]
 type ProfileWriter = Callable[[RigProfile, str | Path], Path | None]
+
+
+def identify_scpi_power_supply(
+    configuration: (
+        Keithley2260BConfiguration
+        | Keithley2280SConfiguration
+        | AmetekAsterionConfiguration
+    ),
+    transport: ScpiTransport | None = None,
+) -> KeithleyIdentity | AmetekAsterionIdentity:
+    """Connect, request identification, and disconnect without control."""
+
+    driver, protocol = _driver_and_protocol_for_configuration(configuration)
+    connection = configuration.connection
+
+    if transport is None:
+        if hasattr(connection, "resource_name"):
+            transport = PyVisaScpiTransport(
+                connection.resource_name,
+                timeout_seconds=connection.timeout_seconds,
+                baud_rate=connection.baud_rate,
+            )
+        elif connection.host.strip().upper() == "CHANGE_ME":
+            raise ValueError(
+                "The power-supply IP address has not been configured. "
+                "Replace CHANGE_ME with the instrument's IP address."
+            )
+        else:
+            transport = SocketScpiTransport(
+                host=connection.host,
+                port=connection.port,
+                timeout_seconds=connection.timeout_seconds,
+            )
+
+    try:
+        transport.open()
+        identity = protocol.parse_identity(
+            transport.query(protocol.IDENTIFY_QUERY)
+        )
+    finally:
+        transport.close()
+
+    if not _identity_matches_driver(driver, identity):
+        display_name = SCPI_POWER_SUPPLY_DRIVERS[driver]["display_name"]
+        raise RuntimeError(
+            f"The connected instrument did not identify as {display_name}. "
+            f"Reported manufacturer={identity.manufacturer!r}, "
+            f"model={identity.model!r}, "
+            f"serial_number={identity.serial_number!r}."
+        )
+
+    return identity
+
+
+def _driver_and_protocol_for_configuration(
+    configuration: (
+        Keithley2260BConfiguration
+        | Keithley2280SConfiguration
+        | AmetekAsterionConfiguration
+    ),
+) -> tuple[str, object]:
+    if isinstance(configuration, Keithley2280SConfiguration):
+        return "keithley_2280s", Keithley2280SProtocol
+    if isinstance(configuration, AmetekAsterionConfiguration):
+        return "ametek_asterion", AmetekAsterionProtocol
+    return "keithley_2260b", Keithley2260BProtocol
+
+
+def _identity_matches_driver(
+    driver: str,
+    identity: KeithleyIdentity | AmetekAsterionIdentity,
+) -> bool:
+    manufacturer = identity.manufacturer.upper()
+    model = identity.model.upper().removeprefix("MODEL ").strip()
+    if driver == "keithley_2260b":
+        return "KEITHLEY" in manufacturer and "2260B" in model
+    if driver == "keithley_2280s":
+        return "KEITHLEY" in manufacturer and model == "2280S-32-6"
+    if driver == "ametek_asterion":
+        vendor_ok = "AMETEK" in manufacturer or "SORENSEN" in manufacturer
+        model_ok = "ASTERION" in model or model.startswith("AST")
+        return vendor_ok and model_ok
+    return False
+
+
+def _configuration_from_profile_for_power_supply(
+    profile: RigProfile,
+    device_id: str,
+):
+    role = profile.get_role(device_id)
+    if role.driver == "keithley_2280s":
+        return keithley_2280s_configuration_from_profile(profile, device_id)
+    if role.driver == "ametek_asterion":
+        return ametek_asterion_configuration_from_profile(profile, device_id)
+    return keithley_configuration_from_profile(profile, device_id)
 
 
 class DeviceSetupViewModel:
@@ -159,7 +318,7 @@ class DeviceSetupViewModel:
         serial_port_provider: SerialPortProvider | None = None,
         alicat_checker: AlicatChecker = read_alicat_state,
         alicat_scanner: AlicatScanner = scan_alicat_bus,
-        keithley_checker: KeithleyChecker = identify_keithley,
+        keithley_checker: KeithleyChecker = identify_scpi_power_supply,
         esp32_checker: Esp32Checker = read_esp32_state,
         esp32_scanner: Esp32Scanner = discover_esp32,
         profile_writer: ProfileWriter = write_rig_profile,
@@ -419,8 +578,11 @@ class DeviceSetupViewModel:
             )
         if role.driver == "alicat":
             alicat_configuration_from_profile(validation_profile, device_id)
-        elif role.driver == "keithley_2260b":
-            keithley_configuration_from_profile(validation_profile, device_id)
+        elif role.driver in SCPI_POWER_SUPPLY_DRIVERS:
+            _configuration_from_profile_for_power_supply(
+                validation_profile,
+                device_id,
+            )
         elif role.driver in {"esp32_json", "esp32_dht11"}:
             if role.connection_id is None:
                 raise ValueError("ESP32 device requires a connection")
@@ -843,7 +1005,7 @@ class DeviceSetupViewModel:
                 )
             elif role.driver == "alicat":
                 result = self._check_alicat(device_id)
-            elif role.driver == "keithley_2260b":
+            elif role.driver in SCPI_POWER_SUPPLY_DRIVERS:
                 result = self._check_keithley(device_id)
             elif role.driver in {"esp32_json", "esp32_dht11", "lumel_re72"}:
                 diagnostic = self._esp32_checker(self._profile, device_id)
@@ -920,11 +1082,11 @@ class DeviceSetupViewModel:
         self,
         request: AddKeithleyRequest,
     ) -> ReadinessCheckResult:
-        """Identify a proposed Keithley, then save it on success."""
+        """Identify a proposed SCPI power supply, then save it on success."""
 
         try:
             candidate = self._profile_with_new_keithley(request)
-            configuration = keithley_configuration_from_profile(
+            configuration = _configuration_from_profile_for_power_supply(
                 candidate,
                 request.device_id.strip(),
             )
@@ -933,7 +1095,7 @@ class DeviceSetupViewModel:
         except Exception as error:
             return ReadinessCheckResult(
                 False,
-                "The Keithley was not added because its read-only "
+                "The power supply was not added because its read-only "
                 "identification or validation failed.",
                 f"{type(error).__name__}: {error}",
             )
@@ -945,7 +1107,7 @@ class DeviceSetupViewModel:
         )
         connection_target = (
             configuration.connection.resource_name
-            if isinstance(configuration.connection, VisaScpiConfiguration)
+            if hasattr(configuration.connection, "resource_name")
             else f"{configuration.connection.host}:"
             f"{configuration.connection.port}"
         )
@@ -1072,25 +1234,35 @@ class DeviceSetupViewModel:
     ) -> RigProfile:
         if not isinstance(request, AddKeithleyRequest):
             raise TypeError("request must be an AddKeithleyRequest")
+        if request.driver not in SCPI_POWER_SUPPLY_DRIVERS:
+            raise ValueError(
+                f"Unsupported power-supply driver {request.driver!r}"
+            )
         device_id, hardware_label = self._validate_new_device_identity(
             request.device_id,
             request.hardware_label,
         )
         method = request.connection_method.strip().casefold()
         if method not in {"ethernet", "visa"}:
-            raise ValueError("Keithley connection method must be Ethernet or VISA")
+            raise ValueError(
+                "Power-supply connection method must be Ethernet or VISA"
+            )
         host = request.host.strip()
         resource_name = request.resource_name.strip()
         if method == "visa":
             if not resource_name:
-                raise ValueError("Keithley VISA resource name cannot be empty")
+                raise ValueError(
+                    "Power-supply VISA resource name cannot be empty"
+                )
         else:
             if not host:
-                raise ValueError("Keithley host name or IP address cannot be empty")
+                raise ValueError(
+                    "Power-supply host name or IP address cannot be empty"
+                )
             if not isinstance(request.port, int) or isinstance(request.port, bool):
-                raise TypeError("Keithley port must be an integer")
+                raise TypeError("Power-supply port must be an integer")
             if not 1 <= request.port <= 65535:
-                raise ValueError("Keithley port must be between 1 and 65535")
+                raise ValueError("Power-supply port must be between 1 and 65535")
 
         numeric_limits = {
             "timeout": request.timeout_seconds,
@@ -1101,17 +1273,24 @@ class DeviceSetupViewModel:
         if not isinstance(request.visa_baud_rate, int) or isinstance(
             request.visa_baud_rate, bool
         ):
-            raise TypeError("Keithley VISA baud rate must be an integer")
+            raise TypeError("Power-supply VISA baud rate must be an integer")
         if request.visa_baud_rate <= 0:
-            raise ValueError("Keithley VISA baud rate must be greater than zero")
+            raise ValueError(
+                "Power-supply VISA baud rate must be greater than zero"
+            )
         for name, value in numeric_limits.items():
             if isinstance(value, bool) or not isinstance(value, (int, float)):
-                raise TypeError(f"Keithley {name} must be numeric")
+                raise TypeError(f"Power-supply {name} must be numeric")
             if value <= 0:
-                raise ValueError(f"Keithley {name} must be greater than zero")
+                raise ValueError(
+                    f"Power-supply {name} must be greater than zero"
+                )
 
         for role in self._profile.enabled_roles:
-            if role.driver != "keithley_2260b" or role.connection_id is None:
+            if (
+                role.driver not in SCPI_POWER_SUPPLY_DRIVERS
+                or role.connection_id is None
+            ):
                 continue
             connection = self._profile.get_connection(role.connection_id)
             existing_resource = connection.parameters.get("resource_name")
@@ -1130,7 +1309,7 @@ class DeviceSetupViewModel:
             )
             if duplicate:
                 raise ValueError(
-                    f"Keithley target "
+                    f"Power-supply target "
                     f"{resource_name if method == 'visa' else f'{host}:{request.port}'} "
                     "is already used "
                     f"by {role.device_id!r}"
@@ -1138,7 +1317,8 @@ class DeviceSetupViewModel:
 
         target = resource_name if method == "visa" else host
         connection_id = self._unique_connection_id(
-            f"keithley_{method}_" + re.sub(
+            f"{SCPI_POWER_SUPPLY_DRIVERS[request.driver]['connection_prefix']}_{method}_"
+            + re.sub(
                 r"[^a-z0-9]+",
                 "_",
                 target.casefold(),
@@ -1175,13 +1355,15 @@ class DeviceSetupViewModel:
             device_id=device_id,
             friendly_name=hardware_label,
             capability=DeviceCapability.DC_POWER_SUPPLY,
-            driver="keithley_2260b",
+            driver=request.driver,
             backend=DeviceBackend.REAL,
             required=True,
             enabled=True,
             expected_identity=ExpectedDeviceIdentity(
-                manufacturer="Keithley Instruments",
-                model="2260B-30-108",
+                manufacturer=str(
+                    SCPI_POWER_SUPPLY_DRIVERS[request.driver]["manufacturer"]
+                ),
+                model=str(SCPI_POWER_SUPPLY_DRIVERS[request.driver]["model"]),
             ),
             connection_id=connection_id,
             settings=settings,
@@ -1265,14 +1447,16 @@ class DeviceSetupViewModel:
         )
 
     def _check_keithley(self, device_id: str) -> ReadinessCheckResult:
-        configuration = keithley_configuration_from_profile(
+        role = self._profile.get_role(device_id)
+        configuration = _configuration_from_profile_for_power_supply(
             self._profile,
             device_id,
         )
         identity = self._keithley_checker(configuration)
+        display_name = SCPI_POWER_SUPPLY_DRIVERS[role.driver]["display_name"]
         return ReadinessCheckResult(
             True,
-            f"Keithley {device_id!r} identified as {identity.model}, "
+            f"{display_name} {device_id!r} identified as {identity.model}, "
             f"serial {identity.serial_number}.",
             f"Manufacturer: {identity.manufacturer}; firmware: "
             f"{identity.firmware_version}",

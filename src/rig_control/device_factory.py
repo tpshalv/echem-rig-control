@@ -9,10 +9,19 @@ from rig_control.devices.alicat.configuration import (
 from rig_control.devices.alicat.driver import AlicatMassFlowController
 from rig_control.devices.alicat.meter import AlicatMassFlowMeter
 from rig_control.devices.alicat.protocol import AlicatAsciiProtocolClient
+from rig_control.devices.ametek_asterion.configuration import (
+    VisaScpiConfiguration as AsterionVisaScpiConfiguration,
+    configuration_from_profile as ametek_asterion_configuration_from_profile,
+)
+from rig_control.devices.ametek_asterion.driver import AmetekAsterion
 from rig_control.devices.keithley_2260b.configuration import (
     configuration_from_profile as keithley_configuration_from_profile,
 )
 from rig_control.devices.keithley_2260b.driver import Keithley2260B
+from rig_control.devices.keithley_2280s.configuration import (
+    configuration_from_profile as keithley_2280s_configuration_from_profile,
+)
+from rig_control.devices.keithley_2280s.driver import Keithley2280S
 from rig_control.devices.manager import DeviceManager
 from rig_control.devices.esp32_controller import Esp32Controller
 from rig_control.devices.esp32_bus import Esp32Bus
@@ -118,9 +127,13 @@ def _create_device(
     if role.backend is DeviceBackend.REAL:
         if (
             role.capability is DeviceCapability.DC_POWER_SUPPLY
-            and role.driver == "keithley_2260b"
+            and role.driver in {
+                "keithley_2260b",
+                "keithley_2280s",
+                "ametek_asterion",
+            }
         ):
-            return _create_real_keithley(profile, role)
+            return _create_real_scpi_power_supply(profile, role)
 
         if (
             role.capability in {
@@ -222,19 +235,32 @@ def _create_device(
     )
 
 
-def _create_real_keithley(
+def _create_real_scpi_power_supply(
     profile: RigProfile,
     role: DeviceRole,
-) -> Keithley2260B:
-    """Construct a disconnected Keithley from its profile settings."""
+) -> Keithley2260B | Keithley2280S | AmetekAsterion:
+    """Construct a disconnected SCPI power supply from profile settings."""
 
     try:
-        configuration = keithley_configuration_from_profile(
+        if role.driver == "keithley_2280s":
+            configuration_loader = keithley_2280s_configuration_from_profile
+            driver_type = Keithley2280S
+        elif role.driver == "ametek_asterion":
+            configuration_loader = ametek_asterion_configuration_from_profile
+            driver_type = AmetekAsterion
+        else:
+            configuration_loader = keithley_configuration_from_profile
+            driver_type = Keithley2260B
+
+        configuration = configuration_loader(
             profile,
             role.device_id,
         )
         connection = configuration.connection
-        if isinstance(connection, VisaScpiConfiguration):
+        if isinstance(
+            connection,
+            (VisaScpiConfiguration, AsterionVisaScpiConfiguration),
+        ):
             transport = PyVisaScpiTransport(
                 connection.resource_name,
                 timeout_seconds=connection.timeout_seconds,
@@ -246,14 +272,14 @@ def _create_real_keithley(
                 port=connection.port,
                 timeout_seconds=connection.timeout_seconds,
             )
-        return Keithley2260B(
+        return driver_type(
             device_id=configuration.device_id,
             limits=configuration.limits,
             transport=transport,
         )
     except (KeyError, TypeError, ValueError) as error:
         raise DeviceFactoryError(
-            f"Invalid settings for real Keithley device "
+            f"Invalid settings for real SCPI power supply "
             f"{role.device_id!r}: {type(error).__name__}: {error}. "
             "No connection was attempted."
         ) from error

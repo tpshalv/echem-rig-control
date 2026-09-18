@@ -1,5 +1,7 @@
 #include <ArduinoJson.h>
+#include <Adafruit_SHT31.h>
 #include <DHT.h>
+#include <Wire.h>
 
 // ============================================================
 // Firmware / protocol configuration
@@ -16,6 +18,16 @@ static const uint32_t SERIAL_TX_TIMEOUT_MS = 100;
 static const uint8_t DHT11_PIN = D3;
 static const uint8_t DHT11_TYPE = DHT11;
 static const uint32_t DHT11_MIN_READ_INTERVAL_MS = 1100;
+
+// SHT85 uses the Nano ESP32 default I2C pins and the SHT3x command set.
+// Its heater is an enable/disable feature, so the firmware wraps it as a
+// bounded, momentary action to prevent a host crash leaving it on.
+static const uint8_t SHT85_I2C_ADDRESS = 0x44;
+static const uint32_t SHT85_MIN_READ_INTERVAL_MS = 1000;
+static const uint32_t SHT85_SHORT_PULSE_MS = 100;
+static const uint32_t SHT85_LONG_PULSE_MS = 1000;
+static const uint32_t SHT85_SHORT_COOLDOWN_MS = 5000;
+static const uint32_t SHT85_LONG_COOLDOWN_MS = 10000;
 
 // Shared RS485 bus for up to two Lumel RE72 controllers. The Grove
 // MAX13478E interface handles transmit/receive direction automatically.
@@ -57,6 +69,37 @@ bool humidityGood = false;
 float lastTemperatureC = 0.0f;
 float lastHumidityRh = 0.0f;
 uint32_t lastDhtReadAttemptMs = 0;
+
+Adafruit_SHT31 sht85 = Adafruit_SHT31();
+bool sht85Present = false;
+bool sht85ReadAttempted = false;
+bool sht85TemperatureAvailable = false;
+bool sht85HumidityAvailable = false;
+bool sht85TemperatureGood = false;
+bool sht85HumidityGood = false;
+float lastSht85TemperatureC = 0.0f;
+float lastSht85HumidityRh = 0.0f;
+uint32_t lastSht85ReadAttemptMs = 0;
+
+enum Sht85HeaterState {
+  SHT85_HEATER_OFF,
+  SHT85_HEATER_LOW,
+  SHT85_HEATER_MEDIUM,
+  SHT85_HEATER_HIGH,
+  SHT85_HEATER_COOLDOWN
+};
+
+Sht85HeaterState sht85HeaterState = SHT85_HEATER_OFF;
+uint32_t sht85HeaterPulseStartedMs = 0;
+uint32_t sht85HeaterPulseDurationMs = 0;
+uint32_t sht85HeaterCooldownStartedMs = 0;
+uint32_t sht85HeaterCooldownDurationMs = 0;
+uint32_t sht85HeaterPulseCount = 0;
+uint32_t sht85HeaterLastEventId = 0;
+uint32_t sht85HeaterLastEventMs = 0;
+const char *sht85HeaterLastEvent = "none";
+const char *sht85HeaterLastPower = "off";
+uint32_t sht85HeaterLastDurationMs = 0;
 
 enum ModbusResult {
   MODBUS_OK,
@@ -100,6 +143,210 @@ void refreshDht11IfDue() {
     humidityAvailable = true;
     humidityGood = true;
   }
+}
+
+
+const char *sht85HeaterStateName() {
+  switch (sht85HeaterState) {
+    case SHT85_HEATER_LOW:
+      return "low";
+    case SHT85_HEATER_MEDIUM:
+      return "medium";
+    case SHT85_HEATER_HIGH:
+      return "high";
+    case SHT85_HEATER_COOLDOWN:
+      return "cooldown";
+    default:
+      return "off";
+  }
+}
+
+
+void recordSht85HeaterEvent(const char *eventName) {
+  sht85HeaterLastEventId++;
+  sht85HeaterLastEvent = eventName;
+  sht85HeaterLastEventMs = millis();
+}
+
+
+void updateSht85HeaterState() {
+  if (sht85HeaterState != SHT85_HEATER_COOLDOWN) {
+    return;
+  }
+
+  uint32_t elapsed = (uint32_t)(millis() - sht85HeaterCooldownStartedMs);
+  if (elapsed >= sht85HeaterCooldownDurationMs) {
+    sht85HeaterState = SHT85_HEATER_OFF;
+    recordSht85HeaterEvent("returned_to_off");
+  }
+}
+
+
+bool sht85QualityUncertain() {
+  updateSht85HeaterState();
+  return sht85HeaterState != SHT85_HEATER_OFF;
+}
+
+
+const char *sht85QualityReason() {
+  return sht85HeaterState == SHT85_HEATER_COOLDOWN
+    ? "heater_cooldown"
+    : "heater_active";
+}
+
+
+void addSht85HeaterStatus(JsonObject target) {
+  updateSht85HeaterState();
+  target["state"] = sht85HeaterStateName();
+  target["last_power"] = sht85HeaterLastPower;
+  target["last_duration_seconds"] = ((float)sht85HeaterLastDurationMs) / 1000.0f;
+  target["pulse_count"] = sht85HeaterPulseCount;
+  target["last_event"] = sht85HeaterLastEvent;
+  target["last_event_id"] = sht85HeaterLastEventId;
+  target["last_event_uptime_ms"] = sht85HeaterLastEventMs;
+  target["last_pulse_started_uptime_ms"] = sht85HeaterPulseStartedMs;
+}
+
+
+void refreshSht85IfDue() {
+  updateSht85HeaterState();
+  if (!sht85Present || sht85HeaterState != SHT85_HEATER_OFF) {
+    return;
+  }
+
+  uint32_t now = millis();
+  uint32_t elapsed = (uint32_t)(now - lastSht85ReadAttemptMs);
+
+  if (sht85ReadAttempted && elapsed < SHT85_MIN_READ_INTERVAL_MS) {
+    return;
+  }
+
+  sht85ReadAttempted = true;
+  lastSht85ReadAttemptMs = now;
+
+  float temperature = 0.0f;
+  float humidity = 0.0f;
+  if (!sht85.readBoth(&temperature, &humidity)) {
+    sht85TemperatureGood = false;
+    sht85HumidityGood = false;
+    return;
+  }
+
+  if (isnan(temperature)) {
+    sht85TemperatureGood = false;
+  } else {
+    lastSht85TemperatureC = temperature;
+    sht85TemperatureAvailable = true;
+    sht85TemperatureGood = true;
+  }
+
+  if (isnan(humidity)) {
+    sht85HumidityGood = false;
+  } else {
+    lastSht85HumidityRh = humidity;
+    sht85HumidityAvailable = true;
+    sht85HumidityGood = true;
+  }
+}
+
+
+bool legalSht85HeaterRequest(
+  const char *power,
+  float durationSeconds,
+  uint32_t &durationMs,
+  uint32_t &cooldownMs
+) {
+  if (durationSeconds > 0.09f && durationSeconds < 0.11f) {
+    durationMs = SHT85_SHORT_PULSE_MS;
+    cooldownMs = SHT85_SHORT_COOLDOWN_MS;
+  } else if (durationSeconds > 0.99f && durationSeconds < 1.01f) {
+    durationMs = SHT85_LONG_PULSE_MS;
+    cooldownMs = SHT85_LONG_COOLDOWN_MS;
+  } else {
+    return false;
+  }
+
+  if (strcmp(power, "low") == 0) {
+    return true;
+  }
+  if (strcmp(power, "medium") == 0) {
+    return true;
+  }
+  if (strcmp(power, "high") == 0) {
+    return true;
+  }
+
+  return false;
+}
+
+
+bool runSht85HeaterPulse(
+  const char *power,
+  float durationSeconds,
+  const String &replyTo
+) {
+  if (!sht85Present) {
+    sendError(replyTo, "sht85 is not present");
+    return false;
+  }
+
+  updateSht85HeaterState();
+  if (sht85HeaterState != SHT85_HEATER_OFF) {
+    sendError(replyTo, "sht85 heater is active or cooling down");
+    return false;
+  }
+
+  uint32_t durationMs = 0;
+  uint32_t cooldownMs = 0;
+  if (!legalSht85HeaterRequest(power, durationSeconds, durationMs, cooldownMs)) {
+    sendError(replyTo, "invalid sht85 heater power or duration");
+    return false;
+  }
+
+  if (strcmp(power, "low") == 0) {
+    sht85HeaterState = SHT85_HEATER_LOW;
+  } else if (strcmp(power, "medium") == 0) {
+    sht85HeaterState = SHT85_HEATER_MEDIUM;
+  } else {
+    sht85HeaterState = SHT85_HEATER_HIGH;
+  }
+  sht85HeaterPulseStartedMs = millis();
+  sht85HeaterPulseDurationMs = durationMs;
+  sht85HeaterLastPower = power;
+  sht85HeaterLastDurationMs = durationMs;
+  sht85HeaterPulseCount++;
+  recordSht85HeaterEvent("pulse_started");
+
+  sht85.heater(true);
+  delay(durationMs);
+  sht85.heater(false);
+
+  float temperature = 0.0f;
+  float humidity = 0.0f;
+  bool ok = sht85.readBoth(&temperature, &humidity);
+
+  if (ok) {
+    if (!isnan(temperature)) {
+      lastSht85TemperatureC = temperature;
+      sht85TemperatureAvailable = true;
+      sht85TemperatureGood = true;
+    }
+    if (!isnan(humidity)) {
+      lastSht85HumidityRh = humidity;
+      sht85HumidityAvailable = true;
+      sht85HumidityGood = true;
+    }
+  } else {
+    sht85TemperatureGood = false;
+    sht85HumidityGood = false;
+  }
+
+  sht85HeaterState = SHT85_HEATER_COOLDOWN;
+  sht85HeaterCooldownStartedMs = millis();
+  sht85HeaterCooldownDurationMs = cooldownMs;
+  recordSht85HeaterEvent("cooldown_started");
+
+  return true;
 }
 
 
@@ -263,13 +510,17 @@ ModbusResult modbusWriteSingleRegister(
 // ============================================================
 
 bool safeStateActive() {
-  // There are currently no controllable outputs.
-  return true;
+  updateSht85HeaterState();
+  return sht85HeaterState != SHT85_HEATER_LOW
+    && sht85HeaterState != SHT85_HEATER_MEDIUM
+    && sht85HeaterState != SHT85_HEATER_HIGH;
 }
 
 
 void applySafeState() {
-  // There are currently no controllable outputs.
+  if (sht85Present) {
+    sht85.heater(false);
+  }
 }
 
 
@@ -579,6 +830,32 @@ void handleCommand(const String &line) {
     humidityChannel["name"] = "humidity";
     humidityChannel["unit"] = "%RH";
 
+    JsonObject sht85Device = devices.add<JsonObject>();
+    sht85Device["id"] = "esp32_sht85";
+    sht85Device["kind"] = "sht85";
+    sht85Device["label"] = "SHT85 temperature and humidity";
+    sht85Device["recommended_poll_interval_seconds"] = 1.0;
+    sht85Device["present"] = sht85Present;
+    JsonArray sht85Channels = sht85Device["channels"].to<JsonArray>();
+    JsonObject sht85Temperature = sht85Channels.add<JsonObject>();
+    sht85Temperature["name"] = "temperature";
+    sht85Temperature["unit"] = "degC";
+    JsonObject sht85Humidity = sht85Channels.add<JsonObject>();
+    sht85Humidity["name"] = "humidity";
+    sht85Humidity["unit"] = "%RH";
+    JsonObject sht85Heater = sht85Channels.add<JsonObject>();
+    sht85Heater["name"] = "heater";
+    sht85Heater["unit"] = "state";
+    sht85Heater["control"] = "momentary";
+    JsonArray sht85HeaterAllowed = sht85Heater["allowed_values"].to<JsonArray>();
+    sht85HeaterAllowed.add("off");
+    sht85HeaterAllowed.add("low");
+    sht85HeaterAllowed.add("medium");
+    sht85HeaterAllowed.add("high");
+    JsonArray sht85HeaterDurations = sht85Heater["allowed_duration_seconds"].to<JsonArray>();
+    sht85HeaterDurations.add(0.1);
+    sht85HeaterDurations.add(1.0);
+
     // Probe the two planned RE72 slave addresses by reading controller
     // status. A missing second controller is normal and is simply omitted.
     for (uint8_t slave : RE72_PROBE_ADDRESSES) {
@@ -591,7 +868,19 @@ void handleCommand(const String &line) {
       }
     }
 
-    out["outputs"].to<JsonArray>();
+    JsonArray outputs = out["outputs"].to<JsonArray>();
+    JsonObject heaterOutput = outputs.add<JsonObject>();
+    heaterOutput["device_id"] = "esp32_sht85";
+    heaterOutput["name"] = "heater";
+    heaterOutput["kind"] = "momentary";
+    JsonArray allowedValues = heaterOutput["allowed_values"].to<JsonArray>();
+    allowedValues.add("off");
+    allowedValues.add("low");
+    allowedValues.add("medium");
+    allowedValues.add("high");
+    JsonArray allowedDurations = heaterOutput["allowed_duration_seconds"].to<JsonArray>();
+    allowedDurations.add(0.1);
+    allowedDurations.add(1.0);
 
     sendOk(messageId, out);
     return;
@@ -631,7 +920,9 @@ void handleCommand(const String &line) {
 
     JsonDocument out;
 
-    out["outputs"].to<JsonObject>();
+    JsonObject outputs = out["outputs"].to<JsonObject>();
+    JsonObject sht85Status = outputs["esp32_sht85.heater"].to<JsonObject>();
+    addSht85HeaterStatus(sht85Status);
 
     out["safe_state_active"] =
       safeStateActive();
@@ -655,11 +946,13 @@ void handleCommand(const String &line) {
   if (strcmp(commandName, "read_sensors") == 0) {
 
     refreshDht11IfDue();
+    refreshSht85IfDue();
 
     JsonDocument out;
     JsonArray channels = out["channels"].to<JsonArray>();
 
     JsonObject temperature = channels.add<JsonObject>();
+    temperature["device_id"] = "esp32_dht11";
     temperature["name"] = "temperature";
     if (temperatureAvailable) {
       temperature["value"] = lastTemperatureC;
@@ -676,6 +969,7 @@ void handleCommand(const String &line) {
     }
 
     JsonObject humidity = channels.add<JsonObject>();
+    humidity["device_id"] = "esp32_dht11";
     humidity["name"] = "humidity";
     if (humidityAvailable) {
       humidity["value"] = lastHumidityRh;
@@ -691,6 +985,98 @@ void handleCommand(const String &line) {
       humidity["quality"] = "good";
     }
 
+    JsonObject sht85Temperature = channels.add<JsonObject>();
+    sht85Temperature["device_id"] = "esp32_sht85";
+    sht85Temperature["name"] = "temperature";
+    if (sht85TemperatureAvailable) {
+      sht85Temperature["value"] = lastSht85TemperatureC;
+    } else {
+      sht85Temperature["value"] = nullptr;
+    }
+    sht85Temperature["unit"] = "degC";
+    if (!sht85Present || !sht85TemperatureGood) {
+      sht85Temperature["quality"] = "bad";
+    } else if (sht85QualityUncertain()) {
+      sht85Temperature["quality"] = "uncertain";
+      sht85Temperature["quality_reason"] = sht85QualityReason();
+    } else if (lastSht85TemperatureC < -40.0f || lastSht85TemperatureC > 125.0f) {
+      sht85Temperature["quality"] = "uncertain";
+    } else {
+      sht85Temperature["quality"] = "good";
+    }
+
+    JsonObject sht85Humidity = channels.add<JsonObject>();
+    sht85Humidity["device_id"] = "esp32_sht85";
+    sht85Humidity["name"] = "humidity";
+    if (sht85HumidityAvailable) {
+      sht85Humidity["value"] = lastSht85HumidityRh;
+    } else {
+      sht85Humidity["value"] = nullptr;
+    }
+    sht85Humidity["unit"] = "%RH";
+    if (!sht85Present || !sht85HumidityGood) {
+      sht85Humidity["quality"] = "bad";
+    } else if (sht85QualityUncertain()) {
+      sht85Humidity["quality"] = "uncertain";
+      sht85Humidity["quality_reason"] = sht85QualityReason();
+    } else if (lastSht85HumidityRh < 0.0f || lastSht85HumidityRh > 100.0f) {
+      sht85Humidity["quality"] = "uncertain";
+    } else {
+      sht85Humidity["quality"] = "good";
+    }
+
+    JsonObject sht85Heater = channels.add<JsonObject>();
+    sht85Heater["device_id"] = "esp32_sht85";
+    sht85Heater["name"] = "heater";
+    sht85Heater["value"] = sht85HeaterStateName();
+    sht85Heater["unit"] = "state";
+    JsonObject heaterStatus = sht85Heater["heater_status"].to<JsonObject>();
+    addSht85HeaterStatus(heaterStatus);
+
+    sendOk(messageId, out);
+    return;
+  }
+
+
+  // ==========================================================
+  // sht85_heater / run_heater - momentary SHT85 heater pulse
+  // ==========================================================
+
+  if (
+    strcmp(commandName, "sht85_heater") == 0 ||
+    strcmp(commandName, "run_heater") == 0
+  ) {
+    const char *power = payload["power"].as<const char *>();
+    if (power == nullptr) {
+      power = payload["state"].as<const char *>();
+    }
+    if (power == nullptr) {
+      sendError(messageId, "missing SHT85 heater power");
+      return;
+    }
+
+    if (strcmp(power, "off") == 0) {
+      updateSht85HeaterState();
+      JsonDocument out;
+      JsonObject heater = out["heater"].to<JsonObject>();
+      addSht85HeaterStatus(heater);
+      sendOk(messageId, out);
+      return;
+    }
+
+    float durationSeconds = strcmp(power, "high") == 0 ? 1.0f : 0.1f;
+    if (payload["duration_seconds"].is<float>() || payload["duration_seconds"].is<int>()) {
+      durationSeconds = payload["duration_seconds"].as<float>();
+    }
+
+    bool ok = runSht85HeaterPulse(power, durationSeconds, messageId);
+    if (!ok) {
+      return;
+    }
+
+    JsonDocument out;
+    JsonObject heater = out["heater"].to<JsonObject>();
+    addSht85HeaterStatus(heater);
     sendOk(messageId, out);
     return;
   }
@@ -1003,6 +1389,12 @@ void setup() {
     RS485_RX_PIN,
     RS485_TX_PIN
   );
+
+  Wire.begin();
+  sht85Present = sht85.begin(SHT85_I2C_ADDRESS);
+  if (sht85Present) {
+    sht85.heater(false);
+  }
 
   dht.begin();
 

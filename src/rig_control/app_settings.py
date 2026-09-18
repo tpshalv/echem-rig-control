@@ -27,6 +27,15 @@ def _positive_number(value: object) -> AppSettingValue:
     return number
 
 
+def _non_negative_number(value: object) -> AppSettingValue:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError("must be a number")
+    number = float(value)
+    if not isfinite(number) or number < 0:
+        raise ValueError("must be finite and zero or greater")
+    return number
+
+
 def _history_limit(value: object) -> AppSettingValue:
     if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError("must be an integer")
@@ -73,6 +82,26 @@ SETTING_DEFINITIONS = (
         description="Folder initially offered when starting an experiment recording.",
         default=str(experiments_directory()),
         validator=_non_empty_text,
+    ),
+    SettingDefinition(
+        key="export_bin_seconds",
+        label="Export averaging bin (seconds)",
+        description=(
+            "Time bin used for the wide CSV and Excel Data sheet. Multiple "
+            "readings in a bin are averaged; missing signals remain blank."
+        ),
+        default=1.0,
+        validator=_positive_number,
+    ),
+    SettingDefinition(
+        key="live_export_interval_seconds",
+        label="Live CSV refresh interval (seconds)",
+        description=(
+            "How often the wide CSV is refreshed while recording. Use 60 or "
+            "120 for long runs; set to 0 to only export when recording stops."
+        ),
+        default=60.0,
+        validator=_non_negative_number,
     ),
     SettingDefinition(
         key="technical_log_path",
@@ -174,6 +203,14 @@ class AppSettings:
     @property
     def default_output_directory(self) -> str:
         return str(self.values["default_output_directory"])
+
+    @property
+    def export_bin_seconds(self) -> float:
+        return float(self.values["export_bin_seconds"])
+
+    @property
+    def live_export_interval_seconds(self) -> float:
+        return float(self.values["live_export_interval_seconds"])
 
     @property
     def trend_history_readings(self) -> int:

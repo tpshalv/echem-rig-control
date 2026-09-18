@@ -21,6 +21,8 @@ def test_defaults_are_safe_and_explicit() -> None:
     assert settings.technical_log_path == str(logs_directory() / "rig-control.log")
     assert settings.trend_history_readings == 500
     assert settings.default_output_directory == str(experiments_directory())
+    assert settings.export_bin_seconds == 1.0
+    assert settings.live_export_interval_seconds == 60.0
     assert settings.power_supply_default_current_amps == 20.0
     assert settings.power_supply_default_voltage_volts == 10.0
     assert settings.power_supply_high_current_mode is False
@@ -65,6 +67,8 @@ def test_settings_round_trip_and_backup(tmp_path: Path) -> None:
             "publish_interval_seconds": 0.2,
             "technical_log_path": "other/app.log",
             "default_output_directory": "recordings",
+            "export_bin_seconds": 0.5,
+            "live_export_interval_seconds": 120.0,
         },
     )
     path = tmp_path / "app-settings.toml"
@@ -74,3 +78,13 @@ def test_settings_round_trip_and_backup(tmp_path: Path) -> None:
 
     assert load_app_settings(path) == settings
     assert backup == tmp_path / "app-settings.toml.bak"
+
+
+def test_live_export_refresh_can_be_disabled() -> None:
+    settings = AppSettings(
+        "manual",
+        "Manual export",
+        {"live_export_interval_seconds": 0},
+    )
+
+    assert settings.live_export_interval_seconds == 0.0

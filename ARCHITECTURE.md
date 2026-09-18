@@ -148,6 +148,7 @@ Instrument-specific drivers translate generic operations into commands understoo
 Examples include:
 
 - Keithley 2260B driver.
+- Keithley 2280S-32-6 driver (reuses the 2260B lifecycle and transports).
 - Future Alicat MFC driver.
 - Future potentiostat driver.
 - ESP32-connected sensor implementations.
@@ -162,6 +163,22 @@ A driver is responsible for:
 - Requesting a safe state where supported.
 
 A driver should not contain GUI layout or recipe logic.
+
+The 2280S profile driver identifier is `keithley_2280s`. It accepts the same
+`socket_scpi` and `visa_scpi` connection settings as the 2260B; connection
+addresses and ports remain in the rig profile. Its immutable hardware ratings
+(32 V, 6 A, 192 W) are separate from profile `PowerSupplyLimits` and run limits.
+Both hardware and rig limits are enforced on connection, setpoint changes and
+output enable, including the worst-case power `voltage_setpoint * current_limit`.
+Like the 2260B, cached state assumes exclusive software control of the supply.
+
+The [2280 reference manual, 077085503](https://download.tek.com/manual/077085503_2280_Ref_Mar_20191.pdf)
+confirms the shared source and voltage/current measurement commands. The 2280S
+uses `OUTP:STAT`, configures `FORM:ELEM "READ"` for numeric replies, and disables
+output delays for prompt shutdown. Measurements require output enabled; the
+driver reports an error when it is off. The manual permits 6.1 A programming,
+but this driver deliberately enforces the rated 6 A. No `MEAS:POW:DC?` command
+is exposed because the manual does not list a power measurement function.
 
 ## ESP32 subsystem
 

@@ -15,6 +15,9 @@ from rig_control.ui.device_setup.model import (
     DeviceSetupViewModel,
     EditDeviceRequest,
     ReadinessCheckResult,
+    SCPI_POWER_SUPPLY_DRIVER_LABELS,
+    SCPI_POWER_SUPPLY_DRIVERS,
+    SCPI_POWER_SUPPLY_LABEL_TO_DRIVER,
 )
 
 
@@ -883,41 +886,106 @@ class DeviceSetupWindow:
         dialog.resizable(False, False)
         frame = ttk.Frame(dialog, padding=14)
         frame.grid(row=0, column=0, sticky="nsew")
+        frame.columnconfigure(1, weight=1)
         ttk.Label(
             frame,
             text="What type of device do you want to add?",
             font=SECTION_FONT,
-        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
-        selector = ttk.Combobox(
+        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 10))
+
+        categories = {
+            "Power supply": tuple(SCPI_POWER_SUPPLY_DRIVER_LABELS),
+            "Mass-flow device": ("Alicat mass-flow device",),
+            "Peristaltic pump": ("No direct peristaltic pump drivers installed",),
+            "Analytical instrument": ("No direct analytical instrument drivers installed",),
+            "Controller / autodiscovery": ("ESP32 controller (auto-discover)",),
+            "Gas chromatograph": ("No direct GC drivers installed",),
+            "Potentiostat": ("No direct potentiostat drivers installed",),
+            "Hotplate": ("No direct hotplate drivers installed",),
+        }
+        unavailable = {
+            "No direct peristaltic pump drivers installed",
+            "No direct analytical instrument drivers installed",
+            "No direct GC drivers installed",
+            "No direct potentiostat drivers installed",
+            "No direct hotplate drivers installed",
+        }
+
+        ttk.Label(frame, text="Category").grid(
+            row=1,
+            column=0,
+            sticky="w",
+            padx=(0, 10),
+            pady=3,
+        )
+        category_selector = ttk.Combobox(
             frame,
             state="readonly",
-            values=(
-                "Alicat mass-flow device",
-                "Keithley 2260B",
-                "ESP32 controller (auto-discover)",
-            ),
+            values=tuple(categories),
             width=34,
         )
-        selector.current(0)
-        selector.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 12))
+        category_selector.current(0)
+        category_selector.grid(row=1, column=1, columnspan=2, sticky="ew", pady=3)
+
+        ttk.Label(frame, text="Specific device").grid(
+            row=2,
+            column=0,
+            sticky="w",
+            padx=(0, 10),
+            pady=3,
+        )
+        device_selector = ttk.Combobox(
+            frame,
+            state="readonly",
+            width=34,
+        )
+        device_selector.grid(row=2, column=1, columnspan=2, sticky="ew", pady=3)
+        note = ttk.Label(frame, text="", wraplength=430)
+        note.grid(row=3, column=0, columnspan=3, sticky="w", pady=(8, 12))
+
+        def update_device_options(*_args: object) -> None:
+            values = categories[category_selector.get()]
+            device_selector.configure(values=values)
+            device_selector.current(0)
+            is_unavailable = values[0] in unavailable
+            note.configure(
+                text=(
+                    "No direct driver is available for this category yet. "
+                    "Once a driver is added, its specific brand/model/range "
+                    "will appear in the list above."
+                    if is_unavailable
+                    else "Choose the broad category first, then the specific "
+                    "device or discovery path to add."
+                )
+            )
+            continue_button.configure(
+                state="disabled" if is_unavailable else "normal"
+            )
 
         def continue_to_form() -> None:
-            selected = selector.get()
+            selected = device_selector.get()
             dialog.destroy()
-            if selected == "Keithley 2260B":
-                self._open_add_keithley()
+            if selected in SCPI_POWER_SUPPLY_LABEL_TO_DRIVER:
+                self._open_add_keithley(
+                    SCPI_POWER_SUPPLY_LABEL_TO_DRIVER[selected]
+                )
             elif selected == "ESP32 controller (auto-discover)":
                 self._open_add_esp32()
             else:
                 self._open_scan_alicat()
 
         ttk.Button(frame, text="Cancel", command=dialog.destroy).grid(
-            row=2, column=0, padx=(0, 8)
+            row=4, column=1, padx=(0, 8), sticky="e"
         )
-        ttk.Button(frame, text="Continue", command=continue_to_form).grid(
-            row=2, column=1
+        continue_button = ttk.Button(
+            frame,
+            text="Continue",
+            command=continue_to_form,
         )
-        selector.focus_set()
+        continue_button.grid(row=4, column=2, sticky="e")
+        category_selector.bind("<<ComboboxSelected>>", update_device_options)
+        update_device_options()
+        category_selector.focus_set()
 
     def _open_add_esp32(self) -> None:
         dialog = tk.Toplevel(self._root)
@@ -1396,9 +1464,9 @@ class DeviceSetupWindow:
         entries["Device ID"].focus_set()
         entries["Device ID"].selection_range(0, "end")
 
-    def _open_add_keithley(self) -> None:
+    def _open_add_keithley(self, initial_driver: str = "keithley_2260b") -> None:
         dialog = tk.Toplevel(self._root)
-        dialog.title("Add Keithley 2260B")
+        dialog.title("Add SCPI power supply")
         dialog.transient(self._root)
         dialog.grab_set()
         dialog.resizable(False, False)
@@ -1406,7 +1474,9 @@ class DeviceSetupWindow:
         form = ttk.Frame(dialog, padding=14)
         form.grid(row=0, column=0, sticky="nsew")
         form.columnconfigure(1, weight=1)
+        initial_metadata = SCPI_POWER_SUPPLY_DRIVERS[initial_driver]
         fields = (
+            ("Power supply model", initial_metadata["display_name"]),
             ("Device ID", "main_power_supply"),
             ("Hardware label", "Main power supply"),
             ("Purpose (optional)", "Electrolysis supply"),
@@ -1414,11 +1484,11 @@ class DeviceSetupWindow:
             ("VISA resource", "ASRL4::INSTR"),
             ("VISA baud rate", "9600"),
             ("IP address or host name", ""),
-            ("SCPI port", "2268"),
+            ("SCPI port", str(initial_metadata["default_port"])),
             ("Timeout (seconds)", "5"),
-            ("Maximum voltage (V)", "30"),
-            ("Maximum current (A)", "108"),
-            ("Maximum power (W)", "1080"),
+            ("Maximum voltage (V)", f"{initial_metadata['default_voltage']:g}"),
+            ("Maximum current (A)", f"{initial_metadata['default_current']:g}"),
+            ("Maximum power (W)", f"{initial_metadata['default_power']:g}"),
             ("Measurement interval (seconds)", "0.1"),
         )
         entries: dict[str, ttk.Entry | ttk.Combobox] = {}
@@ -1432,7 +1502,15 @@ class DeviceSetupWindow:
                 padx=(0, 10),
                 pady=4,
             )
-            if label == "Connection method (Ethernet or VISA)":
+            if label == "Power supply model":
+                entry = ttk.Combobox(
+                    form,
+                    width=29,
+                    values=SCPI_POWER_SUPPLY_DRIVER_LABELS,
+                    state="readonly",
+                )
+                entry.set(str(default))
+            elif label == "Connection method (Ethernet or VISA)":
                 entry = ttk.Combobox(
                     form,
                     width=29,
@@ -1450,6 +1528,29 @@ class DeviceSetupWindow:
         visa_fields = ("VISA resource", "VISA baud rate")
         ethernet_fields = ("IP address or host name", "SCPI port")
 
+        def update_model_defaults(*_args: object) -> None:
+            driver = SCPI_POWER_SUPPLY_LABEL_TO_DRIVER[
+                entries["Power supply model"].get()
+            ]
+            metadata = SCPI_POWER_SUPPLY_DRIVERS[driver]
+            entries["SCPI port"].delete(0, "end")
+            entries["SCPI port"].insert(0, str(metadata["default_port"]))
+            entries["Maximum voltage (V)"].delete(0, "end")
+            entries["Maximum voltage (V)"].insert(
+                0,
+                f"{metadata['default_voltage']:g}",
+            )
+            entries["Maximum current (A)"].delete(0, "end")
+            entries["Maximum current (A)"].insert(
+                0,
+                f"{metadata['default_current']:g}",
+            )
+            entries["Maximum power (W)"].delete(0, "end")
+            entries["Maximum power (W)"].insert(
+                0,
+                f"{metadata['default_power']:g}",
+            )
+
         def update_connection_fields(*_args: object) -> None:
             method = entries[
                 "Connection method (Ethernet or VISA)"
@@ -1463,6 +1564,10 @@ class DeviceSetupWindow:
                 getattr(labels[field], action)()
                 getattr(entries[field], action)()
 
+        entries["Power supply model"].bind(
+            "<<ComboboxSelected>>",
+            update_model_defaults,
+        )
         entries["Connection method (Ethernet or VISA)"].bind(
             "<<ComboboxSelected>>",
             update_connection_fields,
@@ -1521,6 +1626,9 @@ class DeviceSetupWindow:
                     poll_interval_seconds=float(
                         entries["Measurement interval (seconds)"].get().strip()
                     ),
+                    driver=SCPI_POWER_SUPPLY_LABEL_TO_DRIVER[
+                        entries["Power supply model"].get()
+                    ],
                 )
             except ValueError:
                 messagebox.showerror(
@@ -1543,14 +1651,14 @@ class DeviceSetupWindow:
             self.refresh()
             if result.succeeded:
                 messagebox.showinfo(
-                    "Keithley added",
+                    "Power supply added",
                     result.summary,
                     parent=dialog,
                 )
                 dialog.destroy()
             else:
                 messagebox.showerror(
-                    "Keithley not added",
+                    "Power supply not added",
                     result.summary + "\n\n" + result.technical_details,
                     parent=dialog,
                 )

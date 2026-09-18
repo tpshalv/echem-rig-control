@@ -1,5 +1,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
+from math import isfinite
+
 from rig_control.devices.power_supply import PowerSupplyLimits
 from rig_control.rig_profile import (
     ConfigurationValue,
@@ -7,6 +9,7 @@ from rig_control.rig_profile import (
     DeviceCapability,
     RigProfile,
 )
+
 
 @dataclass(frozen=True, slots=True)
 class SocketScpiConfiguration:
@@ -18,33 +21,17 @@ class SocketScpiConfiguration:
 
     def __post_init__(self) -> None:
         if not isinstance(self.host, str) or not self.host.strip():
-            raise ValueError(
-                "SCPI host name or IP address cannot be empty"
-            )
-
-        if not isinstance(self.port, int) or isinstance(
-            self.port,
-            bool,
-        ):
+            raise ValueError("SCPI host name or IP address cannot be empty")
+        if not isinstance(self.port, int) or isinstance(self.port, bool):
             raise TypeError("SCPI port must be an integer")
-
         if not 1 <= self.port <= 65535:
-            raise ValueError(
-                "SCPI port must be between 1 and 65535"
-            )
-
+            raise ValueError("SCPI port must be between 1 and 65535")
         if isinstance(self.timeout_seconds, bool) or not isinstance(
-            self.timeout_seconds,
-            (int, float),
+            self.timeout_seconds, (int, float)
         ):
-            raise TypeError(
-                "SCPI timeout must be an int or float"
-            )
-
+            raise TypeError("SCPI timeout must be an int or float")
         if self.timeout_seconds <= 0:
-            raise ValueError(
-                "SCPI timeout must be greater than zero"
-            )
+            raise ValueError("SCPI timeout must be greater than zero")
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,102 +58,71 @@ class VisaScpiConfiguration:
 
 
 @dataclass(frozen=True, slots=True)
-class Keithley2260BConfiguration:
-    """Validated settings needed to construct one Keithley 2260B."""
+class AmetekAsterionConfiguration:
+    """Profile connection and rig limits for one Asterion DC supply."""
 
     device_id: str
     connection: SocketScpiConfiguration | VisaScpiConfiguration
     limits: PowerSupplyLimits
 
     def __post_init__(self) -> None:
-        if (
-            not isinstance(self.device_id, str)
-            or not self.device_id.strip()
-        ):
-            raise ValueError("Keithley device ID cannot be empty")
-
+        if not isinstance(self.device_id, str) or not self.device_id.strip():
+            raise ValueError("Asterion device ID cannot be empty")
         if not isinstance(
             self.connection,
             (SocketScpiConfiguration, VisaScpiConfiguration),
         ):
             raise TypeError(
-                "Keithley connection must be a "
-                "SocketScpiConfiguration or VisaScpiConfiguration"
+                "Asterion connection must be a SocketScpiConfiguration "
+                "or VisaScpiConfiguration"
             )
-
         if not isinstance(self.limits, PowerSupplyLimits):
-            raise TypeError(
-                "Keithley limits must be PowerSupplyLimits"
-            )
+            raise TypeError("Asterion limits must be PowerSupplyLimits")
+        _validate_rig_limits(self.limits)
+
 
 def configuration_from_profile(
     profile: RigProfile,
     device_id: str,
-) -> Keithley2260BConfiguration:
-    """Create validated Keithley settings from one profile role."""
-
-    return _configuration_from_profile(
-        profile, device_id, driver="keithley_2260b",
-        configuration_type=Keithley2260BConfiguration,
-    )
-
-
-def _configuration_from_profile[T: Keithley2260BConfiguration](
-    profile: RigProfile,
-    device_id: str,
-    *,
-    driver: str,
-    configuration_type: type[T],
-) -> T:
-    """Shared socket/VISA profile validation for the Keithley supplies."""
+) -> AmetekAsterionConfiguration:
+    """Create validated Asterion settings from one profile role."""
 
     role = profile.get_role(device_id)
 
     if not role.enabled:
-        raise ValueError(
-            f"Keithley device role {device_id!r} is disabled"
-        )
-
+        raise ValueError(f"Asterion device role {device_id!r} is disabled")
     if role.backend is not DeviceBackend.REAL:
-        raise ValueError(
-            f"Keithley device role {device_id!r} is simulated"
-        )
-
+        raise ValueError(f"Asterion device role {device_id!r} is simulated")
     if role.capability is not DeviceCapability.DC_POWER_SUPPLY:
         raise ValueError(
-            f"Device role {device_id!r} is not configured as a "
-            "DC power supply"
+            f"Device role {device_id!r} is not configured as a DC power supply"
         )
-
-    if role.driver != driver:
+    if role.driver != "ametek_asterion":
         raise ValueError(
-            f"Device role {device_id!r} does not use the "
-            f"{driver} driver"
+            f"Device role {device_id!r} does not use the ametek_asterion driver"
         )
-
     if role.connection_id is None:
-        raise ValueError(
-            f"Keithley device role {device_id!r} has no connection"
-        )
+        raise ValueError(f"Asterion device role {device_id!r} has no connection")
 
     connection = profile.get_connection(role.connection_id)
 
     if connection.connection_type not in {"socket_scpi", "visa_scpi"}:
         raise ValueError(
-            f"Keithley connection {connection.connection_id!r} "
-            "must use connection type 'socket_scpi' or 'visa_scpi'"
+            f"Asterion connection {connection.connection_id!r} must use "
+            "connection type 'socket_scpi' or 'visa_scpi'"
         )
 
-    return configuration_type(
-        device_id=role.device_id,
-        connection=(VisaScpiConfiguration(
+    parsed_connection = (
+        VisaScpiConfiguration(
             resource_name=_require_text(
                 connection.parameters,
                 "resource_name",
                 f"connections.{connection.connection_id}.parameters.resource_name",
             ),
             timeout_seconds=_optional_number(
-                connection.parameters, "timeout_seconds", 5.0,
+                connection.parameters,
+                "timeout_seconds",
+                5.0,
                 f"connections.{connection.connection_id}.parameters.timeout_seconds",
             ),
             baud_rate=_require_integer(
@@ -174,49 +130,58 @@ def _configuration_from_profile[T: Keithley2260BConfiguration](
                 "baud_rate",
                 f"connections.{connection.connection_id}.parameters.baud_rate",
             ),
-        ) if connection.connection_type == "visa_scpi" else SocketScpiConfiguration(
+        )
+        if connection.connection_type == "visa_scpi"
+        else SocketScpiConfiguration(
             host=_require_text(
                 connection.parameters,
                 "host",
-                f"connections."
-                f"{connection.connection_id}.parameters.host",
+                f"connections.{connection.connection_id}.parameters.host",
             ),
             port=_require_integer(
                 connection.parameters,
                 "port",
-                f"connections."
-                f"{connection.connection_id}.parameters.port",
+                f"connections.{connection.connection_id}.parameters.port",
             ),
             timeout_seconds=_optional_number(
                 connection.parameters,
                 "timeout_seconds",
                 5.0,
-                f"connections."
-                f"{connection.connection_id}."
-                "parameters.timeout_seconds",
+                f"connections.{connection.connection_id}.parameters.timeout_seconds",
             ),
-        )),
+        )
+    )
+
+    return AmetekAsterionConfiguration(
+        device_id=role.device_id,
+        connection=parsed_connection,
         limits=PowerSupplyLimits(
             maximum_voltage=_require_number(
                 role.settings,
                 "maximum_voltage",
-                f"devices.{role.device_id}."
-                "settings.maximum_voltage",
+                f"devices.{role.device_id}.settings.maximum_voltage",
             ),
             maximum_current=_require_number(
                 role.settings,
                 "maximum_current",
-                f"devices.{role.device_id}."
-                "settings.maximum_current",
+                f"devices.{role.device_id}.settings.maximum_current",
             ),
             maximum_power=_require_number(
                 role.settings,
                 "maximum_power",
-                f"devices.{role.device_id}."
-                "settings.maximum_power",
+                f"devices.{role.device_id}.settings.maximum_power",
             ),
         ),
     )
+
+
+def _validate_rig_limits(limits: PowerSupplyLimits) -> None:
+    for name in ("maximum_voltage", "maximum_current", "maximum_power"):
+        value = getattr(limits, name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError(f"Configured {name} must be a number")
+        if not isfinite(value) or value <= 0:
+            raise ValueError(f"Configured {name} must be finite and positive")
 
 
 def _require_text(
@@ -225,18 +190,13 @@ def _require_text(
     setting_name: str,
 ) -> str:
     if key not in values:
-        raise ValueError(
-            f"Missing required configuration setting: {setting_name}"
-        )
+        raise ValueError(f"Missing required configuration setting: {setting_name}")
 
     value = values[key]
-
     if not isinstance(value, str) or not value.strip():
         raise TypeError(
-            f"Configuration setting {setting_name} "
-            "must be non-empty text"
+            f"Configuration setting {setting_name} must be non-empty text"
         )
-
     return value
 
 
@@ -246,18 +206,11 @@ def _require_integer(
     setting_name: str,
 ) -> int:
     if key not in values:
-        raise ValueError(
-            f"Missing required configuration setting: {setting_name}"
-        )
+        raise ValueError(f"Missing required configuration setting: {setting_name}")
 
     value = values[key]
-
     if not isinstance(value, int) or isinstance(value, bool):
-        raise TypeError(
-            f"Configuration setting {setting_name} "
-            "must be an integer"
-        )
-
+        raise TypeError(f"Configuration setting {setting_name} must be an integer")
     return value
 
 
@@ -267,21 +220,11 @@ def _require_number(
     setting_name: str,
 ) -> float:
     if key not in values:
-        raise ValueError(
-            f"Missing required configuration setting: {setting_name}"
-        )
+        raise ValueError(f"Missing required configuration setting: {setting_name}")
 
     value = values[key]
-
-    if isinstance(value, bool) or not isinstance(
-        value,
-        (int, float),
-    ):
-        raise TypeError(
-            f"Configuration setting {setting_name} "
-            "must be a number"
-        )
-
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"Configuration setting {setting_name} must be a number")
     return float(value)
 
 
@@ -293,5 +236,4 @@ def _optional_number(
 ) -> float:
     if key not in values:
         return default
-
     return _require_number(values, key, setting_name)

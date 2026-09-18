@@ -1,7 +1,13 @@
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 import re
+
+from rig_control.devices.tasi_ta612c.configuration import (
+    Ta612cConfiguration,
+    configuration_from_profile as ta612c_configuration_from_profile,
+)
+from rig_control.diagnostics.tasi_ta612c import read_probe
 
 from rig_control.devices.alicat.configuration import (
     AlicatMfcConfiguration,
@@ -26,6 +32,14 @@ from rig_control.devices.keithley_2280s.configuration import (
 )
 from rig_control.devices.keithley_2280s.protocol import (
     Keithley2280SProtocol,
+)
+from rig_control.devices.ohaus_guardian_5000.configuration import (
+    GuardianConfiguration,
+    configuration_from_profile as guardian_configuration_from_profile,
+)
+from rig_control.diagnostics.ohaus_guardian import (
+    GuardianDiagnosticResult,
+    read_guardian_state,
 )
 from rig_control.diagnostics.alicat import (
     AlicatDiagnosticResult,
@@ -130,6 +144,7 @@ class EditDeviceRequest:
     connection_parameters: dict[str, object]
     device_connection_parameters: dict[str, object]
     settings: dict[str, object]
+    channel_labels: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,6 +204,29 @@ class AddKeithleyRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class AddGuardianRequest:
+    device_id: str
+    hardware_label: str
+    purpose_label: str
+    port: str
+    timeout_seconds: float = 2.0
+    maximum_temperature: float | None = None
+    maximum_speed: float | None = None
+    poll_interval_seconds: float = 2.0
+
+
+@dataclass(frozen=True, slots=True)
+class AddTemperatureProbeRequest:
+    device_id: str
+    hardware_label: str
+    purpose_label: str
+    port: str
+    channels: str = "tc1,tc2,tc3,tc4"
+    timeout_seconds: float = 2.0
+    poll_interval_seconds: float = 1.0
+
+
+@dataclass(frozen=True, slots=True)
 class AddEsp32Request:
     port: str
     baud_rate: int = 115200
@@ -206,6 +244,10 @@ type AlicatScanner = Callable[[str, int], tuple[DiscoveredAlicat, ...]]
 type KeithleyChecker = Callable[
     [Keithley2260BConfiguration | Keithley2280SConfiguration | AmetekAsterionConfiguration],
     KeithleyIdentity | AmetekAsterionIdentity,
+]
+type GuardianChecker = Callable[
+    [GuardianConfiguration],
+    GuardianDiagnosticResult,
 ]
 type Esp32Checker = Callable[[RigProfile, str], Esp32ReadinessResult]
 type Esp32Scanner = Callable[[str, int, float], Esp32DiscoveryResult]
@@ -319,6 +361,8 @@ class DeviceSetupViewModel:
         alicat_checker: AlicatChecker = read_alicat_state,
         alicat_scanner: AlicatScanner = scan_alicat_bus,
         keithley_checker: KeithleyChecker = identify_scpi_power_supply,
+        guardian_checker: GuardianChecker = read_guardian_state,
+        temperature_probe_checker: Callable = read_probe,
         esp32_checker: Esp32Checker = read_esp32_state,
         esp32_scanner: Esp32Scanner = discover_esp32,
         profile_writer: ProfileWriter = write_rig_profile,
@@ -333,6 +377,8 @@ class DeviceSetupViewModel:
         self._alicat_checker = alicat_checker
         self._alicat_scanner = alicat_scanner
         self._keithley_checker = keithley_checker
+        self._guardian_checker = guardian_checker
+        self._temperature_probe_checker = temperature_probe_checker
         self._esp32_checker = esp32_checker
         self._esp32_scanner = esp32_scanner
         self._profile_writer = profile_writer
@@ -464,6 +510,11 @@ class DeviceSetupViewModel:
                 raise ValueError("Display name cannot be empty")
             if not str(path).strip():
                 raise ValueError("Profile file cannot be empty")
+            if selected_path.suffix.casefold() != ".toml":
+                selected_path = selected_path.with_name(
+                    selected_path.name + ".toml"
+                )
+            selected_path.parent.mkdir(parents=True, exist_ok=True)
             candidate = RigProfile(
                 profile_id=selected_id,
                 friendly_name=selected_name,
@@ -503,6 +554,7 @@ class DeviceSetupViewModel:
             connection_values,
             dict(role.connection_parameters),
             dict(role.settings),
+            dict(role.channel_labels),
         )
 
     def update_device(self, request: EditDeviceRequest) -> ReadinessCheckResult:
@@ -521,6 +573,7 @@ class DeviceSetupViewModel:
                 poll_interval_seconds=request.poll_interval_seconds,
                 connection_parameters=request.device_connection_parameters,
                 settings=request.settings,
+                channel_labels=request.channel_labels,
             )
             connections = self._profile.connections
             if role.connection_id is not None:
@@ -576,7 +629,9 @@ class DeviceSetupViewModel:
                     for item in profile.device_roles
                 ),
             )
-        if role.driver == "alicat":
+        if role.driver == "tasi_ta612c":
+            ta612c_configuration_from_profile(validation_profile, device_id)
+        elif role.driver == "alicat":
             alicat_configuration_from_profile(validation_profile, device_id)
         elif role.driver in SCPI_POWER_SUPPLY_DRIVERS:
             _configuration_from_profile_for_power_supply(
@@ -1007,6 +1062,18 @@ class DeviceSetupViewModel:
                 result = self._check_alicat(device_id)
             elif role.driver in SCPI_POWER_SUPPLY_DRIVERS:
                 result = self._check_keithley(device_id)
+            elif role.driver == "ohaus_guardian_5000":
+                result = self._check_guardian(device_id)
+            elif role.driver == "tasi_ta612c":
+                identity, readings = self._temperature_probe_checker(
+                    ta612c_configuration_from_profile(self._profile, device_id)
+                )
+                result = ReadinessCheckResult(
+                    True, f"{role.friendly_name} responded using the selected temperature-probe protocol.",
+                    f"Identity: {identity}; " + ", ".join(
+                        f"{reading.channel}={reading.measurement.value:g} degC" for reading in readings
+                    ),
+                )
             elif role.driver in {"esp32_json", "esp32_dht11", "lumel_re72"}:
                 diagnostic = self._esp32_checker(self._profile, device_id)
                 sensor_text = (
@@ -1122,6 +1189,61 @@ class DeviceSetupViewModel:
             f"Manufacturer: {identity.manufacturer}; firmware: "
             f"{identity.firmware_version}",
         )
+
+    def add_guardian_and_check(
+        self,
+        request: AddGuardianRequest,
+    ) -> ReadinessCheckResult:
+        """Read-only check a proposed Guardian hotplate, then save it on success."""
+
+        try:
+            candidate = self._profile_with_new_guardian(request)
+            configuration = guardian_configuration_from_profile(
+                candidate,
+                request.device_id.strip(),
+            )
+            diagnostic = self._guardian_checker(configuration)
+            backup = self._profile_writer(candidate, self._profile_path)
+        except Exception as error:
+            return ReadinessCheckResult(
+                False,
+                "The Guardian hotplate was not added because its "
+                "read-only check or validation failed.",
+                f"{type(error).__name__}: {error}",
+            )
+
+        self._profile = candidate
+        self._readiness[configuration.device_id] = "ready"
+        backup_text = (
+            f" Previous profile backed up to {backup}." if backup else ""
+        )
+        hardware_label = candidate.get_role(configuration.device_id).friendly_name
+        return ReadinessCheckResult(
+            True,
+            f"Added {hardware_label!r} as {configuration.device_id!r} on "
+            f"{configuration.port}. Read-only query confirmed model "
+            f"{diagnostic.identity.model}, serial "
+            f"{diagnostic.identity.serial_number}."
+            + backup_text,
+            f"Firmware: {diagnostic.identity.firmware_version}; mode: "
+            f"{diagnostic.mode.name}",
+        )
+
+    def add_temperature_probe_and_check(
+        self, request: AddTemperatureProbeRequest,
+    ) -> ReadinessCheckResult:
+        try:
+            candidate = self._profile_with_new_temperature_probe(request)
+            configuration = ta612c_configuration_from_profile(candidate, request.device_id.strip())
+            identity, readings = self._temperature_probe_checker(configuration)
+            backup = self._profile_writer(candidate, self._profile_path)
+        except Exception as error:
+            return ReadinessCheckResult(False, "The temperature probe was not added because its read-only check or validation failed.", f"{type(error).__name__}: {error}")
+        self._profile = candidate
+        self._readiness[configuration.device_id] = "ready"
+        label = candidate.get_role(configuration.device_id).friendly_name
+        values = ", ".join(f"{r.channel}={r.measurement.value:g} degC" for r in readings)
+        return ReadinessCheckResult(True, f"Added {label!r} as {configuration.device_id!r} on {configuration.port}.", f"Identity: {identity}; readings: {values}" + (f" Previous profile backed up to {backup}." if backup else ""))
 
     def _profile_with_new_alicat(
         self,
@@ -1375,6 +1497,113 @@ class DeviceSetupViewModel:
             device_roles=self._profile.device_roles + (role,),
         )
 
+    def _profile_with_new_guardian(
+        self,
+        request: AddGuardianRequest,
+    ) -> RigProfile:
+        if not isinstance(request, AddGuardianRequest):
+            raise TypeError("request must be an AddGuardianRequest")
+        device_id, hardware_label = self._validate_new_device_identity(
+            request.device_id,
+            request.hardware_label,
+        )
+        port = request.port.strip()
+        if not port:
+            raise ValueError("Guardian requires a serial port")
+        timeout = request.timeout_seconds
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+            raise TypeError("Guardian timeout must be numeric")
+        if timeout <= 0:
+            raise ValueError("Guardian timeout must be greater than zero")
+        for name, value in (
+            ("maximum temperature", request.maximum_temperature),
+            ("maximum speed", request.maximum_speed),
+        ):
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(f"Guardian {name} must be numeric")
+            if value <= 0:
+                raise ValueError(f"Guardian {name} must be greater than zero")
+
+        for role in self._profile.enabled_roles:
+            if role.driver != "ohaus_guardian_5000" or role.connection_id is None:
+                continue
+            connection = self._profile.get_connection(role.connection_id)
+            existing_port = connection.parameters.get("port")
+            if (
+                isinstance(existing_port, str)
+                and existing_port.casefold() == port.casefold()
+            ):
+                raise ValueError(
+                    f"Port {port!r} is already used by {role.device_id!r}"
+                )
+
+        connection_id = self._unique_connection_id(f"guardian_serial_{port}")
+        connection = ConnectionDefinition(
+            connection_id=connection_id,
+            connection_type="serial_text",
+            parameters={
+                "port": port,
+                "baud_rate": 9600,
+                "timeout_seconds": float(timeout),
+            },
+        )
+
+        settings: dict[str, object] = {"hardware_label": hardware_label}
+        if request.maximum_temperature is not None:
+            settings["maximum_temperature"] = float(request.maximum_temperature)
+        if request.maximum_speed is not None:
+            settings["maximum_speed"] = float(request.maximum_speed)
+        purpose = request.purpose_label.strip()
+        if purpose:
+            settings["purpose_label"] = purpose
+
+        role = DeviceRole(
+            device_id=device_id,
+            friendly_name=hardware_label,
+            capability=DeviceCapability.HOTPLATE_STIRRER,
+            driver="ohaus_guardian_5000",
+            backend=DeviceBackend.REAL,
+            required=True,
+            enabled=True,
+            expected_identity=ExpectedDeviceIdentity(manufacturer="OHAUS"),
+            connection_id=connection_id,
+            settings=settings,
+            poll_interval_seconds=request.poll_interval_seconds,
+        )
+        return replace(
+            self._profile,
+            connections=self._profile.connections + (connection,),
+            device_roles=self._profile.device_roles + (role,),
+        )
+
+    def _profile_with_new_temperature_probe(self, request: AddTemperatureProbeRequest) -> RigProfile:
+        if not isinstance(request, AddTemperatureProbeRequest):
+            raise TypeError("request must be an AddTemperatureProbeRequest")
+        device_id, hardware_label = self._validate_new_device_identity(request.device_id, request.hardware_label)
+        port = request.port.strip()
+        if not port:
+            raise ValueError("Temperature probe requires a serial port")
+        timeout = float(request.timeout_seconds)
+        if timeout <= 0:
+            raise ValueError("Temperature probe timeout must be positive")
+        channels = tuple(c.strip() for c in request.channels.split(","))
+        configuration = Ta612cConfiguration(device_id, port, timeout, channels)
+        for role in self._profile.enabled_roles:
+            if role.connection_id is None:
+                continue
+            connection = self._profile.get_connection(role.connection_id)
+            if role.driver == "tasi_ta612c" and str(connection.parameters.get("port", "")).casefold() == port.casefold():
+                raise ValueError(f"Port {port!r} is already used by {role.device_id!r}")
+        connection_id = self._unique_connection_id(f"thermocouple_serial_{port}")
+        connection = ConnectionDefinition(connection_id, "serial_binary", {"port": port, "baud_rate": 9600, "timeout_seconds": timeout})
+        settings = {"channels": ",".join(configuration.channels), "hardware_label": hardware_label}
+        if request.purpose_label.strip():
+            settings["purpose_label"] = request.purpose_label.strip()
+        role = DeviceRole(device_id, hardware_label, DeviceCapability.TEMPERATURE_SENSOR, "tasi_ta612c", connection_id=connection_id, settings=settings, system="Thermal", poll_interval_seconds=request.poll_interval_seconds)
+        return replace(self._profile, connections=self._profile.connections + (connection,), device_roles=self._profile.device_roles + (role,))
+
     def _find_alicat_connection(
         self,
         port: str,
@@ -1460,6 +1689,29 @@ class DeviceSetupViewModel:
             f"serial {identity.serial_number}.",
             f"Manufacturer: {identity.manufacturer}; firmware: "
             f"{identity.firmware_version}",
+        )
+
+    def _check_guardian(self, device_id: str) -> ReadinessCheckResult:
+        configuration = guardian_configuration_from_profile(
+            self._profile,
+            device_id,
+        )
+        diagnostic = self._guardian_checker(configuration)
+        readings = ", ".join(
+            f"{label} {value:g}{unit}"
+            for label, value, unit in (
+                ("plate", diagnostic.temperature, " degC"),
+                ("probe", diagnostic.probe_temperature, " degC"),
+                ("stir", diagnostic.stir_speed, " rpm"),
+            )
+            if value is not None
+        ) or "no channels reported"
+        return ReadinessCheckResult(
+            True,
+            f"Guardian {device_id!r} identified as {diagnostic.identity.model} "
+            f"(serial {diagnostic.identity.serial_number}): {readings}.",
+            f"Firmware: {diagnostic.identity.firmware_version}; mode: "
+            f"{diagnostic.mode.name}",
         )
 
     def _connection_description(self, device_id: str) -> str:

@@ -15,13 +15,17 @@ from rig_control.devices.keithley_2280s.configuration import (
     Keithley2280SConfiguration,
 )
 from rig_control.devices.keithley_2260b.protocol import KeithleyIdentity
+from rig_control.devices.ohaus_guardian_5000.configuration import GuardianConfiguration
+from rig_control.devices.ohaus_guardian_5000.protocol import GuardianIdentity, OperatingMode
 from rig_control.diagnostics.alicat import AlicatDiagnosticResult, DiscoveredAlicat
+from rig_control.diagnostics.ohaus_guardian import GuardianDiagnosticResult
 from rig_control.diagnostics.esp32 import Esp32ReadinessResult
 from rig_control.diagnostics.esp32 import Esp32DiscoveryResult
 from rig_control.rig_profile import DeviceBackend, DeviceCapability
 from rig_control.rig_profile_loading import load_rig_profile
 from rig_control.ui.device_setup.model import (
     AddAlicatRequest,
+    AddGuardianRequest,
     AddKeithleyRequest,
     AddEsp32Request,
     AlicatScanRow,
@@ -163,6 +167,18 @@ def test_new_profile_is_blank_saved_and_selected(tmp_path) -> None:
     assert model.profile.device_roles == ()
     assert model.profile.connections == ()
     assert load_rig_profile(destination) == model.profile
+
+
+def test_new_profile_adds_toml_extension_when_omitted(tmp_path) -> None:
+    model = make_model()
+    destination = tmp_path / "rig-profile.new-cell"
+
+    result = model.create_new_profile("new_cell", "New Cell", destination)
+
+    expected = tmp_path / "rig-profile.new-cell.toml"
+    assert result.succeeded is True
+    assert model.profile_path == expected
+    assert expected.exists()
 
 
 def test_new_profile_rejects_invalid_id_without_changing_selection(tmp_path) -> None:
@@ -956,3 +972,113 @@ def test_duplicate_keithley_network_target_is_rejected_before_check() -> None:
     assert result.succeeded is False
     assert "already used" in result.technical_details
     assert calls == 0
+
+
+def _guardian_diagnostic() -> GuardianDiagnosticResult:
+    return GuardianDiagnosticResult(
+        identity=GuardianIdentity("e-G52HSRDA", "123456", "1.01"),
+        mode=OperatingMode.IDLE,
+        temperature=95.5,
+        probe_temperature=None,
+        stir_speed=499.0,
+    )
+
+
+def test_checked_guardian_is_saved_to_new_local_profile(tmp_path) -> None:
+    profile_path = tmp_path / "rig-profile.toml"
+    empty_profile = replace(
+        load_rig_profile("rig-profile.example.toml"),
+        connections=(),
+        device_roles=(),
+    )
+
+    def check(configuration: GuardianConfiguration) -> GuardianDiagnosticResult:
+        assert configuration.port == "COM8"
+        return _guardian_diagnostic()
+
+    model = DeviceSetupViewModel(
+        empty_profile,
+        profile_path=profile_path,
+        guardian_checker=check,
+    )
+
+    result = model.add_guardian_and_check(
+        AddGuardianRequest(
+            device_id="hotplate",
+            hardware_label="Guardian 5000",
+            purpose_label="Electrolyte heating",
+            port="COM8",
+            maximum_temperature=300.0,
+            maximum_speed=1500.0,
+        )
+    )
+
+    assert result.succeeded is True
+    saved = load_rig_profile(profile_path)
+    role = saved.get_role("hotplate")
+    assert role.friendly_name == "Guardian 5000"
+    assert role.driver == "ohaus_guardian_5000"
+    assert role.settings["purpose_label"] == "Electrolyte heating"
+    assert role.settings["maximum_temperature"] == 300.0
+    assert role.settings["maximum_speed"] == 1500.0
+    assert role.poll_interval_seconds == 2.0
+    assert saved.get_connection(role.connection_id).parameters["port"] == "COM8"
+
+
+def test_failed_guardian_check_does_not_write_profile(tmp_path) -> None:
+    profile_path = tmp_path / "rig-profile.toml"
+    empty_profile = replace(
+        load_rig_profile("rig-profile.example.toml"),
+        connections=(),
+        device_roles=(),
+    )
+
+    def fail(_: GuardianConfiguration) -> GuardianDiagnosticResult:
+        raise TimeoutError("no response")
+
+    model = DeviceSetupViewModel(
+        empty_profile,
+        profile_path=profile_path,
+        guardian_checker=fail,
+    )
+
+    result = model.add_guardian_and_check(
+        AddGuardianRequest("hotplate", "Guardian 5000", "", "COM8")
+    )
+
+    assert result.succeeded is False
+    assert not profile_path.exists()
+
+
+def test_duplicate_guardian_port_is_rejected_without_check(tmp_path) -> None:
+    calls = 0
+
+    def check(_: GuardianConfiguration) -> GuardianDiagnosticResult:
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise AssertionError("check should not run again")
+        return _guardian_diagnostic()
+
+    empty_profile = replace(
+        load_rig_profile("rig-profile.example.toml"),
+        connections=(),
+        device_roles=(),
+    )
+    model = DeviceSetupViewModel(
+        empty_profile,
+        profile_path=tmp_path / "rig-profile.toml",
+        guardian_checker=check,
+    )
+    first = model.add_guardian_and_check(
+        AddGuardianRequest("hotplate", "Guardian 5000", "", "COM8")
+    )
+    assert first.succeeded is True
+
+    result = model.add_guardian_and_check(
+        AddGuardianRequest("hotplate_2", "Guardian 5000 B", "", "COM8")
+    )
+
+    assert result.succeeded is False
+    assert "already used" in result.technical_details
+    assert calls == 1

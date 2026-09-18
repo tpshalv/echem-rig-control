@@ -239,6 +239,9 @@ def _load_device_role(
             "system",
             f"{setting_prefix}.system",
         ),
+        channel_labels=_optional_mapping(
+            data, "channel_labels", f"{setting_prefix}.channel_labels",
+        ),
     )
 
 def _load_expected_identity(

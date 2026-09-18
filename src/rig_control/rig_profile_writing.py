@@ -104,6 +104,10 @@ def serialize_rig_profile(profile: RigProfile) -> str:
         if role.settings:
             lines.extend(["", "[devices.settings]"])
             _append_mapping(lines, role.settings)
+        if role.channel_labels:
+            lines.extend(["", "[devices.channel_labels]"])
+            for channel, label in role.channel_labels.items():
+                lines.append(f"{_toml_value(channel)} = {_toml_value(label)}")
 
     return "\n".join(lines) + "\n"
 

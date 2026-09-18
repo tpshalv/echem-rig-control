@@ -2,6 +2,7 @@ from collections import deque
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
+import json
 from queue import Empty
 from traceback import format_exc
 
@@ -15,6 +16,7 @@ from rig_control.devices.mass_flow_controller import MassFlowController
 from rig_control.devices.power_supply import PowerSupply, PowerSupplyOperatingMode
 from rig_control.devices.esp32_controller import Esp32Controller
 from rig_control.devices.lumel_re72 import LumelRe72
+from rig_control.devices.temperature_probe import TemperatureProbe
 from rig_control.models import DeviceStatus
 from rig_control.rig_profile import DeviceCapability, RigProfile
 from rig_control.ui.manual_control.model import ManualControlViewModel
@@ -283,7 +285,7 @@ class OperationViewModel:
                 and reading.channel == "target_setpoint"
             )
             maximum = None
-            channel_name = self._channel_name(reading.channel)
+            channel_name = self._labelled_channel_name(reading.device_id, reading.channel)
             if isinstance(device, PowerSupply) and reading.channel == "voltage":
                 maximum = device.limits.maximum_voltage
                 mode = self.manual_control.power_supply_mode(reading.device_id)
@@ -435,6 +437,9 @@ class OperationViewModel:
             return device_id
 
     def _expected_measurements(self, device_id: str, device: object) -> tuple[tuple[str, str, str], ...]:
+        if isinstance(device, TemperatureProbe):
+            return tuple((channel, self._labelled_channel_name(device_id, channel), "degC")
+                         for channel in device.channels)
         if isinstance(device, PowerSupply):
             return (("voltage", "Voltage", "V"), ("current", "Current draw", "A"))
         if isinstance(device, MassFlowController):
@@ -491,6 +496,16 @@ class OperationViewModel:
         }:
             return "Gas flow"
         return "Other"
+
+    def _labelled_channel_name(self, device_id: str, channel: str) -> str:
+        if self._profile is not None:
+            try:
+                label = self._profile.get_role(device_id).channel_labels.get(channel)
+            except KeyError:
+                label = None
+            if label:
+                return f"{label} ({channel})"
+        return self._channel_name(channel)
 
     @staticmethod
     def _channel_name(channel: str) -> str:
@@ -652,7 +667,13 @@ class OperationViewModel:
                 experiment_id=experiment_id,
                 operator=operator,
                 notes=notes or None,
-                extra={"rig_profile_id": self._profile_id},
+                extra={
+                    "rig_profile_id": self._profile_id,
+                    **({"channel_labels_json": json.dumps({
+                        role.device_id: dict(role.channel_labels)
+                        for role in self._profile.enabled_roles if role.channel_labels
+                    }, ensure_ascii=False)} if self._profile is not None else {}),
+                },
             )
             self._experiment_recorder.start(
                 metadata=metadata,

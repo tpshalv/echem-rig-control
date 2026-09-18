@@ -7,6 +7,8 @@ __pycache__/
 
 # Test and analysis caches
 .pytest_cache/
+.pytest-tmp-*/
+.test-tmp-*/
 .coverage
 htmlcov/
 logs/

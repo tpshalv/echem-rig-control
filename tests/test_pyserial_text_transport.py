@@ -100,6 +100,21 @@ def test_close_releases_port() -> None:
     assert transport.is_open is False
 
 
+def test_crlf_and_software_flow_control_for_guardian() -> None:
+    port = FakeSerialPort(b"MODEL e-G52HSRDA\r\n")
+    factory = RecordingFactory(port)
+    transport = PySerialTextTransport("COM8", 9600, 2, serial_factory=factory,
+                                      line_ending="\r\n", xonxoff=True)
+    transport.open()
+    assert transport.request("MODEL") == "MODEL e-G52HSRDA"
+    assert port.writes == [b"MODEL\r\n"]
+    assert factory.arguments["xonxoff"] is True
+    assert factory.arguments["baudrate"] == 9600
+    port.response = b"truncated"
+    with pytest.raises(TimeoutError, match="Incomplete"):
+        transport.request("MODEL")
+
+
 def test_request_requires_open_port() -> None:
     transport, _, _ = make_transport()
 

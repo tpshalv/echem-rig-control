@@ -8,9 +8,12 @@ from tkinter import filedialog, messagebox, ttk
 
 from rig_control.ui.common.theme import MONOSPACE_FONT, SECTION_FONT, TITLE_FONT
 from rig_control.ui.common.widgets import VerticalScrolledFrame
+from rig_control.app_paths import profiles_directory
 from rig_control.ui.device_setup.model import (
     AddAlicatRequest,
     AddEsp32Request,
+    AddGuardianRequest,
+    AddTemperatureProbeRequest,
     AddKeithleyRequest,
     DeviceSetupViewModel,
     EditDeviceRequest,
@@ -245,6 +248,7 @@ class DeviceSetupWindow:
         friendly_name = tk.StringVar()
         profile_id = tk.StringVar()
         destination = tk.StringVar()
+        destination.set(str(profiles_directory() / "rig-profile.toml"))
         for row, (label, variable) in enumerate(
             (
                 ("Display name", friendly_name),
@@ -480,6 +484,14 @@ class DeviceSetupWindow:
                 ttk.Label(box, text="No values for this device.").grid(row=0, column=0)
             mapping_entries[key] = (mapping, variables)
             next_row += 1
+        labels_box = ttk.LabelFrame(frame, text="Signal labels", padding=8)
+        labels_box.grid(row=next_row, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        labels_box.columnconfigure(0, weight=1)
+        ttk.Label(labels_box, text="One per line, for example: tc1 = Water bath").grid(row=0, column=0, sticky="w")
+        channel_labels = tk.Text(labels_box, height=4, width=45)
+        channel_labels.grid(row=1, column=0, sticky="ew", pady=(5, 0))
+        channel_labels.insert("1.0", "\n".join(f"{key} = {value}" for key, value in original.channel_labels.items()))
+        next_row += 1
         ttk.Label(
             frame,
             text=(
@@ -511,6 +523,7 @@ class DeviceSetupWindow:
                     parsed_mapping("connection"),
                     parsed_mapping("device_connection"),
                     parsed_mapping("settings"),
+                    parse_channel_labels(channel_labels.get("1.0", "end")),
                 )
             except Exception as error:
                 messagebox.showerror("Invalid value", str(error), parent=dialog)
@@ -901,14 +914,14 @@ class DeviceSetupWindow:
             "Controller / autodiscovery": ("ESP32 controller (auto-discover)",),
             "Gas chromatograph": ("No direct GC drivers installed",),
             "Potentiostat": ("No direct potentiostat drivers installed",),
-            "Hotplate": ("No direct hotplate drivers installed",),
+            "Hotplate": ("OHAUS Guardian 5000",),
+            "Temperature probe": ("TA612C protocol (TA612C / DP-373 trial)",),
         }
         unavailable = {
             "No direct peristaltic pump drivers installed",
             "No direct analytical instrument drivers installed",
             "No direct GC drivers installed",
             "No direct potentiostat drivers installed",
-            "No direct hotplate drivers installed",
         }
 
         ttk.Label(frame, text="Category").grid(
@@ -971,6 +984,10 @@ class DeviceSetupWindow:
                 )
             elif selected == "ESP32 controller (auto-discover)":
                 self._open_add_esp32()
+            elif selected == "OHAUS Guardian 5000":
+                self._open_add_guardian()
+            elif selected == "TA612C protocol (TA612C / DP-373 trial)":
+                self._open_add_temperature_probe()
             else:
                 self._open_scan_alicat()
 
@@ -1464,6 +1481,207 @@ class DeviceSetupWindow:
         entries["Device ID"].focus_set()
         entries["Device ID"].selection_range(0, "end")
 
+    def _open_add_temperature_probe(self) -> None:
+        dialog = tk.Toplevel(self._root)
+        dialog.title("Add TA612C protocol temperature probe")
+        dialog.transient(self._root); dialog.grab_set()
+        form = ttk.Frame(dialog, padding=14); form.grid(row=0, column=0, sticky="nsew")
+        form.columnconfigure(1, weight=1)
+        fields = (("Device ID", "thermocouples"), ("Hardware label", "DANOPLUS DP-373"),
+                  ("Purpose (optional)", ""), ("Channels", "tc1,tc2,tc3,tc4"),
+                  ("Timeout (seconds)", "2.0"), ("Measurement interval (seconds)", "1.0"))
+        entries = {}
+        for row, (label, default) in enumerate(fields):
+            ttk.Label(form, text=label).grid(row=row, column=0, sticky="w", padx=(0, 10), pady=4)
+            entry = ttk.Entry(form, width=36); entry.insert(0, default); entry.grid(row=row, column=1, sticky="ew", pady=4); entries[label] = entry
+        port_row = len(fields)
+        ttk.Label(form, text="Serial port").grid(row=port_row, column=0, sticky="w", padx=(0, 10), pady=4)
+        ports = tuple(port.device for port in self._view_model.serial_ports())
+        port_selector = ttk.Combobox(form, values=ports, width=33); port_selector.grid(row=port_row, column=1, sticky="ew", pady=4)
+        if ports: port_selector.current(0)
+        note = ttk.Label(form, text="The read-only check sends the TA612C identity and live-data frames. It does not write settings.", wraplength=480)
+        note.grid(row=port_row + 1, column=0, columnspan=2, sticky="w", pady=8)
+        buttons = ttk.Frame(form); buttons.grid(row=port_row + 2, column=0, columnspan=2, sticky="e")
+        def check_and_save():
+            try:
+                request = AddTemperatureProbeRequest(entries["Device ID"].get(), entries["Hardware label"].get(), entries["Purpose (optional)"].get(), port_selector.get(), entries["Channels"].get(), float(entries["Timeout (seconds)"].get()), float(entries["Measurement interval (seconds)"].get()))
+            except (TypeError, ValueError) as error:
+                messagebox.showerror("Invalid value", str(error), parent=dialog); return
+            result = self._view_model.add_temperature_probe_and_check(request)
+            self._record_result(result); self.refresh()
+            if result.succeeded:
+                messagebox.showinfo("Temperature probe added", result.summary + "\n\n" + result.technical_details, parent=dialog); dialog.destroy()
+            else:
+                messagebox.showerror("Temperature probe not added", result.summary + "\n\n" + result.technical_details, parent=dialog)
+        ttk.Button(buttons, text="Cancel", command=dialog.destroy).grid(row=0, column=0, padx=(0, 8))
+        ttk.Button(buttons, text="Read-only check and save", command=check_and_save).grid(row=0, column=1)
+
+    def _open_add_guardian(self) -> None:
+        dialog = tk.Toplevel(self._root)
+        dialog.title("Add OHAUS Guardian 5000")
+        dialog.transient(self._root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        form = ttk.Frame(dialog, padding=14)
+        form.grid(row=0, column=0, sticky="nsew")
+        form.columnconfigure(1, weight=1)
+
+        fields = (
+            ("Device ID", "hotplate"),
+            ("Hardware label", "Guardian 5000"),
+            ("Purpose (optional)", ""),
+            ("Maximum temperature (degC, optional)", ""),
+            ("Maximum speed (rpm, optional)", ""),
+            ("Timeout (seconds)", "2.0"),
+            ("Measurement interval (seconds)", "2.0"),
+        )
+        entries: dict[str, ttk.Entry] = {}
+        for row_index, (label, default) in enumerate(fields):
+            ttk.Label(form, text=label).grid(
+                row=row_index,
+                column=0,
+                sticky="w",
+                padx=(0, 10),
+                pady=4,
+            )
+            entry = ttk.Entry(form, width=32)
+            entry.insert(0, default)
+            entry.grid(row=row_index, column=1, sticky="ew", pady=4)
+            entries[label] = entry
+
+        port_row = len(fields)
+        ttk.Label(form, text="Serial port").grid(
+            row=port_row,
+            column=0,
+            sticky="w",
+            padx=(0, 10),
+            pady=4,
+        )
+        known_ports = tuple(
+            port.device for port in self._view_model.serial_ports()
+        )
+        port_selector = ttk.Combobox(
+            form,
+            values=known_ports,
+            width=29,
+        )
+        if known_ports:
+            port_selector.set(known_ports[0])
+        port_selector.grid(row=port_row, column=1, sticky="ew", pady=4)
+
+        note = ttk.Label(
+            form,
+            text=(
+                "Saving is allowed only after one successful read-only "
+                "identity and status query. No heating or stirring "
+                "command will be sent."
+            ),
+            wraplength=430,
+        )
+        note.grid(
+            row=port_row + 1,
+            column=0,
+            columnspan=2,
+            sticky="w",
+            pady=(10, 8),
+        )
+
+        buttons = ttk.Frame(form)
+        buttons.grid(
+            row=port_row + 2,
+            column=0,
+            columnspan=2,
+            sticky="e",
+        )
+
+        def check_and_save() -> None:
+            try:
+                timeout_seconds = float(
+                    entries["Timeout (seconds)"].get().strip()
+                )
+                poll_interval_seconds = float(
+                    entries["Measurement interval (seconds)"].get().strip()
+                )
+                maximum_temperature_text = entries[
+                    "Maximum temperature (degC, optional)"
+                ].get().strip()
+                maximum_speed_text = entries[
+                    "Maximum speed (rpm, optional)"
+                ].get().strip()
+                maximum_temperature = (
+                    float(maximum_temperature_text)
+                    if maximum_temperature_text
+                    else None
+                )
+                maximum_speed = (
+                    float(maximum_speed_text) if maximum_speed_text else None
+                )
+            except ValueError:
+                messagebox.showerror(
+                    "Invalid numeric value",
+                    "Timeout, measurement interval, and optional limits "
+                    "must be numbers.",
+                    parent=dialog,
+                )
+                return
+
+            confirmed = messagebox.askyesno(
+                "Run read-only check",
+                "Open the selected COM port and query the Guardian's "
+                "identity and status once?\n\nNo heating or stirring "
+                "command will be sent.",
+                parent=dialog,
+            )
+            if not confirmed:
+                return
+
+            result = self._view_model.add_guardian_and_check(
+                AddGuardianRequest(
+                    device_id=entries["Device ID"].get(),
+                    hardware_label=entries["Hardware label"].get(),
+                    purpose_label=entries["Purpose (optional)"].get(),
+                    port=port_selector.get(),
+                    timeout_seconds=timeout_seconds,
+                    maximum_temperature=maximum_temperature,
+                    maximum_speed=maximum_speed,
+                    poll_interval_seconds=poll_interval_seconds,
+                )
+            )
+            self._record_result(result)
+            self.refresh()
+            if result.succeeded:
+                messagebox.showinfo(
+                    "Guardian added",
+                    result.summary,
+                    parent=dialog,
+                )
+                dialog.destroy()
+            else:
+                messagebox.showerror(
+                    "Guardian not added",
+                    result.summary + "\n\n" + result.technical_details,
+                    parent=dialog,
+                )
+
+        ttk.Button(
+            buttons,
+            text="Cancel",
+            command=dialog.destroy,
+        ).grid(row=0, column=0, padx=(0, 8))
+        ttk.Button(
+            buttons,
+            text="Read-only check and save",
+            command=check_and_save,
+        ).grid(row=0, column=1)
+        for field_entry in entries.values():
+            field_entry.bind("<Return>", lambda _event: check_and_save())
+            field_entry.bind("<KP_Enter>", lambda _event: check_and_save())
+        port_selector.bind("<Return>", lambda _event: check_and_save())
+        port_selector.bind("<KP_Enter>", lambda _event: check_and_save())
+        entries["Device ID"].focus_set()
+        entries["Device ID"].selection_range(0, "end")
+
     def _open_add_keithley(self, initial_driver: str = "keithley_2260b") -> None:
         dialog = tk.Toplevel(self._root)
         dialog.title("Add SCPI power supply")
@@ -1691,6 +1909,21 @@ class DeviceSetupWindow:
         self._log.delete("1.0", "end")
         self._log.insert("1.0", "\n\n".join(self._history))
         self._log.configure(state="disabled")
+
+
+def parse_channel_labels(text: str) -> dict[str, str]:
+    labels: dict[str, str] = {}
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        channel, separator, label = line.partition("=")
+        channel, label = channel.strip(), label.strip()
+        if not separator or not channel or not label:
+            raise ValueError("Signal labels must use channel = label, one per line")
+        if channel in labels:
+            raise ValueError(f"Duplicate channel label: {channel}")
+        labels[channel] = label
+    return labels
 
 
 def _parse_existing_value(text: str, original: object) -> object:

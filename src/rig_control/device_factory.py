@@ -1,6 +1,16 @@
 from collections.abc import Callable, Mapping
 
 from rig_control.devices.base import Device
+from rig_control.devices.tasi_ta612c.configuration import (
+    configuration_from_profile as ta612c_configuration_from_profile,
+)
+from rig_control.devices.tasi_ta612c.driver import Ta612cTemperatureProbe
+from rig_control.devices.tasi_ta612c.protocol import Ta612cProtocol
+from rig_control.transports.pyserial_binary import PySerialBinaryTransport
+from rig_control.devices.ohaus_guardian_5000.configuration import (
+    configuration_from_profile as guardian_configuration_from_profile,
+)
+from rig_control.devices.ohaus_guardian_5000.driver import OhausGuardian5000
 from rig_control.devices.alicat.bus import AlicatBus
 from rig_control.devices.alicat.configuration import (
     AlicatSerialConfiguration,
@@ -125,6 +135,28 @@ def _create_device(
     event_sink: EventSink | None,
 ) -> Device:
     if role.backend is DeviceBackend.REAL:
+        if role.driver == "tasi_ta612c":
+            try:
+                configuration = ta612c_configuration_from_profile(profile, role.device_id)
+                transport = PySerialBinaryTransport(configuration.port, 9600, configuration.timeout_seconds)
+                return Ta612cTemperatureProbe(configuration, Ta612cProtocol(transport, configuration.timeout_seconds))
+            except (KeyError, TypeError, ValueError) as error:
+                raise DeviceFactoryError(f"Invalid temperature-probe configuration: {error}") from error
+
+        if role.driver == "ohaus_guardian_5000":
+            try:
+                configuration = guardian_configuration_from_profile(profile, role.device_id)
+                return OhausGuardian5000(
+                    configuration.device_id,
+                    PySerialTextTransport(
+                        configuration.port, 9600, configuration.timeout_seconds,
+                        line_ending="\r\n", xonxoff=True,
+                    ),
+                    configuration.limits,
+                )
+            except (KeyError, TypeError, ValueError) as error:
+                raise DeviceFactoryError(f"Invalid Guardian configuration: {error}") from error
+
         if (
             role.capability is DeviceCapability.DC_POWER_SUPPLY
             and role.driver in {

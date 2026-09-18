@@ -30,6 +30,8 @@ class PySerialTextTransport(SerialTextTransport):
         timeout_seconds: float,
         *,
         serial_factory: SerialPortFactory | None = None,
+        line_ending: str = "\r",
+        xonxoff: bool = False,
     ) -> None:
         if not isinstance(port, str) or not port.strip():
             raise ValueError("Serial port cannot be empty")
@@ -45,6 +47,12 @@ class PySerialTextTransport(SerialTextTransport):
         if timeout_seconds <= 0:
             raise ValueError("Serial timeout must be positive")
 
+        if line_ending not in {"\r", "\n", "\r\n"}:
+            raise ValueError("Unsupported serial line ending")
+        if not isinstance(xonxoff, bool):
+            raise TypeError("xonxoff must be Boolean")
+        self._line_ending = line_ending
+        self._xonxoff = xonxoff
         self._port = port.strip()
         self._baud_rate = baud_rate
         self._timeout_seconds = float(timeout_seconds)
@@ -68,7 +76,7 @@ class PySerialTextTransport(SerialTextTransport):
             bytesize=8,
             parity="N",
             stopbits=1,
-            xonxoff=False,
+            xonxoff=self._xonxoff,
             rtscts=False,
             dsrdtr=False,
         )
@@ -91,7 +99,7 @@ class PySerialTextTransport(SerialTextTransport):
         if "\r" in message or "\n" in message:
             raise ValueError("Serial request must not contain line terminators")
 
-        encoded = f"{message}\r".encode("ascii")
+        encoded = (message + self._line_ending).encode("ascii")
         written = self._serial.write(encoded)
         if written != len(encoded):
             raise OSError(
@@ -107,6 +115,8 @@ class PySerialTextTransport(SerialTextTransport):
                 f"request {message!r}"
             )
         try:
+            if self._line_ending == "\r\n" and not response.endswith(b"\r\n"):
+                raise TimeoutError("Incomplete CRLF serial response")
             decoded = response.decode("ascii").strip("\r\n")
         except UnicodeDecodeError as error:
             raise ValueError(

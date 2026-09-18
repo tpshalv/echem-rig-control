@@ -25,7 +25,8 @@ def export_experiment_files(
     metadata = json.loads((directory / "metadata.json").read_text(encoding="utf-8"))
     measurements = _read_jsonl(directory / "measurements.journal.jsonl")
     events = _read_jsonl(directory / "events.journal.jsonl")
-    headers, rows = build_wide_rows(measurements, bin_seconds=bin_seconds)
+    headers, rows = build_wide_rows(measurements, bin_seconds=bin_seconds,
+                                    channel_labels=_channel_labels(metadata))
 
     csv_path = directory / "measurements-wide.csv"
     _write_csv(csv_path, headers, rows)
@@ -50,7 +51,10 @@ def export_wide_csv(
     """Refresh the compact wide CSV view without touching the Excel workbook."""
     directory = Path(experiment_directory)
     measurements = _read_jsonl(directory / "measurements.journal.jsonl")
-    headers, rows = build_wide_rows(measurements, bin_seconds=bin_seconds)
+    metadata_path = directory / "metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
+    headers, rows = build_wide_rows(measurements, bin_seconds=bin_seconds,
+                                    channel_labels=_channel_labels(metadata))
     csv_path = directory / "measurements-wide.csv"
     _write_csv(csv_path, headers, rows)
     return csv_path
@@ -60,6 +64,7 @@ def build_wide_rows(
     measurements: list[dict[str, Any]],
     *,
     bin_seconds: float = 1.0,
+    channel_labels: dict[str, dict[str, str]] | None = None,
 ) -> tuple[list[str], list[list[object]]]:
     """Bin long-form observations onto a regular grid without carrying values."""
     if bin_seconds <= 0:
@@ -82,7 +87,10 @@ def build_wide_rows(
 
     ordered_signals = sorted(signals)
     headers = ["timestamp_utc"] + [
-        f"{device_id}.{channel} [{signals[(device_id, channel)]}]"
+        f"{device_id}.{channel}"
+        + (f" ({channel_labels[device_id][channel]})"
+           if channel_labels and channel in channel_labels.get(device_id, {}) else "")
+        + f" [{signals[(device_id, channel)]}]"
         for device_id, channel in ordered_signals
     ]
     rows: list[list[object]] = []
@@ -104,6 +112,18 @@ def build_wide_rows(
                 row.append(sum(values) / len(values))
         rows.append(row)
     return headers, rows
+
+
+def _channel_labels(metadata: dict[str, Any]) -> dict[str, dict[str, str]]:
+    """Labels are snapshotted at recording start; raw channel IDs never change."""
+    labels = json.loads(metadata.get("extra", {}).get("channel_labels_json", "{}"))
+    if not isinstance(labels, dict) or any(
+        not isinstance(channels, dict)
+        or any(not isinstance(label, str) for label in channels.values())
+        for channels in labels.values()
+    ):
+        raise ValueError("Invalid recorded channel labels")
+    return labels
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:

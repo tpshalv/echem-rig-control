@@ -24,6 +24,7 @@ class DeviceCapability(StrEnum):
     HUMIDITY_SENSOR = "humidity_sensor"
 
     TEMPERATURE_CONTROLLER = "temperature_controller"
+    HOTPLATE_STIRRER = "hotplate_stirrer"
     REMOTE_CONTROLLER = "remote_controller"
 
 
@@ -115,6 +116,7 @@ class DeviceRole:
         default_factory=dict
     )
     system: str | None = None
+    channel_labels: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         _require_non_empty_text(
@@ -178,6 +180,14 @@ class DeviceRole:
 
         if self.system is not None:
             _require_non_empty_text(self.system, "Device system")
+
+        if not isinstance(self.channel_labels, Mapping):
+            raise TypeError("Channel labels must be a mapping")
+        labels = dict(self.channel_labels)
+        for channel, label in labels.items():
+            _require_non_empty_text(channel, "Channel ID")
+            _require_non_empty_text(label, "Channel label")
+        object.__setattr__(self, "channel_labels", MappingProxyType(labels))
 
         object.__setattr__(
             self,

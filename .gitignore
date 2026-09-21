@@ -14,6 +14,10 @@ htmlcov/
 logs/
 tmp/
 
+# Standalone build output (see scripts/build_exe.py)
+build/
+dist/
+
 # Editor settings
 .vscode/
 

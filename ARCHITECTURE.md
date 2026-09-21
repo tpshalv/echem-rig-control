@@ -480,3 +480,7 @@ Before recipes are implemented:
 2. Add a polling broadcast/snapshot boundary before allowing multiple live
    feature screens to consume readings simultaneously.
 3. Design and implement recipe execution through the existing control service.
+
+## Building a standalone exe
+
+Run `python scripts/build_exe.py` (needs `pip install -e .[hardware,build]`). It is not part of normal app or test runs. Output goes to `dist/echem-rig-control-<version>/`; the version comes from `pyproject.toml`. New dynamically imported packages or data files go in the constants at the top of that script.

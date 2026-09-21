@@ -1,4 +1,6 @@
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from collections import deque
+import json
 from datetime import datetime, timezone
 from traceback import format_exc
 from enum import StrEnum
@@ -23,6 +25,7 @@ from rig_control.devices.mass_flow_controller import (
 )
 from rig_control.devices.power_supply import PowerSupply
 from rig_control.devices.safe_state import SafeStateCapable
+from rig_control.models import Event, EventSeverity, EventSink
 
 
 class ControlMode(StrEnum):
@@ -84,10 +87,18 @@ class GlobalSafeStateResult:
 class RigControlService:
     """Authorize and route commands to registered device capabilities."""
 
-    def __init__(self, device_manager: DeviceManager) -> None:
+    def __init__(
+        self, device_manager: DeviceManager, *, event_sink: EventSink | None = None,
+    ) -> None:
         self._device_manager = device_manager
         self._mode = ControlMode.IDLE
         self._history: list[ExecutedCommand] = []
+        self._event_sink = event_sink
+        self._audit_failures: deque[str] = deque(maxlen=100)
+
+    @property
+    def audit_failures(self) -> tuple[str, ...]:
+        return tuple(self._audit_failures)
 
     @property
     def mode(self) -> ControlMode:
@@ -194,20 +205,25 @@ class RigControlService:
         """Authorize, execute and record one command."""
 
         self._validate_command_type(command)
-        self._authorize(command)
 
         try:
+            self._authorize(command)
             with self._device_manager.operation(command.device_id):
                 message = self._dispatch(command)
-        except ControlAccessError:
+        except ControlAccessError as error:
+            self._audit(command, "blocked", str(error))
             raise
         except Exception as error:
+            self._audit(command, "failed", f"{type(error).__name__}: {error}")
             raise ControlExecutionError(
                 f"Command {type(command).__name__} failed for "
                 f"device {command.device_id!r}: "
                 f"{type(error).__name__}: {error}"
             ) from error
 
+        audit_error = self._audit(command, "succeeded", message)
+        if audit_error:
+            message += f" WARNING: command executed, but audit recording failed: {audit_error}"
         record = ExecutedCommand(
             command=command,
             executed_at=datetime.now(timezone.utc),
@@ -216,6 +232,28 @@ class RigControlService:
         self._history.append(record)
 
         return record
+
+    def _audit(self, command: ControlCommand, outcome: str, detail: str) -> str | None:
+        if self._event_sink is None:
+            return None
+        event = Event(
+            source=command.device_id,
+            severity=EventSeverity.INFO if outcome == "succeeded" else EventSeverity.ERROR,
+            message=json.dumps({
+                "kind": "control_command",
+                "command": type(command).__name__,
+                "parameters": asdict(command),
+                "outcome": outcome,
+                "detail": detail,
+            }, ensure_ascii=False),
+        )
+        try:
+            self._event_sink(event, None)
+        except Exception as error:
+            failure = f"{type(error).__name__}: {error}"
+            self._audit_failures.append(failure)
+            return failure
+        return None
 
     def _authorize(self, command: ControlCommand) -> None:
         if isinstance(command, EnterDeviceSafeState):

@@ -1,9 +1,11 @@
 import tkinter as tk
+from collections.abc import Callable
 from datetime import UTC, datetime
 from tkinter import filedialog, messagebox, ttk
 from queue import Empty, Queue
 from threading import Thread
 from traceback import format_exc
+from typing import Any
 
 from rig_control.models import Event, EventSeverity, EventSink
 from rig_control.ui.common.theme import ERROR_TEXT, SECTION_FONT, TITLE_FONT
@@ -63,7 +65,10 @@ class OperationWindow:
         self._editor: tk.Widget | None = None
         self._editor_apply: ttk.Button | None = None
         self._connection_results: Queue[tuple[OperationActionResult, ...]] = Queue()
+        self._background_results: Queue[Callable[[], None]] = Queue()
         self._connection_in_progress = False
+        self._action_in_progress = False
+        self._updates_cancelled = False
         self._root.title("Echem Rig Control — Operation")
         self._root.geometry("1050x760")
         self._root.minsize(850, 620)
@@ -299,26 +304,28 @@ class OperationWindow:
         self._update_display()
 
     def _toggle_monitoring(self) -> None:
-        result = (
-            self._view_model.stop_monitoring()
+        action = (
+            self._view_model.stop_monitoring
             if self._view_model.is_monitoring
-            else self._view_model.start_monitoring()
+            else self._view_model.start_monitoring
         )
-        self._show_result(result)
-        self._update_display()
+        self._run_operation_action("Updating monitoring", action)
 
     def _toggle_recording(self) -> None:
         if self._view_model.is_recording:
-            result = self._view_model.stop_recording()
+            action = self._view_model.stop_recording
         else:
-            result = self._view_model.start_recording(
-                experiment_id=self._entries["experiment_id"].get().strip(),
-                operator=self._entries["operator"].get().strip(),
-                output_directory=self._entries["output"].get().strip(),
-                notes=self._entries["notes"].get().strip(),
+            experiment_id = self._entries["experiment_id"].get().strip()
+            operator = self._entries["operator"].get().strip()
+            output_directory = self._entries["output"].get().strip()
+            notes = self._entries["notes"].get().strip()
+            action = lambda: self._view_model.start_recording(
+                experiment_id=experiment_id,
+                operator=operator,
+                output_directory=output_directory,
+                notes=notes,
             )
-        self._show_result(result)
-        self._update_display()
+        self._run_operation_action("Updating recording", action)
 
     def _browse_output(self) -> None:
         selected = filedialog.askdirectory(parent=self._root)
@@ -438,11 +445,12 @@ class OperationWindow:
         if row is None or not row.writable:
             return
         if row.editor == "action":
-            result = self._view_model.apply_channel_value(
-                row.device_id, row.channel, True
+            self._run_operation_action(
+                f"Updating {row.channel_name}",
+                lambda: self._view_model.apply_channel_value(
+                    row.device_id, row.channel, True
+                ),
             )
-            self._show_result(result)
-            self._update_display()
             return
         if tree.identify_column(event.x) != "#4":
             self._cancel_cell_edit()
@@ -525,10 +533,13 @@ class OperationWindow:
         ):
             self._cancel_cell_edit()
             return "break"
-        result = self._view_model.apply_channel_value(row.device_id, row.channel, value)
         self._cancel_cell_edit()
-        self._show_result(result)
-        self._update_display()
+        self._run_operation_action(
+            f"Updating {row.channel_name}",
+            lambda: self._view_model.apply_channel_value(
+                row.device_id, row.channel, value
+            ),
+        )
         return "break"
 
     def _cancel_cell_edit(self) -> str:
@@ -540,10 +551,105 @@ class OperationWindow:
         return "break"
 
     def _enter_global_safe_state(self) -> None:
-        result = self._view_model.manual_control.enter_global_safe_state()
-        wrapped = OperationActionResult(result.succeeded, result.summary, result.technical_details)
-        self._show_result(wrapped)
-        self._update_display()
+        self._run_operation_action(
+            "Entering global safe state",
+            lambda: self._as_operation_result(
+                self._view_model.manual_control.enter_global_safe_state()
+            ),
+        )
+
+    @staticmethod
+    def _as_operation_result(result: Any) -> OperationActionResult:
+        return OperationActionResult(
+            result.succeeded,
+            result.summary,
+            result.technical_details,
+        )
+
+    def _run_operation_action(
+        self,
+        description: str,
+        action: Callable[[], OperationActionResult],
+    ) -> None:
+        if self._action_in_progress:
+            return
+        self._action_in_progress = True
+        if hasattr(self, "_action_status"):
+            self._action_status.configure(text=f"{description}…")
+
+        def complete(value: object, error: Exception | None) -> None:
+            self._action_in_progress = False
+            if error is not None:
+                self._show_result(
+                    OperationActionResult(
+                        False,
+                        f"{description} failed: {type(error).__name__}: {error}",
+                        format_exc(),
+                    )
+                )
+            else:
+                assert isinstance(value, OperationActionResult)
+                self._show_result(value)
+            self._update_display()
+
+        self._run_in_background(action, complete)
+
+    def _run_in_background(
+        self,
+        action: Callable[[], object],
+        on_complete: Callable[[object, Exception | None], None],
+    ) -> None:
+        def worker() -> None:
+            try:
+                value: object = action()
+            except Exception as error:
+                self._background_results.put(
+                    lambda caught=error: on_complete(None, caught)
+                )
+            else:
+                self._background_results.put(
+                    lambda: on_complete(value, None)
+                )
+
+        Thread(target=worker, name="operation-action", daemon=True).start()
+
+    def request_close(self, on_closed: Callable[[tuple[str, ...]], None]) -> None:
+        """Stop feature services off the Tk thread before closing this window."""
+        if self._action_in_progress:
+            messagebox.showinfo(
+                "Operation busy",
+                "Wait for the current operation to finish before closing this window.",
+                parent=self._root,
+            )
+            return
+        if self._view_model.is_recording and not messagebox.askyesno(
+            "Stop recording and close Operation",
+            "Recording will stop and the final exports will be written before "
+            "Operation closes. Continue?",
+            parent=self._root,
+        ):
+            return
+        self._action_in_progress = True
+        if hasattr(self, "_action_status"):
+            self._action_status.configure(text="Stopping Operation…")
+
+        def complete(value: object, error: Exception | None) -> None:
+            self._action_in_progress = False
+            failures = (
+                (f"Could not close Operation: {type(error).__name__}: {error}",)
+                if error is not None
+                else tuple(value)  # type: ignore[arg-type]
+            )
+            if failures:
+                messagebox.showerror(
+                    "Operation shutdown problems",
+                    "\n".join(failures),
+                    parent=self._root,
+                )
+            self.cancel_updates()
+            on_closed(failures)
+
+        self._run_in_background(self._view_model.shutdown, complete)
 
     def _show_result(self, result: OperationActionResult) -> None:
         if hasattr(self, "_action_status"):
@@ -581,6 +687,8 @@ class OperationWindow:
         return "break"
 
     def _schedule_update(self) -> None:
+        if getattr(self, "_updates_cancelled", False):
+            return
         self._after_id = self._root.after(100, self._poll_ui_queue)
 
     def _poll_ui_queue(self) -> None:
@@ -592,6 +700,14 @@ class OperationWindow:
                 pass
             else:
                 self._finish_connect_all(connection_results)
+            background_results = getattr(self, "_background_results", None)
+            if background_results is not None:
+                while True:
+                    try:
+                        completion = background_results.get_nowait()
+                    except Empty:
+                        break
+                    completion()
             collected = self._view_model.collect_polling_results()
             if collected:
                 self._update_display(refresh_trends=True)
@@ -770,6 +886,7 @@ class OperationWindow:
         return metrics
 
     def cancel_updates(self) -> None:
+        self._updates_cancelled = True
         if self._after_id is not None:
             self._root.after_cancel(self._after_id)
             self._after_id = None

@@ -2,6 +2,7 @@ import json
 import os
 import re
 from collections.abc import Iterable
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic, sleep
@@ -40,6 +41,11 @@ class DirectoryExperimentWriter(ExperimentWriter):
             )
         )
         self._last_live_export_at: float | None = None
+        self._live_export_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="rig-live-export",
+        )
+        self._live_export_future: Future[Path] | None = None
         self._experiment_directory: Path | None = None
         self._metadata: ExperimentMetadata | None = None
         self._measurement_file: TextIO | None = None
@@ -89,6 +95,12 @@ class DirectoryExperimentWriter(ExperimentWriter):
                 experiment_directory / "metadata.json",
                 experiment_metadata_to_dict(metadata),
             )
+            snapshot = metadata.extra.get("configuration_snapshot_json")
+            if snapshot is not None:
+                self._write_json_atomically(
+                    experiment_directory / "configuration.json",
+                    json.loads(snapshot),
+                )
             self._write_json_atomically(
                 experiment_directory / "recording-state.json",
                 {
@@ -195,27 +207,33 @@ class DirectoryExperimentWriter(ExperimentWriter):
         experiment_directory = self._experiment_directory
         metadata = self._metadata
 
-        self._close_files()
-        self._is_open = False
-
         assert experiment_directory is not None
         assert metadata is not None
 
-        self._write_json_atomically(
-            experiment_directory / "recording-state.json",
-            {
-                "schema_version": DATA_SCHEMA_VERSION,
-                "experiment_id": metadata.experiment_id,
-                "state": "complete",
-                "updated_at": datetime.now(
-                    timezone.utc
-                ).isoformat(),
-            },
-        )
-        export_experiment_files(
-            experiment_directory,
-            bin_seconds=self._export_bin_seconds,
-        )
+        try:
+            self._flush_files()
+            self._wait_for_live_export()
+            self._close_files()
+            self._is_open = False
+            export_experiment_files(
+                experiment_directory,
+                bin_seconds=self._export_bin_seconds,
+            )
+            self._write_json_atomically(
+                experiment_directory / "recording-state.json",
+                {
+                    "schema_version": DATA_SCHEMA_VERSION,
+                    "experiment_id": metadata.experiment_id,
+                    "state": "complete",
+                    "updated_at": datetime.now(
+                        timezone.utc
+                    ).isoformat(),
+                },
+            )
+        finally:
+            self._close_files()
+            self._is_open = False
+            self._live_export_executor.shutdown(wait=True)
 
     def _require_open(self) -> None:
         if not self.is_open:
@@ -244,12 +262,20 @@ class DirectoryExperimentWriter(ExperimentWriter):
             < self._live_export_interval_seconds
         ):
             return
+        if self._live_export_future is not None and not self._live_export_future.done():
+            return
         self._flush_files()
-        export_wide_csv(
+        self._live_export_future = self._live_export_executor.submit(
+            export_wide_csv,
             self._experiment_directory,
             bin_seconds=self._export_bin_seconds,
         )
         self._last_live_export_at = now
+
+    def _wait_for_live_export(self) -> None:
+        """Surface any background CSV failure before finalising a recording."""
+        if self._live_export_future is not None:
+            self._live_export_future.result()
 
     def _flush_files(self) -> None:
         for file in (self._measurement_file, self._event_file):

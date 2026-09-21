@@ -291,6 +291,10 @@ def test_discovered_esp32_only_adds_selected_sensor_devices(tmp_path) -> None:
 def test_rediscovery_reuses_existing_esp32_and_adds_new_re72() -> None:
     saved = []
     original = load_rig_profile("rig-profile.esp32.toml")
+    # The example now includes this controller; rediscovery must start without it.
+    original = replace(original, device_roles=tuple(
+        role for role in original.device_roles if role.device_id != "re72_1"
+    ))
     model = DeviceSetupViewModel(
         original,
         profile_writer=lambda profile, _path: saved.append(profile) or None,

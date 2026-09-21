@@ -4,7 +4,6 @@ from rig_control.devices.esp32_controller import Esp32Controller
 from rig_control.models import DeviceStatus
 from rig_control.devices.manager import DeviceManager
 from rig_control.control.service import RigControlService
-from rig_control.control.commands import CommandSource, RearmController, SetControllerOutput
 from rig_control.ui.manual_control.model import ManualControlViewModel
 from rig_control.devices.esp32_bus import Esp32Bus
 
@@ -147,12 +146,10 @@ def test_control_service_and_manual_model_control_led() -> None:
     manager.connect(controller.device_id)
     service = RigControlService(manager)
 
-    service.execute(RearmController(controller.device_id, CommandSource.MANUAL))
-    service.execute(SetControllerOutput(controller.device_id, "auxiliary_output", True, CommandSource.MANUAL))
-    row = ManualControlViewModel(manager, service).controller_rows()[0]
-
-    assert row.safe_state_active is False
-    assert row.watchdog_tripped is False
-    assert row.safe_state_active is False
+    model = ManualControlViewModel(manager, service)
+    assert model.rearm_controller(controller.device_id).succeeded
+    assert model.set_controller_output(controller.device_id, "auxiliary_output", True).succeeded
+    assert controller.controller_status["safe_state_active"] is False
+    assert controller.controller_status["watchdog_tripped"] is False
 
     manager.disconnect(controller.device_id)

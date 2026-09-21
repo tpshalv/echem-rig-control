@@ -214,7 +214,6 @@ class OperationViewModel:
         self.manual_control = ManualControlViewModel(
             device_manager,
             control_service,
-            measurement_provider=self.latest_measurement,
             power_supply_safety=power_supply_safety,
         )
         self._profile_id = profile_id
@@ -276,8 +275,6 @@ class OperationViewModel:
         for reading in self.measurement_rows():
             device = self._device_manager.get(reading.device_id)
             writable = (
-                isinstance(device, PowerSupply) and reading.channel == "voltage"
-            ) or (
                 isinstance(device, MassFlowController)
                 and reading.channel == "setpoint"
             ) or (
@@ -286,15 +283,7 @@ class OperationViewModel:
             )
             maximum = None
             channel_name = self._labelled_channel_name(reading.device_id, reading.channel)
-            if isinstance(device, PowerSupply) and reading.channel == "voltage":
-                maximum = device.limits.maximum_voltage
-                mode = self.manual_control.power_supply_mode(reading.device_id)
-                channel_name = (
-                    "Voltage setpoint"
-                    if mode is PowerSupplyOperatingMode.CONSTANT_VOLTAGE
-                    else "Voltage limit"
-                )
-            elif isinstance(device, MassFlowController) and reading.channel == "setpoint":
+            if isinstance(device, MassFlowController) and reading.channel == "setpoint":
                 maximum = device.limits.maximum_flow
             row = OperationChannelRow(
                 device_id=reading.device_id,
@@ -326,23 +315,22 @@ class OperationViewModel:
             for channel, channel_name, unit in self._expected_measurements(
                 device_id, device
             ):
-                if channel == "voltage" and supply_mode is not None:
-                    channel_name = (
-                        "Voltage setpoint"
-                        if supply_mode is PowerSupplyOperatingMode.CONSTANT_VOLTAGE
-                        else "Voltage limit"
-                    )
                 if (device_id, channel) not in rows:
-                    is_power_supply_voltage = (
-                        isinstance(device, PowerSupply) and channel == "voltage"
-                    )
                     rows[(device_id, channel)] = OperationChannelRow(
                         device_id, device_name, channel, channel_name,
-                        device.voltage_setpoint if is_power_supply_voltage else None,
+                        None,
                         unit, "", None, device_system,
-                        is_power_supply_voltage,
-                        "number", 0.0 if is_power_supply_voltage else None,
-                        device.limits.maximum_voltage if is_power_supply_voltage else None,
+                    )
+            if isinstance(device, PowerSupply):
+                voltage_name = (
+                    "Voltage setpoint"
+                    if supply_mode is PowerSupplyOperatingMode.CONSTANT_VOLTAGE
+                    else "Voltage limit"
+                )
+                rows[(device_id, "voltage_setpoint")] = OperationChannelRow(
+                    device_id, device_name, "voltage_setpoint", voltage_name,
+                    device.voltage_setpoint, "V", "good", None, device_system,
+                    True, "number", 0.0, device.limits.maximum_voltage,
                     )
             if isinstance(device, MassFlowController):
                 key = (device_id, "setpoint")
@@ -406,7 +394,7 @@ class OperationViewModel:
 
         if channel == "setpoint":
             result = self.manual_control.set_mfc_flow(device_id, float(value))
-        elif channel == "voltage":
+        elif channel == "voltage_setpoint":
             result = self.manual_control.set_power_supply_voltage(device_id, float(value))
         elif channel == "current_limit":
             result = self.manual_control.set_power_supply_current(device_id, float(value))

@@ -19,7 +19,6 @@ from rig_control.ui.manual_control.model import (
 from rig_control.ui.manual_control.types import PowerSupplyManualSafety
 
 
-
 def make_model(
     power_supply_safety: PowerSupplyManualSafety | None = None,
 ) -> tuple[
@@ -55,23 +54,6 @@ def make_model(
         supply,
         mfc,
     )
-
-
-def test_rows_are_generated_from_device_capabilities() -> None:
-    model, _, _, _ = make_model()
-
-    mfc_rows = model.mfc_rows()
-    supply_rows = model.power_supply_rows()
-
-    assert len(mfc_rows) == 1
-    assert mfc_rows[0].device_id == "dry_gas_mfc"
-    assert mfc_rows[0].maximum_flow == 100.0
-    assert mfc_rows[0].flow_unit == "sccm"
-
-    assert len(supply_rows) == 1
-    assert supply_rows[0].device_id == "main_supply"
-    assert supply_rows[0].maximum_voltage == 30.0
-    assert supply_rows[0].maximum_current == 108.0
 
 
 def test_manual_mfc_flow_command_succeeds() -> None:
@@ -158,125 +140,6 @@ def test_disconnected_device_error_is_returned_not_raised() -> None:
     assert result.technical_details is not None
 
 
-def test_rows_include_actual_measurements() -> None:
-    model, _, supply, mfc = make_model()
-
-    supply.set_simulated_measurement(
-        voltage=9.8,
-        current=2.5,
-    )
-    mfc.set_simulated_measurement(24.7)
-
-    mfc_row = model.mfc_rows()[0]
-    supply_row = model.power_supply_rows()[0]
-
-    assert mfc_row.is_available is True
-    assert mfc_row.measured_flow == 24.7
-    assert mfc_row.measurement_time is not None
-    assert mfc_row.measurement_quality == "good"
-
-    assert supply_row.is_available is True
-    assert supply_row.measured_voltage == 9.8
-    assert supply_row.measured_current == 2.5
-    assert supply_row.voltage_measurement_time is not None
-    assert supply_row.current_measurement_time is not None
-    assert supply_row.voltage_quality == "good"
-    assert supply_row.current_quality == "good"
-
-
-def test_disconnected_devices_remain_visible() -> None:
-    model, _, supply, mfc = make_model()
-
-    supply.disconnect()
-    mfc.disconnect()
-
-    mfc_rows = model.mfc_rows()
-    supply_rows = model.power_supply_rows()
-
-    assert len(mfc_rows) == 1
-    assert len(supply_rows) == 1
-
-    assert mfc_rows[0].status == "disconnected"
-    assert mfc_rows[0].is_available is False
-    assert mfc_rows[0].measured_flow is None
-    assert mfc_rows[0].measurement_time is None
-
-    assert supply_rows[0].status == "disconnected"
-    assert supply_rows[0].is_available is False
-    assert supply_rows[0].measured_voltage is None
-    assert supply_rows[0].measured_current is None
-    assert supply_rows[0].voltage_measurement_time is None
-    assert supply_rows[0].current_measurement_time is None
-
-
-def test_measurement_failure_is_retained_as_error_event() -> None:
-    model, _, supply, _ = make_model()
-
-    def failed_voltage_read():
-        raise OSError("Simulated communication failure")
-
-    supply.measure_voltage = failed_voltage_read  # type: ignore[method-assign]
-
-    row = model.power_supply_rows()[0]
-
-    assert row.measured_voltage is None
-
-    failures = model.read_failures
-
-    assert len(failures) == 1
-    assert failures[0].device_id == "main_supply"
-    assert failures[0].measurement_name == "voltage"
-    assert "OSError" in failures[0].summary
-    assert "Simulated communication failure" in failures[0].summary
-    assert "Traceback" in failures[0].technical_details
-    assert failures[0].event.severity.value == "error"
-    assert failures[0].event.source == "main_supply"
-
-
-def test_repeated_measurement_failure_is_not_duplicated() -> None:
-    model, _, supply, _ = make_model()
-
-    def failed_voltage_read():
-        raise OSError("Simulated communication failure")
-
-    supply.measure_voltage = failed_voltage_read  # type: ignore[method-assign]
-
-    model.power_supply_rows()
-    model.power_supply_rows()
-    model.power_supply_rows()
-
-    assert len(model.read_failures) == 1
-    assert len(model.events) == 1
-    assert model.events[0].severity.value == "error"
-
-
-def test_measurement_recovery_is_recorded_once() -> None:
-    model, _, supply, _ = make_model()
-    original_measure_voltage = supply.measure_voltage
-
-    def failed_voltage_read():
-        raise OSError("Simulated communication failure")
-
-    supply.measure_voltage = failed_voltage_read  # type: ignore[method-assign]
-
-    model.power_supply_rows()
-    model.power_supply_rows()
-
-    supply.measure_voltage = original_measure_voltage  # type: ignore[method-assign]
-
-    model.power_supply_rows()
-    model.power_supply_rows()
-
-    assert len(model.read_failures) == 1
-    assert len(model.events) == 2
-
-    error_event = model.events[0]
-    recovery_event = model.events[1]
-
-    assert error_event.severity.value == "error"
-    assert recovery_event.severity.value == "info"
-    assert "recovered" in recovery_event.message
-
 def test_global_safe_state_succeeds_for_all_devices() -> None:
     model, service, supply, mfc = make_model()
 
@@ -324,10 +187,8 @@ def test_global_safe_state_reports_individual_failure() -> None:
 def test_power_supply_defaults_to_constant_current_mode() -> None:
     model, _, _, _ = make_model()
 
-    row = model.power_supply_rows()[0]
-
     assert (
-        row.operating_mode
+        model.power_supply_mode("main_supply")
         is PowerSupplyOperatingMode.CONSTANT_CURRENT
     )
 
@@ -350,7 +211,7 @@ def test_switching_to_constant_voltage_uses_safe_initial_target() -> None:
     assert supply.current_limit == 20.0
     assert supply.output_enabled is False
     assert (
-        model.power_supply_rows()[0].operating_mode
+        model.power_supply_mode("main_supply")
         is PowerSupplyOperatingMode.CONSTANT_VOLTAGE
     )
 
@@ -408,11 +269,11 @@ def test_manual_mode_cannot_change_while_output_is_enabled() -> None:
     assert supply.current_limit == 15.0
     assert supply.voltage_setpoint == 0.0
     assert (
-        model.power_supply_rows()[0].operating_mode
+        model.power_supply_mode("main_supply")
         is PowerSupplyOperatingMode.CONSTANT_CURRENT
     )
 
-def test_supply_row_exposes_separate_remembered_targets() -> None:
+def test_supply_remembers_separate_targets() -> None:
     model, _, _, _ = make_model()
 
     model.set_power_supply_current(
@@ -428,10 +289,8 @@ def test_supply_row_exposes_separate_remembered_targets() -> None:
         2.0,
     )
 
-    row = model.power_supply_rows()[0]
-
-    assert row.constant_current_target == 15.0
-    assert row.constant_voltage_target == 2.0
+    assert model.power_supply_target("main_supply", PowerSupplyOperatingMode.CONSTANT_CURRENT) == 15.0
+    assert model.power_supply_target("main_supply", PowerSupplyOperatingMode.CONSTANT_VOLTAGE) == 2.0
 
 def test_manual_defaults_use_safe_starting_values_in_constant_current() -> None:
     model, _, supply, _ = make_model()

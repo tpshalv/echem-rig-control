@@ -36,6 +36,7 @@ class HomeWindow:
         self._device_setup_child: tk.Toplevel | None = None
         self._settings_child: tk.Toplevel | None = None
         self._operation_close: Callable[[], None] | None = None
+        self._operation_force_close: Callable[[], None] | None = None
         self._diagnostics_close: Callable[[], None] | None = None
         root.title("Echem Rig Control")
         root.geometry("1100x620")
@@ -194,13 +195,24 @@ class HomeWindow:
             window.diagnostic_metrics,
         )
 
-        def close() -> None:
-            window.cancel_updates()
-            model.shutdown()
+        def finish_close(_failures: tuple[str, ...]) -> None:
             session.runtime_diagnostics.unregister_metric_provider("operation_ui")
             self._close_operation()
 
+        def close() -> None:
+            window.request_close(finish_close)
+
+        def force_close() -> None:
+            window.cancel_updates()
+            failures = model.shutdown()
+            if failures:
+                messagebox.showerror(
+                    "Operation shutdown problems", "\n".join(failures), parent=child
+                )
+            finish_close(failures)
+
         self._operation_close = close
+        self._operation_force_close = force_close
         child.protocol("WM_DELETE_WINDOW", close)
 
     def _open_device_setup(self) -> None:
@@ -236,6 +248,7 @@ class HomeWindow:
             self._operation_child.destroy()
             self._operation_child = None
         self._operation_close = None
+        self._operation_force_close = None
         self._view_model.end_feature(FEATURE_OPERATION)
         self.refresh()
 
@@ -258,7 +271,10 @@ class HomeWindow:
 
         if self._diagnostics_close is not None:
             self._diagnostics_close()
-        if self._operation_close is not None:
+        force_close = getattr(self, "_operation_force_close", None)
+        if force_close is not None:
+            force_close()
+        elif self._operation_close is not None:
             self._operation_close()
         if self._device_setup_child is not None:
             self._device_setup_child.destroy()

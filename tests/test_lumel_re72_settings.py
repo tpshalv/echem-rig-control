@@ -1,7 +1,47 @@
 import pytest
+from contextlib import nullcontext
+from unittest.mock import Mock
 
 from rig_control.devices.lumel_re72 import LumelRe72, RE72_SETTINGS
-from rig_control.ui.home.model import HomeViewModel
+from rig_control.instrument_settings.re72 import Re72SettingsService
+from rig_control.models import DeviceStatus
+from rig_control.rig_profile_loading import load_rig_profile
+
+
+@pytest.mark.parametrize("action", [
+    lambda service: service.write_settings("re72_1", {"target_setpoint": "30"}),
+    lambda service: service.start_autotune("re72_1"),
+    lambda service: service.restore_snapshot("re72_1", "unused.json"),
+])
+def test_settings_write_guard_runs_before_any_hardware_access(action):
+    manager = Mock()
+    service = Re72SettingsService(
+        manager, load_rig_profile("rig-profile.esp32.toml"),
+        require_write_access=Mock(side_effect=RuntimeError("Control is active")),
+    )
+    result = action(service)
+    assert not result.succeeded
+    assert "Control is active" in result.summary
+    assert manager.mock_calls == []
+
+
+def test_settings_service_preserves_readback_verification_when_logging_fails():
+    device = Mock(spec=LumelRe72)
+    device.status = DeviceStatus.READY
+    device.read_settings.return_value = {"target_setpoint": 30.0}
+    manager = Mock()
+    manager.get.return_value = device
+    manager.operation.return_value = nullcontext(device)
+    service = Re72SettingsService(
+        manager, load_rig_profile("rig-profile.esp32.toml"),
+        require_write_access=lambda: None,
+        event_sink=Mock(side_effect=OSError("disk full")),
+    )
+    result = service.write_settings("re72_1", {"target_setpoint": "30"})
+    assert result.succeeded
+    assert "could not be logged" in result.summary
+    device.write_setting.assert_called_once_with("target_setpoint", "30")
+    device.read_settings.assert_called_once()
 
 
 class FakeBus:
@@ -138,6 +178,6 @@ def test_write_setting_rejects_fractional_raw_and_protected_values() -> None:
 
 
 def test_readback_verification_treats_equivalent_numeric_text_as_equal() -> None:
-    assert HomeViewModel._re72_values_match("12", "12.0")
-    assert HomeViewModel._re72_values_match("0.50", "0.5")
-    assert not HomeViewModel._re72_values_match("PID", "On/off")
+    assert Re72SettingsService._values_match("12", "12.0")
+    assert Re72SettingsService._values_match("0.50", "0.5")
+    assert not Re72SettingsService._values_match("PID", "On/off")

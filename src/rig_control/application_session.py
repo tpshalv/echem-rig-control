@@ -3,6 +3,7 @@ from pathlib import Path
 from rig_control.app_settings import AppSettings
 from rig_control.control.service import RigControlService
 from rig_control.data.directory_writer import DirectoryExperimentWriter
+from rig_control.data.run_context import capture_run_context
 from rig_control.device_factory import create_device_manager
 from rig_control.devices.manager import DeviceManager
 from rig_control.devices.esp32_controller import Esp32Controller
@@ -37,8 +38,13 @@ class ApplicationSession:
             profile,
             event_sink=self.technical_log.record,
         )
-        self.control_service = RigControlService(self.device_manager)
+        self.control_service = RigControlService(
+            self.device_manager, event_sink=self.record_control_event,
+        )
         self.experiment_recorder = ExperimentRecorder(
+            context_provider=lambda: capture_run_context(
+                self.profile, self.settings, self.device_manager,
+            ),
             writer_factory=lambda root_directory: DirectoryExperimentWriter(
                 root_directory,
                 export_bin_seconds=settings.export_bin_seconds,
@@ -70,6 +76,20 @@ class ApplicationSession:
         )
         self.runtime_diagnostics.start()
         self._closed = False
+
+    def record_control_event(self, event: Event, details: str | None = None) -> None:
+        """Send commands to both the technical log and the active run journal."""
+        failures = []
+        for record in (
+            lambda: self.technical_log.record(event, details),
+            lambda: self.experiment_recorder.record_event(event),
+        ):
+            try:
+                record()
+            except Exception as error:
+                failures.append(str(error))
+        if failures:
+            raise RuntimeError("; ".join(failures))
 
     def _esp32_heartbeat_metrics(self) -> dict[str, object]:
         return {

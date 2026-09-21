@@ -1,8 +1,5 @@
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
-import json
-import re
 from pathlib import Path
 
 from rig_control.app_selection import AppSelection, write_app_selection
@@ -15,8 +12,8 @@ from rig_control.app_settings import (
 from rig_control.app_settings_loading import load_app_settings
 from rig_control.app_settings_writing import write_app_settings
 from rig_control.application_session import ApplicationSession
-from rig_control.devices.lumel_re72 import LumelRe72, RE72_SETTINGS, Re72Setting
-from rig_control.models import DeviceStatus
+from rig_control.control.service import ControlMode
+from rig_control.instrument_settings.catalog import InstrumentSettingsCatalog
 from rig_control.rig_profile import RigProfile
 from rig_control.rig_profile_loading import load_rig_profile
 
@@ -45,12 +42,6 @@ class AppSettingRow:
     value: str
 
 
-@dataclass(frozen=True, slots=True)
-class Re72SettingRow:
-    definition: Re72Setting
-    value: str
-
-
 class HomeViewModel:
     """Own configuration selection and the one active application session."""
 
@@ -70,6 +61,21 @@ class HomeViewModel:
         self._profile = load_rig_profile(self._rig_profile_path)
         self._settings = load_app_settings(self._settings_path)
         self._session = self._build_session()
+
+    @property
+    def instrument_settings(self) -> InstrumentSettingsCatalog:
+        # Resolve against the current session, including after preferences change.
+        return InstrumentSettingsCatalog(
+            self._session.device_manager, self._profile,
+            require_write_access=self._require_instrument_settings_access,
+            event_sink=self._session.record_control_event,
+        )
+
+    def _require_instrument_settings_access(self) -> None:
+        if self.feature_active or self._session.experiment_recorder.is_recording:
+            raise RuntimeError("Close active feature screens before changing instrument settings.")
+        if self._session.control_service.mode is not ControlMode.IDLE:
+            raise RuntimeError("Instrument settings cannot change while control is active or fault-locked.")
 
     @property
     def session(self) -> ApplicationSession:
@@ -117,218 +123,6 @@ class HomeViewModel:
             )
             for definition in SETTING_DEFINITIONS
         )
-
-    def re72_device_ids(self) -> tuple[str, ...]:
-        manager = self._session.device_manager
-        return tuple(
-            device_id for device_id in manager.device_ids
-            if isinstance(manager.get(device_id), LumelRe72)
-        )
-
-    def empty_re72_setting_rows(self) -> tuple[Re72SettingRow, ...]:
-        """Rows used to build the editor before hardware has been read."""
-        return tuple(
-            Re72SettingRow(item, "") for item in RE72_SETTINGS if item.visible
-        )
-
-    def read_re72_settings(self, device_id: str) -> tuple[Re72SettingRow, ...]:
-        manager = self._session.device_manager
-        device = manager.get(device_id)
-        if not isinstance(device, LumelRe72):
-            raise TypeError(f"Device {device_id!r} is not an RE72")
-        if device.status is DeviceStatus.DISCONNECTED:
-            manager.connect(device_id)
-        with manager.operation(device_id):
-            values = device.read_settings()
-        return tuple(
-            Re72SettingRow(item, self._format_re72_value(item, values[item.key]))
-            for item in RE72_SETTINGS
-            if item.visible
-        )
-
-    def read_re72_runtime_state(self, device_id: str) -> dict[str, object]:
-        manager = self._session.device_manager
-        device = manager.get(device_id)
-        if not isinstance(device, LumelRe72):
-            raise TypeError(f"Device {device_id!r} is not an RE72")
-        with manager.operation(device_id):
-            return device.read_runtime_state()
-
-    def start_re72_autotune(self, device_id: str) -> HomeActionResult:
-        manager = self._session.device_manager
-        try:
-            device = manager.get(device_id)
-            if not isinstance(device, LumelRe72):
-                raise TypeError(f"Device {device_id!r} is not an RE72")
-            if device.status is DeviceStatus.DISCONNECTED:
-                manager.connect(device_id)
-            with manager.operation(device_id):
-                device.start_autotune()
-        except Exception as error:
-            return HomeActionResult(False, f"Could not start autotune: {error}")
-        return HomeActionResult(
-            True,
-            "Autotune command accepted; monitoring controller status.",
-        )
-
-    def save_re72_snapshot(self, device_id: str, path: str | Path) -> HomeActionResult:
-        manager = self._session.device_manager
-        try:
-            device = manager.get(device_id)
-            if not isinstance(device, LumelRe72):
-                raise TypeError(f"Device {device_id!r} is not an RE72")
-            if device.status is DeviceStatus.DISCONNECTED:
-                manager.connect(device_id)
-            with manager.operation(device_id):
-                registers = device.read_full_snapshot()
-                decoded = device.read_settings()
-            definitions = {item.key: item for item in RE72_SETTINGS}
-            friendly_name = self._profile.get_role(device_id).friendly_name
-            snapshot = {
-                "format": "rig-control.re72-snapshot",
-                "format_version": 1,
-                "created_utc": datetime.now(timezone.utc).isoformat(),
-                "source": {
-                    "device_id": device_id,
-                    "friendly_name": friendly_name,
-                    "slave_address": device.slave,
-                    "order_code_family": "RE72-122100",
-                    "register_range": [min(registers), max(registers)],
-                },
-                "decoded_settings": {
-                    key: {
-                        "label": definitions[key].label,
-                        "register": definitions[key].register,
-                        "value": self._format_re72_value(definitions[key], value),
-                        "raw_value": registers[definitions[key].register],
-                        "writable": definitions[key].writable,
-                    }
-                    for key, value in decoded.items()
-                },
-                "registers": {str(address): value for address, value in registers.items()},
-            }
-            destination = Path(path)
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_text(
-                json.dumps(snapshot, indent=2, sort_keys=True) + "\n",
-                encoding="utf-8",
-            )
-        except Exception as error:
-            return HomeActionResult(False, f"Could not save RE72 snapshot: {error}")
-        return HomeActionResult(
-            True,
-            f"Saved {len(registers)} RE72 registers to {destination}.",
-        )
-
-    def re72_snapshot_default_stem(self, device_id: str) -> str:
-        """Return a filesystem-safe controller/address and friendly-name prefix."""
-        friendly_name = self._profile.get_role(device_id).friendly_name.strip()
-        safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", friendly_name).strip("_-")
-        return f"{device_id}_{safe_name}" if safe_name else device_id
-
-    def restore_re72_snapshot(
-        self, device_id: str, path: str | Path
-    ) -> HomeActionResult:
-        manager = self._session.device_manager
-        try:
-            snapshot = json.loads(Path(path).read_text(encoding="utf-8"))
-            if snapshot.get("format") != "rig-control.re72-snapshot":
-                raise ValueError("File is not an RE72 settings snapshot")
-            if snapshot.get("format_version") != 1:
-                raise ValueError("Unsupported RE72 snapshot version")
-            raw_registers = snapshot.get("registers")
-            if not isinstance(raw_registers, dict):
-                raise ValueError("Snapshot has no register data")
-            registers = {
-                int(address): int(value) for address, value in raw_registers.items()
-            }
-            if any(not 0 <= value <= 65535 for value in registers.values()):
-                raise ValueError("Snapshot contains an invalid register value")
-            device = manager.get(device_id)
-            if not isinstance(device, LumelRe72):
-                raise TypeError(f"Device {device_id!r} is not an RE72")
-            if device.status is DeviceStatus.DISCONNECTED:
-                manager.connect(device_id)
-            with manager.operation(device_id):
-                changed = device.restore_snapshot(registers)
-        except Exception as error:
-            return HomeActionResult(False, f"Could not restore RE72 snapshot: {error}")
-        return HomeActionResult(
-            True,
-            f"Restored and verified {len(changed)} changed RE72 registers.",
-        )
-
-    def write_re72_setting(self, device_id: str, key: str, value: str) -> HomeActionResult:
-        manager = self._session.device_manager
-        try:
-            device = manager.get(device_id)
-            if not isinstance(device, LumelRe72):
-                raise TypeError(f"Device {device_id!r} is not an RE72")
-            if device.status is DeviceStatus.DISCONNECTED:
-                manager.connect(device_id)
-            with manager.operation(device_id):
-                device.write_setting(key, value)
-        except Exception as error:
-            return HomeActionResult(False, f"Could not update RE72: {error}")
-        return HomeActionResult(True, f"Updated {key} on {device_id}.")
-
-    def write_re72_settings(
-        self,
-        device_id: str,
-        values: Mapping[str, str],
-    ) -> HomeActionResult:
-        """Write a group of edited settings, then verify every value by reading back."""
-        manager = self._session.device_manager
-        try:
-            device = manager.get(device_id)
-            if not isinstance(device, LumelRe72):
-                raise TypeError(f"Device {device_id!r} is not an RE72")
-            if device.status is DeviceStatus.DISCONNECTED:
-                manager.connect(device_id)
-            with manager.operation(device_id):
-                for key, value in values.items():
-                    try:
-                        device.write_setting(key, value)
-                    except Exception as error:
-                        raise RuntimeError(f"{key}: {error}") from error
-                actual = device.read_settings()
-            definitions = {item.key: item for item in RE72_SETTINGS}
-            mismatches = []
-            for key, requested in values.items():
-                displayed = self._format_re72_value(definitions[key], actual[key])
-                if not self._re72_values_match(requested, displayed):
-                    mismatches.append(
-                        f"{definitions[key].label}: requested {requested!r}, "
-                        f"controller returned {displayed!r}"
-                    )
-            if mismatches:
-                return HomeActionResult(
-                    False,
-                    "RE72 did not retain the requested value(s): "
-                    + "; ".join(mismatches),
-                )
-        except Exception as error:
-            return HomeActionResult(False, f"Could not update RE72: {error}")
-        verified = ", ".join(
-            f"{definitions[key].label} = "
-            f"{self._format_re72_value(definitions[key], actual[key])}"
-            for key in values
-        )
-        return HomeActionResult(True, f"Applied and read back: {verified}.")
-
-    @staticmethod
-    def _format_re72_value(setting: Re72Setting, value: float | int) -> str:
-        labels = dict(setting.choices)
-        return labels.get(value, str(value))
-
-    @staticmethod
-    def _re72_values_match(requested: str, displayed: str) -> bool:
-        if requested == displayed:
-            return True
-        try:
-            return abs(float(requested) - float(displayed)) < 1e-9
-        except ValueError:
-            return False
 
     def apply_setting_text(
         self,

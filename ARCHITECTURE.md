@@ -271,6 +271,26 @@ stored in swappable TOML files. Rig profiles continue to describe the hardware;
 application settings describe software behavior such as the screen publishing
 interval and technical-log location.
 
+The Settings window separates **Application** preferences from **Instruments**.
+Detailed controller parameters, snapshots, and autotuning live in dedicated
+`ui/instrument_settings/` panels backed by UI-independent services in
+`instrument_settings/`. The RE72 is the first editor. Future potentiostats and
+GCs can add their own editors and configuration services through the explicit
+catalogs in those packages; their parameters do not belong in Home or in the
+application-settings registry. Hardware writes require idle control and no
+active feature screen or experiment recording.
+
+Device Setup's main window handles its device table and check history. Its
+`dialogs/` package owns profile and instrument dialogs. Its view model coordinates
+`profile_editor.py` (saved edits), `profile_builders.py` (candidate configurations),
+and `discovery.py` (read-only checks). Dialogs share an explicit context rather
+than inheriting the whole window.
+
+Operation's inline controls are the manual-control UI. The old standalone panels
+and their duplicate measurement reads have been removed. `ui/manual_control/`
+retains the command handling and power-supply safety rules used by Operation;
+measurements come from the shared polling service.
+
 The installed command `echem-rig-control` starts Home. Feature windows do not
 provide separate application entry points.
 
@@ -311,6 +331,16 @@ It contains:
 - Directory-based experiment writing.
 - Recovery from partially written journal files.
 - In-memory writers used by tests.
+
+Each session recording freezes the active rig profile, application settings,
+software version, and cached device identities/setpoints into `configuration.json`.
+The same snapshot is retained in metadata for existing export paths. It includes
+explicit real/simulated backends and is labelled as cached state: starting a run
+does not query every instrument's configuration registers. Commands routed through
+the control service produce structured events with parameters, source, and
+success/blocked/failure outcomes in both the technical log and the active run's
+event journal. A logging failure after a successful command is reported separately
+so it does not suggest that the hardware action needs to be repeated.
 
 Measurements can be recorded consistently regardless of which driver produced them.
 

@@ -73,6 +73,26 @@ def test_recording_has_explicit_start_and_stop() -> None:
     assert writer.is_open is False
 
 
+def test_context_and_command_events_are_recorded_only_for_the_active_run() -> None:
+    writer = InMemoryExperimentWriter()
+    context = {"configuration_snapshot_json": '{"version": 1}'}
+    recorder = ExperimentRecorder(
+        writer_factory=lambda _root: writer,
+        context_provider=lambda: context,
+    )
+    event = Event(source="supply", message="command result")
+    recorder.record_event(event)
+    assert writer.events == ()
+    recorder.start(metadata=metadata(), root_directory="unused")
+    context["configuration_snapshot_json"] = '{"version": 2}'
+    recorder.record_event(event)
+    assert writer.metadata.extra["configuration_snapshot_json"] == '{"version": 1}'
+    assert writer.events == (event,)
+    recorder.stop()
+    recorder.record_event(event)
+    assert writer.events == (event,)
+
+
 def test_batches_are_ignored_until_recording_starts() -> None:
     writer = InMemoryExperimentWriter()
     recorder = make_recorder(writer)

@@ -12,6 +12,7 @@ __pycache__/
 .coverage
 htmlcov/
 logs/
+tmp/
 
 # Editor settings
 .vscode/

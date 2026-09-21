@@ -1,5 +1,6 @@
 import json
 from datetime import datetime, timezone
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,18 @@ FIXED_TIME = datetime(
     45,
     tzinfo=timezone.utc,
 )
+
+
+def test_configuration_snapshot_is_saved_beside_the_run_metadata(tmp_path):
+    snapshot = {"format": "rig-control.run-context", "format_version": 1}
+    metadata = replace(make_metadata(), extra={"configuration_snapshot_json": json.dumps(snapshot)})
+    writer = DirectoryExperimentWriter(tmp_path)
+    writer.open_experiment(metadata)
+    directory = writer.experiment_directory
+    assert json.loads((directory / "configuration.json").read_text(encoding="utf-8")) == snapshot
+    persisted = json.loads((directory / "metadata.json").read_text(encoding="utf-8"))
+    assert json.loads(persisted["extra"]["configuration_snapshot_json"]) == snapshot
+    writer.close_experiment()
 
 
 def make_metadata(
@@ -214,6 +227,8 @@ def test_live_wide_csv_is_refreshed_while_recording(tmp_path: Path) -> None:
 
     assert writer.experiment_directory is not None
     csv_path = writer.experiment_directory / "measurements-wide.csv"
+    assert writer._live_export_future is not None
+    writer._live_export_future.result(timeout=2)
     assert csv_path.is_file()
     assert "outlet_temperature.temperature [degC]" in csv_path.read_text(
         encoding="utf-8-sig"

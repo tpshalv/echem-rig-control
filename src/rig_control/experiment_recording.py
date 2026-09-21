@@ -1,11 +1,13 @@
 from collections.abc import Callable
 from pathlib import Path
+from dataclasses import replace
 from threading import RLock
 
 from rig_control.data.directory_writer import DirectoryExperimentWriter
 from rig_control.data.experiment import ExperimentMetadata
 from rig_control.data.writer import ExperimentWriter
 from rig_control.polling import PollingBatch
+from rig_control.models import Event
 
 
 WriterFactory = Callable[[str | Path], ExperimentWriter]
@@ -18,8 +20,10 @@ class ExperimentRecorder:
         self,
         *,
         writer_factory: WriterFactory = DirectoryExperimentWriter,
+        context_provider: Callable[[], dict[str, str]] | None = None,
     ) -> None:
         self._writer_factory = writer_factory
+        self._context_provider = context_provider
         self._lock = RLock()
         self._writer: ExperimentWriter | None = None
         self._measurement_records_written = 0
@@ -53,6 +57,12 @@ class ExperimentRecorder:
     ) -> None:
         """Create and open a new experiment recording."""
 
+        # Capture outside the recorder lock: device operations can themselves
+        # publish audit events to this recorder.
+        if self._context_provider is not None:
+            metadata = replace(metadata, extra={
+                **metadata.extra, **self._context_provider(),
+            })
         with self._lock:
             if self.is_recording:
                 raise RuntimeError("An experiment is already being recorded")
@@ -62,6 +72,13 @@ class ExperimentRecorder:
             self._writer = writer
             self._measurement_records_written = 0
             self._event_records_written = 0
+
+    def record_event(self, event: Event) -> None:
+        """Record a command/configuration event only while a run is active."""
+        with self._lock:
+            if self._writer is not None and self._writer.is_open:
+                self._writer.write_event(event)
+                self._event_records_written += 1
 
     def stop(self) -> None:
         """Close the active recording and mark it complete."""

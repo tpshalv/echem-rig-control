@@ -51,6 +51,7 @@ def identify_scpi_power_supply(
                 connection.resource_name,
                 timeout_seconds=connection.timeout_seconds,
                 baud_rate=connection.baud_rate,
+                backend=getattr(connection, "backend", "@py"),
             )
         elif connection.host.strip().upper() == "CHANGE_ME":
             raise ValueError(

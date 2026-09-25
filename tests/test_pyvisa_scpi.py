@@ -64,3 +64,22 @@ def test_visa_transport_configures_and_uses_portable_resource() -> None:
 def test_visa_transport_rejects_empty_resource() -> None:
     with pytest.raises(ValueError, match="cannot be empty"):
         PyVisaScpiTransport(" ")
+
+
+def test_visa_transport_can_select_installed_visa_backend() -> None:
+    manager = FakeManager()
+    selected = []
+
+    def factory(backend: str):
+        selected.append(backend)
+        return manager
+
+    transport = PyVisaScpiTransport(
+        "USB0::0x05E6::0x2280::1234567::INSTR",
+        backend="@ni",
+        resource_manager_factory=factory,
+    )
+    transport.open()
+    transport.close()
+
+    assert selected == ["@ni"]

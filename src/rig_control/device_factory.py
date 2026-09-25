@@ -342,11 +342,13 @@ def _create_real_scpi_power_supply(
             connection,
             (VisaScpiConfiguration, AsterionVisaScpiConfiguration),
         ):
-            transport = PyVisaScpiTransport(
-                connection.resource_name,
-                timeout_seconds=connection.timeout_seconds,
-                baud_rate=connection.baud_rate,
-            )
+            visa_options = {
+                "timeout_seconds": connection.timeout_seconds,
+                "baud_rate": connection.baud_rate,
+            }
+            if getattr(connection, "backend", "@py") != "@py":
+                visa_options["backend"] = connection.backend
+            transport = PyVisaScpiTransport(connection.resource_name, **visa_options)
         else:
             transport = SocketScpiTransport(
                 host=connection.host,

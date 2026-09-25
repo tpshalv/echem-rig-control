@@ -32,6 +32,7 @@ class PowerSupplyDialogs(SetupDialog):
             ("Connection method (Ethernet or VISA)", "VISA"),
             ("VISA resource", "ASRL4::INSTR"),
             ("VISA baud rate", "9600"),
+            ("VISA backend (@ni requires NI-VISA)", "@py"),
             ("IP address or host name", ""),
             ("SCPI port", str(initial_metadata["default_port"])),
             ("Timeout (seconds)", "5"),
@@ -67,6 +68,14 @@ class PowerSupplyDialogs(SetupDialog):
                     state="readonly",
                 )
                 entry.set(default)
+            elif label == "VISA backend (@ni requires NI-VISA)":
+                entry = ttk.Combobox(
+                    form,
+                    width=32,
+                    values=("@py", "@ni"),
+                    state="readonly",
+                )
+                entry.set(default)
             else:
                 entry = ttk.Entry(form, width=32)
                 entry.insert(0, default)
@@ -75,6 +84,7 @@ class PowerSupplyDialogs(SetupDialog):
             entries[label] = entry
 
         visa_fields = ("VISA resource", "VISA baud rate")
+        visa_backend_field = "VISA backend (@ni requires NI-VISA)"
         ethernet_fields = ("IP address or host name", "SCPI port")
 
         def update_model_defaults(*_args: object) -> None:
@@ -108,6 +118,9 @@ class PowerSupplyDialogs(SetupDialog):
                 action = "grid" if method == "visa" else "grid_remove"
                 getattr(labels[field], action)()
                 getattr(entries[field], action)()
+            action = "grid" if method == "visa" else "grid_remove"
+            getattr(labels[visa_backend_field], action)()
+            getattr(entries[visa_backend_field], action)()
             for field in ethernet_fields:
                 action = "grid" if method == "ethernet" else "grid_remove"
                 getattr(labels[field], action)()
@@ -172,6 +185,7 @@ class PowerSupplyDialogs(SetupDialog):
                     ].get(),
                     resource_name=entries["VISA resource"].get(),
                     visa_baud_rate=int(entries["VISA baud rate"].get().strip()),
+                    visa_backend=entries["VISA backend (@ni requires NI-VISA)"].get().strip(),
                     poll_interval_seconds=float(
                         entries["Measurement interval (seconds)"].get().strip()
                     ),

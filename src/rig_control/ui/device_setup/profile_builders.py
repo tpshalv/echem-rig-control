@@ -159,6 +159,8 @@ class DeviceProfileBuilder:
             raise ValueError(
                 "Power-supply connection method must be Ethernet or VISA"
             )
+        if request.visa_backend not in {"@py", "@ni"}:
+            raise ValueError("Power-supply VISA backend must be '@py' or '@ni'")
         host = request.host.strip()
         resource_name = request.resource_name.strip()
         if method == "visa":
@@ -243,6 +245,7 @@ class DeviceProfileBuilder:
                 {
                     "resource_name": resource_name,
                     "baud_rate": request.visa_baud_rate,
+                    "visa_backend": request.visa_backend,
                     "timeout_seconds": float(request.timeout_seconds),
                 }
                 if method == "visa"

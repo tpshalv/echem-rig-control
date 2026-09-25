@@ -180,6 +180,15 @@ driver reports an error when it is off. The manual permits 6.1 A programming,
 but this driver deliberately enforces the rated 6 A. No `MEAS:POW:DC?` command
 is exposed because the manual does not list a power measurement function.
 
+For a 2280S connection, `socket_scpi` is the self-contained Ethernet path.
+The raw socket port is normally 5025 on firmware 1.06 and later and 5050 on
+older firmware. A `visa_scpi` profile can use the pure-Python `@py` backend
+for existing serial/VISA installations, or explicitly select
+`visa_backend = "@ni"` for a USBTMC connection. The latter requires a
+separate NI-VISA installation on that computer; NI-VISA is not a general
+application dependency and is not needed by Ethernet or by profiles that
+continue to use `@py`.
+
 ## ESP32 subsystem
 
 The ESP32 is a remote controller rather than one individual sensor.

@@ -28,11 +28,13 @@ def identify_keithley(
 
     if transport is None:
         if isinstance(connection, VisaScpiConfiguration):
-            transport = PyVisaScpiTransport(
-                connection.resource_name,
-                timeout_seconds=connection.timeout_seconds,
-                baud_rate=connection.baud_rate,
-            )
+            visa_options = {
+                "timeout_seconds": connection.timeout_seconds,
+                "baud_rate": connection.baud_rate,
+            }
+            if getattr(connection, "backend", "@py") != "@py":
+                visa_options["backend"] = connection.backend
+            transport = PyVisaScpiTransport(connection.resource_name, **visa_options)
         elif connection.host.strip().upper() == "CHANGE_ME":
             raise ValueError(
                 "The Keithley IP address has not been configured. "

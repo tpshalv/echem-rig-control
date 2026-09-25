@@ -54,6 +54,7 @@ class VisaScpiConfiguration:
     resource_name: str
     timeout_seconds: float = 5.0
     baud_rate: int = 9600
+    backend: str = "@py"
 
     def __post_init__(self) -> None:
         if not isinstance(self.resource_name, str) or not self.resource_name.strip():
@@ -68,6 +69,8 @@ class VisaScpiConfiguration:
             raise TypeError("VISA baud rate must be an integer")
         if self.baud_rate <= 0:
             raise ValueError("VISA baud rate must be greater than zero")
+        if self.backend not in {"@py", "@ni"}:
+            raise ValueError("VISA backend must be '@py' or '@ni'")
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,6 +176,10 @@ def _configuration_from_profile[T: Keithley2260BConfiguration](
                 connection.parameters,
                 "baud_rate",
                 f"connections.{connection.connection_id}.parameters.baud_rate",
+            ),
+            backend=_optional_text(
+                connection.parameters, "visa_backend", "@py",
+                f"connections.{connection.connection_id}.parameters.visa_backend",
             ),
         ) if connection.connection_type == "visa_scpi" else SocketScpiConfiguration(
             host=_require_text(
@@ -295,3 +302,14 @@ def _optional_number(
         return default
 
     return _require_number(values, key, setting_name)
+
+
+def _optional_text(
+    values: Mapping[str, ConfigurationValue],
+    key: str,
+    default: str,
+    setting_name: str,
+) -> str:
+    if key not in values:
+        return default
+    return _require_text(values, key, setting_name)

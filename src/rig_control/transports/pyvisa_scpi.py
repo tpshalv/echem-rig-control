@@ -20,10 +20,10 @@ class VisaResourceManager(Protocol):
     def close(self) -> None: ...
 
 
-type ResourceManagerFactory = Callable[[], VisaResourceManager]
+type ResourceManagerFactory = Callable[[str], VisaResourceManager]
 
 
-def _pure_python_resource_manager() -> VisaResourceManager:
+def _pure_python_resource_manager(backend: str = "@py") -> VisaResourceManager:
     try:
         import pyvisa
     except ImportError as error:
@@ -31,7 +31,7 @@ def _pure_python_resource_manager() -> VisaResourceManager:
             "VISA communication requires the hardware dependencies: "
             "pip install -e .[hardware]"
         ) from error
-    return pyvisa.ResourceManager("@py")
+    return pyvisa.ResourceManager(backend)
 
 
 class PyVisaScpiTransport(ScpiTransport):
@@ -43,6 +43,7 @@ class PyVisaScpiTransport(ScpiTransport):
         *,
         timeout_seconds: float = 5.0,
         baud_rate: int = 9600,
+        backend: str = "@py",
         resource_manager_factory: ResourceManagerFactory = (
             _pure_python_resource_manager
         ),
@@ -59,9 +60,12 @@ class PyVisaScpiTransport(ScpiTransport):
             raise TypeError("VISA baud rate must be an integer")
         if baud_rate <= 0:
             raise ValueError("VISA baud rate must be greater than zero")
+        if backend not in {"@py", "@ni"}:
+            raise ValueError("VISA backend must be '@py' or '@ni'")
         self._resource_name = resource_name.strip()
         self._timeout_seconds = float(timeout_seconds)
         self._baud_rate = baud_rate
+        self._backend = backend
         self._resource_manager_factory = resource_manager_factory
         self._manager: VisaResourceManager | None = None
         self._resource: VisaResource | None = None
@@ -75,7 +79,11 @@ class PyVisaScpiTransport(ScpiTransport):
             raise RuntimeError(
                 f"VISA resource {self._resource_name!r} is already open"
             )
-        manager = self._resource_manager_factory()
+        try:
+            manager = self._resource_manager_factory(self._backend)  # type: ignore[call-arg]
+        except TypeError:
+            # Preserve injectable zero-argument factories used by existing tests.
+            manager = self._resource_manager_factory()
         try:
             resource = manager.open_resource(self._resource_name)
             resource.timeout = round(self._timeout_seconds * 1000)
@@ -88,7 +96,10 @@ class PyVisaScpiTransport(ScpiTransport):
             except Exception:
                 pass
             raise ConnectionError(
-                f"Could not open VISA resource {self._resource_name!r}: {error}"
+                f"Could not open VISA resource {self._resource_name!r} using "
+                f"{self._backend}: {error}."
+                + (" Install NI-VISA and select the NI-VISA backend for USBTMC."
+                   if self._backend == "@ni" else "")
             ) from error
         self._manager = manager
         self._resource = resource

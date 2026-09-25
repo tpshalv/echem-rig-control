@@ -147,6 +147,7 @@ class AddKeithleyRequest:
     connection_method: str = "ethernet"
     resource_name: str = ""
     visa_baud_rate: int = 9600
+    visa_backend: str = "@py"
     poll_interval_seconds: float = 0.1
     driver: str = "keithley_2260b"
 

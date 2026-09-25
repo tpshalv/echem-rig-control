@@ -13,6 +13,8 @@ class DeviceCapability(StrEnum):
 
     MASS_FLOW_CONTROLLER = "mass_flow_controller"
     MASS_FLOW_METER = "mass_flow_meter"
+    BACK_PRESSURE_CONTROLLER = "back_pressure_controller"
+    PERISTALTIC_PUMP = "peristaltic_pump"
 
     DC_POWER_SUPPLY = "dc_power_supply"
     POTENTIOSTAT = "potentiostat"

@@ -15,9 +15,12 @@ from rig_control.devices.keithley_2280s.configuration import (
     Keithley2280SConfiguration,
 )
 from rig_control.devices.keithley_2260b.protocol import KeithleyIdentity
+from rig_control.devices.kamoer_m1_stp.configuration import KamoerM1StpConfiguration
 from rig_control.devices.ohaus_guardian_5000.configuration import GuardianConfiguration
 from rig_control.devices.ohaus_guardian_5000.protocol import GuardianIdentity, OperatingMode
+from rig_control.devices.pump import PumpDirection
 from rig_control.diagnostics.alicat import AlicatDiagnosticResult, DiscoveredAlicat
+from rig_control.diagnostics.kamoer_m1_stp import KamoerM1StpDiagnosticResult
 from rig_control.diagnostics.ohaus_guardian import GuardianDiagnosticResult
 from rig_control.diagnostics.esp32 import Esp32ReadinessResult
 from rig_control.diagnostics.esp32 import Esp32DiscoveryResult
@@ -28,6 +31,7 @@ from rig_control.ui.device_setup.model import (
     AddGuardianRequest,
     AddKeithleyRequest,
     AddEsp32Request,
+    AddKamoerM1StpRequest,
     AlicatScanRow,
     DeviceSetupViewModel,
     SerialPortInfo,
@@ -428,7 +432,7 @@ def test_alicat_scan_marks_matching_profile_device_as_already_added() -> None:
     assert found[0].configured_kind == "Controller"
 
 
-def test_alicat_check_uses_read_only_diagnostic_and_updates_readiness() -> None:
+def test_alicat_poll_alone_does_not_authorize_controller_operation() -> None:
     captured: list[AlicatMfcConfiguration] = []
 
     def check(configuration: AlicatMfcConfiguration) -> AlicatDiagnosticResult:
@@ -454,12 +458,11 @@ def test_alicat_check_uses_read_only_diagnostic_and_updates_readiness() -> None:
 
     result = model.check_device("nitrogen_mfc")
 
-    assert result.succeeded is True
+    assert result.succeeded is False
     assert captured[0].unit_address == "A"
-    assert "mass flow 0 sccm" in result.summary
-    assert "Raw response" in result.technical_details
+    assert "unverified" in result.technical_details
     rows = {row.device_id: row for row in model.device_rows()}
-    assert rows["nitrogen_mfc"].readiness == "ready"
+    assert rows["nitrogen_mfc"].readiness != "ready"
 
 
 def test_keithley_check_uses_identification_diagnostic() -> None:
@@ -1081,6 +1084,143 @@ def test_duplicate_guardian_port_is_rejected_without_check(tmp_path) -> None:
 
     result = model.add_guardian_and_check(
         AddGuardianRequest("hotplate_2", "Guardian 5000 B", "", "COM8")
+    )
+
+    assert result.succeeded is False
+    assert "already used" in result.technical_details
+    assert calls == 1
+
+
+def _pump_diagnostic(**overrides) -> KamoerM1StpDiagnosticResult:
+    values = dict(
+        fault_status=0, running=False,
+        direction=PumpDirection.FORWARD, speed_setpoint_rpm=0.0,
+    )
+    values.update(overrides)
+    return KamoerM1StpDiagnosticResult(**values)
+
+
+def test_checked_pump_is_saved_to_new_local_profile(tmp_path) -> None:
+    profile_path = tmp_path / "rig-profile.toml"
+    empty_profile = replace(
+        load_rig_profile("rig-profile.example.toml"),
+        connections=(),
+        device_roles=(),
+    )
+
+    def check(configuration: KamoerM1StpConfiguration) -> KamoerM1StpDiagnosticResult:
+        assert configuration.port == "COM9"
+        assert configuration.slave == 3
+        return _pump_diagnostic(speed_setpoint_rpm=12.5)
+
+    model = DeviceSetupViewModel(
+        empty_profile,
+        profile_path=profile_path,
+        kamoer_m1_stp_checker=check,
+    )
+
+    result = model.add_kamoer_m1_stp_and_check(
+        AddKamoerM1StpRequest(
+            device_id="pump1",
+            hardware_label="Feed pump",
+            purpose_label="Electrolyte dosing",
+            port="COM9",
+            slave=3,
+            maximum_speed_rpm=200.0,
+        )
+    )
+
+    assert result.succeeded is True
+    saved = load_rig_profile(profile_path)
+    role = saved.get_role("pump1")
+    assert role.friendly_name == "Feed pump"
+    assert role.driver == "kamoer_m1_stp"
+    assert role.capability is DeviceCapability.PERISTALTIC_PUMP
+    assert role.settings["purpose_label"] == "Electrolyte dosing"
+    assert role.settings["slave"] == 3
+    assert role.settings["maximum_speed_rpm"] == 200.0
+    assert saved.get_connection(role.connection_id).parameters["port"] == "COM9"
+    assert saved.get_connection(role.connection_id).parameters["baud_rate"] == 9600
+
+
+def test_faulted_pump_check_does_not_write_profile(tmp_path) -> None:
+    profile_path = tmp_path / "rig-profile.toml"
+    empty_profile = replace(
+        load_rig_profile("rig-profile.example.toml"),
+        connections=(),
+        device_roles=(),
+    )
+
+    def faulted(_: KamoerM1StpConfiguration) -> KamoerM1StpDiagnosticResult:
+        return _pump_diagnostic(fault_status=3)
+
+    model = DeviceSetupViewModel(
+        empty_profile,
+        profile_path=profile_path,
+        kamoer_m1_stp_checker=faulted,
+    )
+
+    result = model.add_kamoer_m1_stp_and_check(
+        AddKamoerM1StpRequest("pump1", "Feed pump", "", "COM9")
+    )
+
+    assert result.succeeded is False
+    assert "fault" in result.technical_details.lower()
+    assert not profile_path.exists()
+
+
+def test_failed_pump_check_does_not_write_profile(tmp_path) -> None:
+    profile_path = tmp_path / "rig-profile.toml"
+    empty_profile = replace(
+        load_rig_profile("rig-profile.example.toml"),
+        connections=(),
+        device_roles=(),
+    )
+
+    def fail(_: KamoerM1StpConfiguration) -> KamoerM1StpDiagnosticResult:
+        raise TimeoutError("no response")
+
+    model = DeviceSetupViewModel(
+        empty_profile,
+        profile_path=profile_path,
+        kamoer_m1_stp_checker=fail,
+    )
+
+    result = model.add_kamoer_m1_stp_and_check(
+        AddKamoerM1StpRequest("pump1", "Feed pump", "", "COM9")
+    )
+
+    assert result.succeeded is False
+    assert not profile_path.exists()
+
+
+def test_duplicate_pump_port_is_rejected_without_check(tmp_path) -> None:
+    calls = 0
+
+    def check(_: KamoerM1StpConfiguration) -> KamoerM1StpDiagnosticResult:
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise AssertionError("check should not run again")
+        return _pump_diagnostic()
+
+    empty_profile = replace(
+        load_rig_profile("rig-profile.example.toml"),
+        connections=(),
+        device_roles=(),
+    )
+    model = DeviceSetupViewModel(
+        empty_profile,
+        profile_path=tmp_path / "rig-profile.toml",
+        kamoer_m1_stp_checker=check,
+    )
+    first = model.add_kamoer_m1_stp_and_check(
+        AddKamoerM1StpRequest("pump1", "Feed pump", "", "COM9")
+    )
+    assert first.succeeded is True
+
+    result = model.add_kamoer_m1_stp_and_check(
+        AddKamoerM1StpRequest("pump2", "Feed pump 2", "", "COM9")
     )
 
     assert result.succeeded is False

@@ -1,4 +1,7 @@
-from math import isfinite
+from math import isfinite, isclose
+
+from rig_control.devices.alicat.control_support import AlicatVerifiedControl
+from rig_control.devices.alicat.measurements import state_measurements
 
 from rig_control.devices.alicat.configuration import AlicatMfcConfiguration
 from rig_control.devices.alicat.protocol import (
@@ -14,7 +17,7 @@ from rig_control.models import DeviceStatus, Measurement
 from rig_control.read_retry import retry_read
 
 
-class AlicatMassFlowController(MassFlowController):
+class AlicatMassFlowController(AlicatVerifiedControl, MassFlowController):
     """Rig-facing adapter for one addressed Alicat MFC."""
 
     def __init__(
@@ -22,6 +25,7 @@ class AlicatMassFlowController(MassFlowController):
         configuration: AlicatMfcConfiguration,
         protocol: AlicatProtocolClient,
         *,
+        event_sink=None,
         read_attempts: int = 3,
         read_retry_delay_seconds: float = 0.05,
     ) -> None:
@@ -30,6 +34,9 @@ class AlicatMassFlowController(MassFlowController):
         if not isinstance(protocol, AlicatProtocolClient):
             raise TypeError("protocol must be an AlicatProtocolClient")
 
+        if configuration.is_bpr:
+            raise ValueError("A BPR must use the pressure-only adapter")
+        self._initialize_verification(event_sink)
         self._configuration = configuration
         self._protocol = protocol
         self._status = DeviceStatus.DISCONNECTED
@@ -75,6 +82,7 @@ class AlicatMassFlowController(MassFlowController):
         try:
             self._protocol.connect()
             self._refresh_state("connect")
+            self._inspect_control()
         except Exception:
             self._status = DeviceStatus.FAULTED
             self._protocol.disconnect()
@@ -86,11 +94,14 @@ class AlicatMassFlowController(MassFlowController):
 
         self._protocol.disconnect()
         self._state = None
+        self.control_ready = False
+        self.verification_message = "Disconnected; verification required"
         self._status = DeviceStatus.DISCONNECTED
 
     def set_flow_setpoint(self, flow: float) -> None:
         self._require_ready()
         numeric_flow = self._validate_flow(flow)
+        self.verify_control()
 
         try:
             self._protocol.set_flow_setpoint(
@@ -99,7 +110,11 @@ class AlicatMassFlowController(MassFlowController):
             )
             # A command acknowledgement is not proof of the current state.
             # Query again so reconnects and failed commands are never assumed.
+            self.verify_control()
             self._refresh_state("verify set flow")
+            confirmed, unit = self._protocol.read_setpoint(self.unit_address)
+            if unit.casefold() != self.limits.flow_unit.casefold() or not isclose(confirmed, numeric_flow, rel_tol=0, abs_tol=self._configuration.setpoint_tolerance):
+                raise RuntimeError("Alicat flow setpoint was not confirmed")
         except Exception as error:
             self._status = DeviceStatus.FAULTED
             if isinstance(error, RuntimeError) and str(error).startswith(
@@ -110,6 +125,7 @@ class AlicatMassFlowController(MassFlowController):
 
     def measure_flow(self) -> Measurement:
         self._require_ready()
+        self.verify_control()
         state = self._refresh_state("read state", retry=True)
         return Measurement(
             value=state.mass_flow,
@@ -122,67 +138,9 @@ class AlicatMassFlowController(MassFlowController):
         """Read one status frame and expose all numeric Alicat channels."""
 
         self._require_ready()
+        self.verify_control()
         state = self._refresh_state("read state", retry=True)
-        values = [
-            DeviceMeasurement(
-                "mass_flow",
-                Measurement(
-                    state.mass_flow,
-                    state.mass_flow_unit,
-                    state.timestamp,
-                    state.quality,
-                ),
-            ),
-            DeviceMeasurement(
-                "volumetric_flow",
-                Measurement(
-                    state.volumetric_flow,
-                    state.volumetric_flow_unit,
-                    state.timestamp,
-                    state.quality,
-                ),
-            ),
-            DeviceMeasurement(
-                "absolute_pressure",
-                Measurement(
-                    state.absolute_pressure,
-                    state.pressure_unit,
-                    state.timestamp,
-                    state.quality,
-                ),
-            ),
-            DeviceMeasurement(
-                "gas_temperature",
-                Measurement(
-                    state.gas_temperature,
-                    state.temperature_unit,
-                    state.timestamp,
-                    state.quality,
-                ),
-            ),
-            DeviceMeasurement(
-                "setpoint",
-                Measurement(
-                    state.setpoint,
-                    state.setpoint_unit,
-                    state.timestamp,
-                    state.quality,
-                ),
-            ),
-        ]
-        if state.totalized_flow is not None:
-            values.append(
-                DeviceMeasurement(
-                    "totalized_flow",
-                    Measurement(
-                        state.totalized_flow,
-                        state.totalized_flow_unit or "",
-                        state.timestamp,
-                        state.quality,
-                    ),
-                )
-            )
-        return tuple(values)
+        return state_measurements(state)
 
     def enter_safe_state(self) -> None:
         if self.status is DeviceStatus.DISCONNECTED:

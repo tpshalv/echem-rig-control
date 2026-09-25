@@ -1,3 +1,4 @@
+from rig_control.devices.alicat.verification import AlicatControlConfiguration, frame_signature
 from dataclasses import replace
 from datetime import UTC, datetime
 
@@ -25,6 +26,13 @@ class FakeAlicatProtocol(AlicatProtocolClient):
         self.set_requests: list[tuple[str, float]] = []
         self.read_error: Exception | None = None
         self.set_error: Exception | None = None
+
+    def read_control_configuration(self, unit_address):
+        return AlicatControlConfiguration("123", "MC-200SCCM-D", "10v05", 37, "sccm", False,
+                                          0, 200, "test frame", datetime.now(UTC))
+
+    def read_setpoint(self, unit_address):
+        return self.set_requests[-1][1], "sccm"
 
     def read_state(self, unit_address: str) -> AlicatInstrumentState:
         self.read_addresses.append(unit_address)
@@ -67,6 +75,8 @@ def make_driver(
     return AlicatMassFlowController(
         AlicatMfcConfiguration(
             device_id="mfc_a",
+            expected_serial="123",
+            verified_frame_signature=frame_signature("test frame"),
             friendly_name="MFC A",
             unit_address="A",
             connection=AlicatSerialConfiguration(

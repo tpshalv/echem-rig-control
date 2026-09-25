@@ -65,6 +65,12 @@ class AlicatMfcConfiguration:
     frame_fields: tuple[AlicatFrameField, ...]
     engineering_units: AlicatEngineeringUnits
     is_controller: bool = True
+    is_bpr: bool = False
+    expected_serial: str | None = None
+    verified_frame_signature: str | None = None
+    downstream_valve_confirmed: bool = False
+    maximum_pressure_bara: float = 2.5
+    setpoint_tolerance: float = 0.001
 
     def __post_init__(self) -> None:
         _validate_text(self.device_id, "Alicat device ID")
@@ -102,6 +108,15 @@ class AlicatMfcConfiguration:
             )
         if not isinstance(self.is_controller, bool):
             raise TypeError("Alicat is_controller must be Boolean")
+        for name in ("is_bpr", "downstream_valve_confirmed"):
+            if not isinstance(getattr(self, name), bool):
+                raise TypeError(f"{name} must be Boolean")
+        if self.is_bpr and not self.is_controller:
+            raise ValueError("A BPR must be a controller")
+        for name in ("maximum_pressure_bara", "setpoint_tolerance"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be finite and positive")
 
 
 def configuration_from_profile(
@@ -146,7 +161,8 @@ def configuration_from_profile(
         f"devices.{role.device_id}.settings.flow_unit",
     )
 
-    is_controller = role.capability is DeviceCapability.MASS_FLOW_CONTROLLER
+    is_bpr = role.capability is DeviceCapability.BACK_PRESSURE_CONTROLLER
+    is_controller = role.capability in {DeviceCapability.MASS_FLOW_CONTROLLER, DeviceCapability.BACK_PRESSURE_CONTROLLER}
     return AlicatMfcConfiguration(
         device_id=role.device_id,
         friendly_name=role.friendly_name,
@@ -204,7 +220,7 @@ def configuration_from_profile(
                 "temperature_unit",
                 f"devices.{role.device_id}.settings.temperature_unit",
             ),
-            setpoint=flow_unit,
+            setpoint=str(role.settings.get("pressure_unit", "psia")) if is_bpr else flow_unit,
             totalized_flow=_optional_text(
                 role.settings,
                 "totalized_flow_unit",
@@ -212,6 +228,12 @@ def configuration_from_profile(
             ),
         ),
         is_controller=is_controller,
+        is_bpr=is_bpr,
+        expected_serial=(role.expected_identity.serial_number if role.expected_identity else None),
+        verified_frame_signature=_optional_text(role.settings, "verified_frame_signature", "verified_frame_signature"),
+        downstream_valve_confirmed=role.settings.get("downstream_valve_confirmed", False),
+        maximum_pressure_bara=role.settings.get("maximum_pressure_bara", 2.5),
+        setpoint_tolerance=role.settings.get("setpoint_tolerance", 0.001),
     )
 
 
@@ -249,6 +271,7 @@ def _validate_alicat_role(role: DeviceRole) -> None:
     if role.capability not in {
         DeviceCapability.MASS_FLOW_CONTROLLER,
         DeviceCapability.MASS_FLOW_METER,
+        DeviceCapability.BACK_PRESSURE_CONTROLLER,
     }:
         raise ValueError(
             f"Device role {role.device_id!r} is not configured as a "

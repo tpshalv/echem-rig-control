@@ -1,7 +1,7 @@
 from collections.abc import Callable
 from pathlib import Path
 from dataclasses import replace
-from threading import RLock
+from threading import Lock, RLock
 
 from rig_control.data.directory_writer import DirectoryExperimentWriter
 from rig_control.data.experiment import ExperimentMetadata
@@ -25,6 +25,8 @@ class ExperimentRecorder:
         self._writer_factory = writer_factory
         self._context_provider = context_provider
         self._lock = RLock()
+        self._export_lock = Lock()
+        self._last_writer: ExperimentWriter | None = None
         self._writer: ExperimentWriter | None = None
         self._measurement_records_written = 0
         self._event_records_written = 0
@@ -70,6 +72,7 @@ class ExperimentRecorder:
             writer = self._writer_factory(root_directory)
             writer.open_experiment(metadata)
             self._writer = writer
+            self._last_writer = writer
             self._measurement_records_written = 0
             self._event_records_written = 0
 
@@ -80,18 +83,34 @@ class ExperimentRecorder:
                 self._writer.write_event(event)
                 self._event_records_written += 1
 
-    def stop(self) -> None:
-        """Close the active recording and mark it complete."""
-
+    @property
+    def experiment_directory(self) -> Path | None:
         with self._lock:
-            if not self.is_recording:
-                raise RuntimeError("No experiment is being recorded")
+            return getattr(self._last_writer, "experiment_directory", None)
 
-            assert self._writer is not None
-            try:
-                self._writer.close_experiment()
-            finally:
+    def export_excel(self, directory: str | Path | None = None) -> Path:
+        """Export outside the acquisition lock so readings keep being saved."""
+        from rig_control.data.export import export_excel
+
+        with self._export_lock:
+            with self._lock:
+                writer = self._last_writer
+            if directory is not None:
+                return export_excel(directory)
+            if not isinstance(writer, DirectoryExperimentWriter):
+                raise RuntimeError("No experiment folder is available to export")
+            return writer.export_excel()
+
+    def stop(self) -> None:
+        """Detach acquisition, then finish exports without holding its lock."""
+        with self._export_lock:
+            with self._lock:
+                if not self.is_recording:
+                    raise RuntimeError("No experiment is being recorded")
+                writer = self._writer
                 self._writer = None
+            assert writer is not None
+            writer.close_experiment()
 
     def record_batch(self, batch: PollingBatch) -> None:
         """Record each newly acquired measurement exactly once."""

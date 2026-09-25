@@ -484,3 +484,29 @@ Before recipes are implemented:
 ## Building a standalone exe
 
 Run `python scripts/build_exe.py` (needs `pip install -e .[hardware,build]`). It is not part of normal app or test runs. Output goes to `dist/echem-rig-control-<version>/`; the version comes from `pyproject.toml`. New dynamically imported packages or data files go in the constants at the top of that script.
+
+
+## Long-run recording exports
+
+The measurement and event journals retain original readings and timestamps.
+The live `measurements-wide.csv` uses the configured export interval (one second
+by default), averaging measurements within each nearest time bin and taking the
+latest setpoint/state value. Missing readings remain blank.
+
+CSV refreshes read only newly appended journal lines. A rebuildable
+`export-cache.sqlite3` stores aggregate bins and the journal byte offset on disk,
+so memory use does not grow with recording length. Ordinary refreshes append
+completed rows, holding the latest two seconds of bins for asynchronous readings.
+A newly discovered channel or a late reading in an already exported bin triggers
+a streamed CSV rebuild to preserve the header and correct values. A failed write
+can be retried without counting readings twice. Keep journals as the authoritative
+record; the cache is derived data. The export cache is not a recording-resume feature.
+
+Stopping recording finishes the CSV and creates `experiment.xlsx`. Operation's
+**Export Excel** button also creates a snapshot during recording, without holding
+the acquisition lock. When idle, it prompts for an existing experiment folder.
+The workbook contains Overview, Data and Events; original raw readings remain in
+the journals rather than a duplicate worksheet. Excel is streamed with bounded
+memory, and Data/Events continue on numbered sheets at Excel's row limit. Displayed
+timestamps use seconds unless a subsecond export interval is configured. An
+on-demand snapshot may include the latest, still-incomplete time bin.

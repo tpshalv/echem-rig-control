@@ -114,6 +114,23 @@ class PySerialTextTransport(SerialTextTransport):
                 f"within {self._timeout_seconds:g} seconds for "
                 f"request {message!r}"
             )
+        if message.upper().endswith(("??M*", "??D*")):
+            # Alicat tables terminate with an idle interval, not a single line.
+            # Keep this inside the caller's bus lock. Never leave a partial table
+            # queued for a subsequent addressed request.
+            lines = [response]
+            for _ in range(63):
+                following = self._serial.readline()
+                if not following:
+                    response = b"\n".join(line.rstrip(b"\r\n") for line in lines)
+                    break
+                lines.append(following)
+                if sum(map(len, lines)) > 32768:
+                    self.close()
+                    raise ValueError("Alicat multiline response exceeds 32768 bytes; connection closed")
+            else:
+                self.close()
+                raise ValueError("Alicat multiline response exceeds 64 lines; connection closed")
         try:
             if self._line_ending == "\r\n" and not response.endswith(b"\r\n"):
                 raise TimeoutError("Incomplete CRLF serial response")

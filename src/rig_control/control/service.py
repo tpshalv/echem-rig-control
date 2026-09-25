@@ -1,3 +1,4 @@
+from rig_control.devices.pressure_controller import PressureController
 from dataclasses import asdict, dataclass
 from collections import deque
 import json
@@ -10,12 +11,17 @@ from rig_control.control.commands import (
     ControlCommand,
     EnterDeviceSafeState,
     SetMfcFlow,
+    SetPressureSetpoint,
+    ResumePressureControl,
     SetPowerSupplyCurrentLimit,
     SetPowerSupplyOutput,
     SetPowerSupplyVoltage,
     SetControllerOutput,
     RearmController,
     SetTemperatureSetpoint,
+    SetPumpDirection,
+    SetPumpRunning,
+    SetPumpSpeed,
 )
 from rig_control.devices.esp32_controller import Esp32Controller
 from rig_control.devices.lumel_re72 import LumelRe72
@@ -24,6 +30,7 @@ from rig_control.devices.mass_flow_controller import (
     MassFlowController,
 )
 from rig_control.devices.power_supply import PowerSupply
+from rig_control.devices.pump import Pump
 from rig_control.devices.safe_state import SafeStateCapable
 from rig_control.models import Event, EventSeverity, EventSink
 
@@ -155,7 +162,11 @@ class RigControlService:
         if self.mode is ControlMode.RECIPE_ACTIVE:
             self._mode = ControlMode.IDLE
 
-        for device_id in self._device_manager.device_ids:
+        # Stop sources before isolating the downstream GC; attempt every device
+        # even if an earlier source could not be stopped.
+        stop_order = sorted(self._device_manager.device_ids, key=lambda device_id:
+                            isinstance(self._device_manager.get(device_id), PressureController))
+        for device_id in stop_order:
             device = self._device_manager.get(device_id)
 
             # Sensors and other read-only devices may have no physical
@@ -290,6 +301,18 @@ class RigControlService:
     def _dispatch(self, command: ControlCommand) -> str:
         device = self._device_manager.get(command.device_id)
 
+        if isinstance(command, ResumePressureControl):
+            if not isinstance(device, PressureController):
+                raise TypeError("Device is not a pressure controller")
+            device.resume_regulation()
+            return f"Resumed BPR {command.device_id!r} at its verified pressure setpoint."
+
+        if isinstance(command, SetPressureSetpoint):
+            if not isinstance(device, PressureController):
+                raise TypeError("Device is not a pressure controller")
+            device.set_pressure_setpoint(command.value, command.unit)
+            return f"Set BPR {command.device_id!r} pressure to {command.value:g} {command.unit}."
+
         if isinstance(command, SetMfcFlow):
             if not isinstance(device, MassFlowController):
                 raise TypeError(
@@ -362,6 +385,25 @@ class RigControlService:
                 f"{command.value:g} degC."
             )
 
+        if isinstance(command, SetPumpSpeed):
+            pump = self._require_pump(device, command.device_id)
+            pump.set_speed_rpm(command.rpm)
+            return f"Set pump {command.device_id!r} speed to {command.rpm:g} rpm."
+
+        if isinstance(command, SetPumpDirection):
+            pump = self._require_pump(device, command.device_id)
+            pump.set_direction(command.direction)
+            return f"Set pump {command.device_id!r} direction to {command.direction.value}."
+
+        if isinstance(command, SetPumpRunning):
+            pump = self._require_pump(device, command.device_id)
+            if command.running:
+                pump.start()
+            else:
+                pump.stop()
+            state = "started" if command.running else "stopped"
+            return f"Pump {command.device_id!r} {state}."
+
         if isinstance(command, EnterDeviceSafeState):
             if not isinstance(device, SafeStateCapable):
                 raise TypeError(
@@ -400,9 +442,17 @@ class RigControlService:
         return device
 
     @staticmethod
+    def _require_pump(device: object, device_id: str) -> Pump:
+        if not isinstance(device, Pump):
+            raise TypeError(f"Device {device_id!r} is not a pump")
+        return device
+
+    @staticmethod
     def _validate_command_type(command: object) -> None:
         supported_types = (
             SetMfcFlow,
+            SetPressureSetpoint,
+            ResumePressureControl,
             SetPowerSupplyVoltage,
             SetPowerSupplyCurrentLimit,
             SetPowerSupplyOutput,
@@ -410,6 +460,9 @@ class RigControlService:
             SetControllerOutput,
             RearmController,
             SetTemperatureSetpoint,
+            SetPumpSpeed,
+            SetPumpDirection,
+            SetPumpRunning,
         )
 
         if not isinstance(command, supported_types):

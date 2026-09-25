@@ -16,11 +16,71 @@ from rig_control.devices.power_supply import (
     PowerSupplyOperatingMode,
 )
 from rig_control.experiment_recording import ExperimentRecorder
-from rig_control.models import Event, Measurement, Quality
+from rig_control.devices.pump import Pump, PumpDirection, PumpLimits
+from rig_control.devices.pump_calibration import CalibrationPoint
+from rig_control.instrument_settings.pump_calibration import PumpCalibrationService
+from rig_control.models import DeviceStatus, Event, Measurement, Quality
 from rig_control.polling import PollingBatch, PollingFailure, PollingService
 from rig_control.control.service import RigControlService
 from rig_control.ui.operation.model import LiveMeasurementRow, OperationViewModel
 from rig_control.rig_profile import DeviceBackend, DeviceCapability, DeviceRole, RigProfile
+
+
+class _StubPump(Pump):
+    """Minimal, stateful Pump for tests -- no real I/O."""
+
+    def __init__(self, device_id: str, maximum_speed_rpm: float = 100.0) -> None:
+        self._device_id = device_id
+        self._status = DeviceStatus.READY
+        self._limits = PumpLimits(maximum_speed_rpm)
+        self._speed_setpoint_rpm: float | None = None
+        self._direction: PumpDirection | None = None
+        self._running: bool | None = None
+
+    @property
+    def device_id(self) -> str:
+        return self._device_id
+
+    @property
+    def status(self) -> DeviceStatus:
+        return self._status
+
+    def connect(self) -> None:
+        self._status = DeviceStatus.READY
+
+    def disconnect(self) -> None:
+        self._status = DeviceStatus.DISCONNECTED
+
+    @property
+    def limits(self) -> PumpLimits:
+        return self._limits
+
+    @property
+    def speed_setpoint_rpm(self) -> float | None:
+        return self._speed_setpoint_rpm
+
+    def set_speed_rpm(self, rpm: float) -> None:
+        self._speed_setpoint_rpm = rpm
+
+    @property
+    def direction(self) -> PumpDirection | None:
+        return self._direction
+
+    def set_direction(self, direction: PumpDirection) -> None:
+        self._direction = direction
+
+    @property
+    def running(self) -> bool | None:
+        return self._running
+
+    def start(self) -> None:
+        self._running = True
+
+    def stop(self) -> None:
+        self._running = False
+
+    def enter_safe_state(self) -> None:
+        self._running = False
 
 
 FIXED_TIME = datetime(2026, 8, 18, 15, 0, tzinfo=UTC)
@@ -142,6 +202,50 @@ def test_start_and_stop_recording_use_existing_recorder() -> None:
     model.stop_monitoring()
     assert stopped.succeeded is True
     assert model.is_recording is False
+
+
+def test_start_recording_attaches_active_pump_calibration(tmp_path) -> None:
+    manager = DeviceManager()
+    manager.register(_StubPump("pump1"))
+    writer = InMemoryExperimentWriter()
+    recorder = ExperimentRecorder(writer_factory=lambda _root: writer)
+    polling = PollingService(manager, interval_seconds=60.0, batch_handler=recorder.record_batch)
+    calibration_service = PumpCalibrationService(directory=tmp_path)
+    calibration_service.accept(calibration_service.fit_candidate(
+        "pump1", "operator",
+        [CalibrationPoint(10.0, 20.0), CalibrationPoint(20.0, 42.0), CalibrationPoint(30.0, 61.0)],
+    ))
+    model = OperationViewModel(
+        manager, polling, recorder, RigControlService(manager),
+        profile_id="simulation", pump_calibration_service=calibration_service,
+    )
+    active = calibration_service.active_calibration("pump1")
+
+    model.start_monitoring()
+    started = model.start_recording(experiment_id="EXP-1", operator="operator", output_directory="unused")
+
+    assert started.succeeded is True
+    assert writer.metadata.extra["pump1_calibration_id"] == active.calibration_id
+    assert writer.metadata.extra["pump1_calibration_slope"] == pytest.approx(active.fit.slope)
+    assert writer.metadata.extra["pump1_calibration_intercept"] == pytest.approx(active.fit.intercept)
+
+
+def test_start_recording_omits_pumps_with_no_accepted_calibration(tmp_path) -> None:
+    manager = DeviceManager()
+    manager.register(_StubPump("pump1"))
+    writer = InMemoryExperimentWriter()
+    recorder = ExperimentRecorder(writer_factory=lambda _root: writer)
+    polling = PollingService(manager, interval_seconds=60.0, batch_handler=recorder.record_batch)
+    model = OperationViewModel(
+        manager, polling, recorder, RigControlService(manager),
+        profile_id="simulation", pump_calibration_service=PumpCalibrationService(directory=tmp_path),
+    )
+
+    model.start_monitoring()
+    started = model.start_recording(experiment_id="EXP-1", operator="operator", output_directory="unused")
+
+    assert started.succeeded is True
+    assert "pump1_calibration_id" not in writer.metadata.extra
 
 
 def test_monitoring_cannot_stop_while_recording() -> None:
@@ -401,6 +505,45 @@ def test_unified_channels_separate_measurements_from_limits_and_setpoints() -> N
     assert rows[("supply", "current_limit")].writable is True
     assert rows[("mfc", "mass_flow")].writable is False
     assert rows[("mfc", "setpoint")].writable is True
+
+
+def test_pump_dashboard_rows_and_manual_commands() -> None:
+    manager = DeviceManager()
+    manager.register(_StubPump("pump1", maximum_speed_rpm=150.0))
+    writer = InMemoryExperimentWriter()
+    recorder = ExperimentRecorder(writer_factory=lambda _root: writer)
+    polling = PollingService(manager, interval_seconds=60, batch_handler=recorder.record_batch)
+    profile = RigProfile("rig", "Rig", (
+        DeviceRole("pump1", "Feed pump", DeviceCapability.PERISTALTIC_PUMP,
+                   "kamoer_m1_stp", DeviceBackend.REAL),
+    ))
+    model = OperationViewModel(
+        manager, polling, recorder, RigControlService(manager),
+        profile_id="rig", profile=profile,
+    )
+
+    assert model.systems() == ("Fluid handling",)
+    rows = {(row.device_id, row.channel): row for row in model.channel_rows()}
+    assert rows[("pump1", "speed_setpoint")].writable is True
+    assert rows[("pump1", "speed_setpoint")].editor == "number"
+    assert rows[("pump1", "speed_setpoint")].maximum == 150.0
+    assert rows[("pump1", "direction")].editor == "direction"
+    assert rows[("pump1", "direction")].value is None
+    assert rows[("pump1", "running")].editor == "running"
+    assert rows[("pump1", "running")].value is None
+
+    speed_result = model.apply_channel_value("pump1", "speed_setpoint", 42.5)
+    direction_result = model.apply_channel_value("pump1", "direction", "reverse")
+    running_result = model.apply_channel_value("pump1", "running", True)
+
+    assert speed_result.succeeded is True
+    assert direction_result.succeeded is True
+    assert running_result.succeeded is True
+
+    rows = {(row.device_id, row.channel): row for row in model.channel_rows()}
+    assert rows[("pump1", "speed_setpoint")].value == 42.5
+    assert rows[("pump1", "direction")].value == "reverse"
+    assert rows[("pump1", "running")].value is True
 
 
 def test_channel_labels_swap_with_power_supply_operating_mode() -> None:

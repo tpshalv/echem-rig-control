@@ -10,6 +10,116 @@ from rig_control.ui.device_setup.dialogs.base import SetupDialog
 
 
 class AlicatDialogs(SetupDialog):
+    def _open_verify_alicat(self) -> None:
+        device_id = self._selected_device_id()
+        if not device_id:
+            messagebox.showinfo("Select Alicat", "Select an Alicat MFC or BPR first.", parent=self._root)
+            return
+        role = self._view_model.profile.get_role(device_id)
+        if role.driver != "alicat" or role.capability.value not in {"mass_flow_controller", "back_pressure_controller"}:
+            messagebox.showinfo("Select controller", "Select an Alicat MFC or BPR.", parent=self._root)
+            return
+        dialog = tk.Toplevel(self._root)
+        dialog.title(f"Read-only Alicat verification: {role.friendly_name}")
+        dialog.transient(self._root)
+        dialog.grab_set()
+        frame = ttk.Frame(dialog, padding=12)
+        frame.pack(fill="both", expand=True)
+        status = ttk.Label(frame, text="Reading identity, mode and frame description...")
+        status.grid(row=0, column=0, columnspan=2, sticky="w")
+        raw = tk.Text(frame, height=14, width=85, wrap="word")
+        raw.grid(row=1, column=0, columnspan=2, sticky="nsew")
+        fields = {}
+        for index, (key, label, default) in enumerate((
+            ("frame_fields", "Frame fields in reported order", ""),
+            ("pressure_unit", "Absolute-pressure frame unit", "psia"),
+            ("flow_unit", "Mass-flow frame unit", "SCCM"),
+            ("volumetric_flow_unit", "Volumetric-flow frame unit", "CCM"),
+            ("temperature_unit", "Temperature frame unit", "degC"),
+            ("maximum_pressure_bara", "Installed instrument pressure ceiling (bara)", 2.5),
+        ), start=2):
+            ttk.Label(frame, text=label).grid(row=index, column=0, sticky="w")
+            entry = ttk.Entry(frame, width=60)
+            entry.insert(0, str(role.settings.get(key, default)))
+            entry.grid(row=index, column=1, sticky="ew")
+            fields[key] = entry
+        confirmed = tk.BooleanVar(value=False)
+        downstream = tk.BooleanVar(value=False)
+        ttk.Checkbutton(frame, text="I checked the field order and units against the instrument table above",
+                        variable=confirmed).grid(row=8, column=0, columnspan=2, sticky="w")
+        ttk.Checkbutton(frame, text="BPR: valve is physically downstream of the pressure sensing section",
+                        variable=downstream).grid(row=9, column=0, columnspan=2, sticky="w")
+        ttk.Label(frame, text="Saving records this device's intended role. It does not change any instrument settings.",
+                  wraplength=650).grid(row=10, column=0, columnspan=2, sticky="w")
+        results = Queue()
+        observed = None
+
+        def inspect():
+            try:
+                results.put(("inspect", self._view_model.inspect_alicat_configuration(device_id)))
+            except Exception as error:
+                results.put(("inspect", error))
+
+        def save():
+            if observed is None:
+                return
+            try:
+                values = {key: entry.get().strip() for key, entry in fields.items()}
+                values["maximum_pressure_bara"] = float(values["maximum_pressure_bara"])
+                kwargs = dict(values, frame_confirmed=confirmed.get(), downstream_confirmed=downstream.get())
+            except ValueError as error:
+                messagebox.showerror("Invalid value", str(error), parent=dialog)
+                return
+            save_button.configure(state="disabled")
+            def commit():
+                result = self._view_model.commission_alicat(device_id, observed, **kwargs)
+                results.put(("save", result))
+            Thread(target=commit, daemon=True).start()
+            dialog.after(100, poll)
+
+        def poll():
+            nonlocal observed
+            if not dialog.winfo_exists():
+                return
+            try:
+                action, result = results.get_nowait()
+            except Empty:
+                dialog.after(100, poll)
+                return
+            if isinstance(result, Exception):
+                status.configure(text=f"Verification unavailable: {result}")
+                return
+            if action == "inspect":
+                observed = result
+                if role.capability.value == "back_pressure_controller" and result.maximum_setpoint is not None:
+                    from rig_control.devices.pressure_controller import absolute_unit_factor
+                    try:
+                        maximum_bara = result.maximum_setpoint * absolute_unit_factor(result.setpoint_unit) / 100_000
+                        fields["maximum_pressure_bara"].delete(0, "end")
+                        fields["maximum_pressure_bara"].insert(0, f"{maximum_bara:.10g}")
+                    except ValueError:
+                        pass
+                status.configure(text=f"Expected role: {role.capability.value}; detected {result.description}")
+                raw.insert("1.0", f"Model: {result.model}\nFirmware: {result.firmware}\n"
+                           f"Setpoint bounds: {result.minimum_setpoint} to {result.maximum_setpoint} {result.setpoint_unit}\n\n"
+                           + result.frame_description)
+                raw.configure(state="disabled")
+                save_button.configure(state="normal")
+            else:
+                self._record_result(result)
+                self.refresh()
+                status.configure(text=result.summary)
+                save_button.configure(state="normal")
+                if result.succeeded:
+                    dialog.destroy()
+                else:
+                    messagebox.showerror("Verification failed", result.technical_details, parent=dialog)
+
+        save_button = ttk.Button(frame, text="Verify again and save expected role", command=save, state="disabled")
+        save_button.grid(row=11, column=1, sticky="e", pady=10)
+        Thread(target=inspect, daemon=True).start()
+        dialog.after(100, poll)
+
     def _open_scan_alicat(self) -> None:
         dialog = tk.Toplevel(self._root)
         dialog.title("Find Alicat mass-flow device")
@@ -33,7 +143,7 @@ class AlicatDialogs(SetupDialog):
         function_selector = ttk.Combobox(
             frame,
             textvariable=device_function,
-            values=("Controller (MFC)", "Meter (MFM)"),
+            values=("Controller (MFC)", "Meter (MFM)", "Back-pressure controller (BPR)"),
             state="readonly",
             width=20,
         )
@@ -111,7 +221,7 @@ class AlicatDialogs(SetupDialog):
                         device.configured_kind or "-",
                         (
                             f"{device.model or 'unknown'} / "
-                            f"{device.inferred_kind or 'ambiguous'}"
+                            f"{device.control_description}"
                         ),
                         (
                             f"{device.inferred_maximum_flow_sccm:g} SCCM"
@@ -179,6 +289,7 @@ class AlicatDialogs(SetupDialog):
             dialog.destroy()
             self._open_add_alicat(
                 is_meter=device_function.get() == "Meter (MFM)",
+                is_bpr=device_function.get() == "Back-pressure controller (BPR)",
                 initial_port=selected_port,
                 initial_address=address,
                 initial_maximum_flow=(
@@ -215,6 +326,8 @@ class AlicatDialogs(SetupDialog):
                 device_function.set(
                     "Meter (MFM)"
                     if selected.inferred_kind == "meter"
+                    else "Back-pressure controller (BPR)"
+                    if "absolute pressure; inverse" in selected.control_description
                     else "Controller (MFC)"
                 )
                 update_device_function()
@@ -254,6 +367,7 @@ class AlicatDialogs(SetupDialog):
                 dialog.destroy(),
                 self._open_add_alicat(
                     is_meter=device_function.get() == "Meter (MFM)",
+                is_bpr=device_function.get() == "Back-pressure controller (BPR)",
                     initial_port=port.get().strip(),
                 ),
             ),
@@ -268,12 +382,13 @@ class AlicatDialogs(SetupDialog):
         self,
         *,
         is_meter: bool = False,
+        is_bpr: bool = False,
         initial_port: str = "",
         initial_address: str | None = None,
         initial_maximum_flow: float | None = None,
     ) -> None:
         dialog = tk.Toplevel(self._root)
-        dialog.title("Add Alicat mass-flow meter" if is_meter else "Add Alicat MFC")
+        dialog.title("Add Alicat BPR (configured manually)" if is_bpr else "Add Alicat mass-flow meter" if is_meter else "Add Alicat MFC")
         dialog.transient(self._root)
         dialog.grab_set()
         dialog.resizable(False, False)
@@ -312,7 +427,7 @@ class AlicatDialogs(SetupDialog):
                 entry = ttk.Combobox(
                     form,
                     width=29,
-                    values=("SCCM",),
+                    values=("SCCM", "SLPM"),
                     state="readonly",
                 )
                 entry.set(default)
@@ -403,7 +518,7 @@ class AlicatDialogs(SetupDialog):
                     port=port_selector.get(),
                     unit_address=entries["Alicat address"].get(),
                     maximum_flow=maximum_flow,
-                    device_kind="meter" if is_meter else "controller",
+                    device_kind="bpr" if is_bpr else "meter" if is_meter else "controller",
                     flow_unit=entries["Mass-flow unit"].get(),
                     poll_interval_seconds=poll_interval_seconds,
                 )

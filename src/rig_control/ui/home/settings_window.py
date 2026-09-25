@@ -13,6 +13,8 @@ class SettingsWindow:
     """Host application preferences and independent instrument settings editors."""
 
     _HIGH_CURRENT_MODE_KEY = "power_supply_high_current_mode"
+    _HIGH_PRESSURE_KEY = "pressure_high_pressure_mode"
+    _PRESSURE_CEILING_KEY = "pressure_maximum_bara"
     _CEILING_KEY = "power_supply_wiring_current_ceiling_amps"
 
     # Ordered (category label, setting keys) - one section per category,
@@ -31,6 +33,7 @@ class SettingsWindow:
             ),
         ),
         ("Graphical", ("trend_history_readings",)),
+        ("Advanced pressure limits", (_HIGH_PRESSURE_KEY, _PRESSURE_CEILING_KEY, "pressure_atmospheric_reference_bara")),
         (
             "Power supply safety",
             (
@@ -54,6 +57,7 @@ class SettingsWindow:
         self._on_change = on_change
         self._entries: dict[str, ttk.Entry] = {}
         self._category_frames: dict[str, ttk.Frame] = {}
+        self._high_pressure_var = tk.BooleanVar(value=False)
         self._high_current_var = tk.BooleanVar(value=False)
         root.title("Settings")
         root.geometry("820x560")
@@ -146,7 +150,18 @@ class SettingsWindow:
     def _build_category(self, frame: ttk.Frame, rows: list) -> None:
         index = 0
         for row in rows:
-            if row.key == self._HIGH_CURRENT_MODE_KEY:
+            if row.key == self._HIGH_PRESSURE_KEY:
+                ttk.Checkbutton(frame, text=row.label, variable=self._high_pressure_var,
+                                command=self._on_high_pressure_toggled).grid(row=index, column=0, columnspan=2, sticky="w")
+                index += 1
+                ttk.Label(frame, text=row.description, wraplength=480).grid(row=index, column=0, columnspan=2, sticky="w")
+                index += 1
+            elif row.key == self._PRESSURE_CEILING_KEY:
+                self._pressure_ceiling_frame = ttk.Frame(frame)
+                self._add_setting_row(self._pressure_ceiling_frame, 0, row)
+                self._pressure_ceiling_index = index
+                index += 1
+            elif row.key == self._HIGH_CURRENT_MODE_KEY:
                 ttk.Checkbutton(
                     frame,
                     text=row.label,
@@ -205,6 +220,8 @@ class SettingsWindow:
         self._high_current_var.set(
             self._view_model.settings.power_supply_high_current_mode
         )
+        self._high_pressure_var.set(self._view_model.settings.pressure_policy.high_pressure_mode)
+        self._update_pressure_visibility()
         self._update_ceiling_visibility()
         for panel in self._instrument_panels.values():
             panel.refresh()
@@ -257,6 +274,20 @@ class SettingsWindow:
         else:
             self._ceiling_frame.grid_remove()
 
+    def _on_high_pressure_toggled(self) -> None:
+        if self._high_pressure_var.get() and not messagebox.askyesno(
+            "Enable High Pressure Mode", "This permits pressure commands above the normal 2.5 bara rig ceiling.\n\n"
+            "Confirm that the installed rig has been upgraded for the new pressure rating. "
+            "This software limit does not replace physical pressure relief.", icon="warning", parent=self._root):
+            self._high_pressure_var.set(False)
+        self._update_pressure_visibility()
+
+    def _update_pressure_visibility(self) -> None:
+        if self._high_pressure_var.get():
+            self._pressure_ceiling_frame.grid(row=self._pressure_ceiling_index, column=0, columnspan=3, sticky="ew")
+        else:
+            self._pressure_ceiling_frame.grid_remove()
+
     def _choose_file(self) -> None:
         selected = filedialog.askopenfilename(
             parent=self._root,
@@ -291,6 +322,16 @@ class SettingsWindow:
         values[self._HIGH_CURRENT_MODE_KEY] = (
             "true" if self._high_current_var.get() else "false"
         )
+        values[self._HIGH_PRESSURE_KEY] = "true" if self._high_pressure_var.get() else "false"
+        if self._high_pressure_var.get():
+            try:
+                raised = float(values[self._PRESSURE_CEILING_KEY]) > 2.5
+            except ValueError:
+                raised = False
+            if raised and not messagebox.askyesno("Pressure ceiling override",
+                "Apply a pressure ceiling above 2.5 bara? Confirm the installed rig rating supports this setting.",
+                icon="warning", parent=self._root):
+                return False
         result = self._view_model.apply_setting_text(values)
         self._show_result(result)
         if result.succeeded and self._on_change is not None:

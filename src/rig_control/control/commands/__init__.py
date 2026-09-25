@@ -1,3 +1,4 @@
+from rig_control.control.commands.pressure import SetPressureSetpoint, ResumePressureControl
 from rig_control.control.commands.common import (
     CommandSource,
     EnterDeviceSafeState,
@@ -13,10 +14,17 @@ from rig_control.control.commands.esp32 import (
     SetControllerOutput,
     SetTemperatureSetpoint,
 )
+from rig_control.control.commands.pump import (
+    SetPumpDirection,
+    SetPumpRunning,
+    SetPumpSpeed,
+)
 
 
 ControlCommand = (
-    SetMfcFlow
+    SetPressureSetpoint
+    | ResumePressureControl
+    | SetMfcFlow
     | SetPowerSupplyVoltage
     | SetPowerSupplyCurrentLimit
     | SetPowerSupplyOutput
@@ -24,6 +32,9 @@ ControlCommand = (
     | SetControllerOutput
     | RearmController
     | SetTemperatureSetpoint
+    | SetPumpSpeed
+    | SetPumpDirection
+    | SetPumpRunning
 )
 
 
@@ -32,10 +43,15 @@ __all__ = [
     "ControlCommand",
     "EnterDeviceSafeState",
     "SetMfcFlow",
+    "SetPressureSetpoint",
+    "ResumePressureControl",
     "SetPowerSupplyCurrentLimit",
     "SetPowerSupplyOutput",
     "SetPowerSupplyVoltage",
     "SetControllerOutput",
     "RearmController",
     "SetTemperatureSetpoint",
+    "SetPumpDirection",
+    "SetPumpRunning",
+    "SetPumpSpeed",
 ]

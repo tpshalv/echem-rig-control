@@ -17,7 +17,9 @@ from rig_control.ui.device_setup.dialogs.editing import DeviceEditDialogs
 from rig_control.ui.device_setup.dialogs.alicat import AlicatDialogs
 from rig_control.ui.device_setup.dialogs.esp32 import Esp32Dialogs
 from rig_control.ui.device_setup.dialogs.temperature_probe import TemperatureProbeDialogs
+from rig_control.ui.device_setup.dialogs.kamoer_m1_stp import KamoerM1StpDialogs
 from rig_control.ui.device_setup.dialogs.guardian import GuardianDialogs
+from rig_control.ui.device_setup.dialogs.ezo_hum import EzoHumDialogs
 from rig_control.ui.device_setup.dialogs.power_supply import PowerSupplyDialogs
 
 
@@ -39,7 +41,9 @@ class DeviceSetupWindow:
         self._alicat_dialogs = AlicatDialogs(context)
         self._esp32_dialogs = Esp32Dialogs(context)
         self._temperature_probe_dialogs = TemperatureProbeDialogs(context)
+        self._kamoer_m1_stp_dialogs = KamoerM1StpDialogs(context)
         self._guardian_dialogs = GuardianDialogs(context)
+        self._ezo_hum_dialogs = EzoHumDialogs(context)
         self._power_supply_dialogs = PowerSupplyDialogs(context)
         self._configure_window()
         self._create_widgets()
@@ -127,6 +131,8 @@ class DeviceSetupWindow:
             command=self._check_selected,
         )
         self._check_button.grid(row=0, column=2, padx=(0, 8))
+        ttk.Button(device_buttons, text="Verify Alicat role",
+                   command=self._alicat_dialogs._open_verify_alicat).grid(row=1, column=0, columnspan=2, sticky="w", pady=4)
         ttk.Button(
             device_buttons,
             text="Edit measurement interval",
@@ -273,16 +279,16 @@ class DeviceSetupWindow:
         categories = {
             "Power supply": tuple(SCPI_POWER_SUPPLY_DRIVER_LABELS),
             "Mass-flow device": ("Alicat mass-flow device",),
-            "Peristaltic pump": ("No direct peristaltic pump drivers installed",),
+            "Peristaltic pump": ("Kamoer M1-STP",),
             "Analytical instrument": ("No direct analytical instrument drivers installed",),
             "Controller / autodiscovery": ("ESP32 controller (auto-discover)",),
             "Gas chromatograph": ("No direct GC drivers installed",),
             "Potentiostat": ("No direct potentiostat drivers installed",),
             "Hotplate": ("OHAUS Guardian 5000",),
             "Temperature probe": ("TA612C protocol (TA612C / DP-373 trial)",),
+            "Humidity sensor": ("Atlas Scientific EZO-HUM",),
         }
         unavailable = {
-            "No direct peristaltic pump drivers installed",
             "No direct analytical instrument drivers installed",
             "No direct GC drivers installed",
             "No direct potentiostat drivers installed",
@@ -352,6 +358,10 @@ class DeviceSetupWindow:
                 self._guardian_dialogs._open_add_guardian()
             elif selected == "TA612C protocol (TA612C / DP-373 trial)":
                 self._temperature_probe_dialogs._open_add_temperature_probe()
+            elif selected == "Kamoer M1-STP":
+                self._kamoer_m1_stp_dialogs._open_add_kamoer_m1_stp()
+            elif selected == "Atlas Scientific EZO-HUM":
+                self._ezo_hum_dialogs._open_add_ezo_hum()
             else:
                 self._alicat_dialogs._open_scan_alicat()
 

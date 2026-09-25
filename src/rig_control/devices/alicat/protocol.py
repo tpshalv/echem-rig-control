@@ -1,11 +1,12 @@
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from math import isfinite
 
 from rig_control.devices.alicat.bus import AlicatBus
 from rig_control.models import Quality
+from rig_control.devices.alicat.verification import AlicatControlConfiguration, parse_control_configuration, addressed_tokens
 
 
 class AlicatFrameField(StrEnum):
@@ -18,6 +19,7 @@ class AlicatFrameField(StrEnum):
     SETPOINT = "setpoint"
     TOTALIZED_FLOW = "totalized_flow"
     GAS = "gas"
+    VALVE_DRIVE = "valve_drive_percent"
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,8 +76,13 @@ class AlicatInstrumentState:
     status_codes: tuple[str, ...] = ()
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
     quality: Quality = Quality.GOOD
+    valve_drive_percent: float | None = None
 
     def __post_init__(self) -> None:
+        if self.valve_drive_percent is not None:
+            value = self.valve_drive_percent
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(value) or not 0 <= value <= 100:
+                raise ValueError("Valve drive must be a finite percentage from 0 to 100")
         for name in (
             "mass_flow",
             "volumetric_flow",
@@ -149,6 +156,21 @@ class AlicatProtocolClient(ABC):
 
     def disconnect(self) -> None:
         """Release communication resources owned by this client."""
+
+    def read_control_configuration(self, unit_address: str) -> AlicatControlConfiguration:
+        raise NotImplementedError("This protocol cannot verify Alicat control configuration")
+
+    def set_pressure_setpoint(self, unit_address: str, value: float) -> None:
+        raise NotImplementedError("This protocol does not support pressure setpoints")
+
+    def read_setpoint(self, unit_address: str) -> tuple[float, str]:
+        raise NotImplementedError("This protocol cannot verify setpoints")
+
+    def hold_closed(self, unit_address: str) -> AlicatInstrumentState:
+        raise NotImplementedError("Valve hold is unsupported")
+
+    def cancel_hold(self, unit_address: str) -> AlicatInstrumentState:
+        raise NotImplementedError("Valve hold is unsupported")
 
     @abstractmethod
     def read_state(self, unit_address: str) -> AlicatInstrumentState:
@@ -264,6 +286,61 @@ class AlicatAsciiProtocolClient(AlicatProtocolClient):
         # SerialTextTransport owns the carriage-return line termination.
         self._bus.request(f"{address}S{float(flow):g}")
 
+    def read_control_configuration(self, unit_address: str) -> AlicatControlConfiguration:
+        address = self._validate_address(unit_address)
+        firmware = self._bus.request(f"{address}VE")
+        identity = self._bus.request(f"{address}??M*")
+        loop = self._bus.request(f"{address}LR")
+        register = self._bus.request(f"{address}R20")
+        frame = self._bus.request(f"{address}??D*")
+        observed = parse_control_configuration(address, firmware, identity, loop, register, frame)
+        if observed.loop_variable == 34 and observed.maximum_setpoint is None:
+            # Firmware 9v reports units but not LR bounds. Read the absolute
+            # pressure sensor range (statistic 2), never infer it from model size.
+            from rig_control.devices.pressure_controller import absolute_unit_factor
+            parts = addressed_tokens(address, self._bus.request(f"{address}FPF 2"))
+            if len(parts) != 3:
+                raise ValueError("Unrecognised absolute-pressure full-scale response")
+            maximum = float(parts[0])
+            int(parts[1])
+            if not isfinite(maximum) or maximum <= 0:
+                raise ValueError("Invalid absolute-pressure full scale")
+            maximum *= absolute_unit_factor(parts[2]) / absolute_unit_factor(observed.setpoint_unit)
+            observed = replace(observed, minimum_setpoint=0.0, maximum_setpoint=maximum)
+        return observed
+
+    def hold_closed(self, unit_address: str) -> AlicatInstrumentState:
+        address = self._validate_address(unit_address)
+        state = self.parse_state(address, self._bus.request(f"{address}HC"))
+        if "HLD" not in state.status_codes:
+            raise RuntimeError("Valve-close hold was not acknowledged (HLD missing)")
+        return state
+
+    def cancel_hold(self, unit_address: str) -> AlicatInstrumentState:
+        address = self._validate_address(unit_address)
+        state = self.parse_state(address, self._bus.request(f"{address}C"))
+        if "HLD" in state.status_codes:
+            raise RuntimeError("Valve hold remains active")
+        return state
+
+    def set_pressure_setpoint(self, unit_address: str, value: float) -> None:
+        address = self._validate_address(unit_address)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(value):
+            raise ValueError("Pressure setpoint must be finite and numeric")
+        # LS without a units argument preserves the verified instrument units.
+        self._bus.request(f"{address}LS {float(value):.12g}")
+
+    def read_setpoint(self, unit_address: str) -> tuple[float, str]:
+        address = self._validate_address(unit_address)
+        parts = addressed_tokens(address, self._bus.request(f"{address}LS"))
+        if len(parts) != 4:
+            raise ValueError("Unrecognised Alicat LS reply")
+        current, requested = float(parts[0]), float(parts[1])
+        if not isfinite(current) or not isfinite(requested):
+            raise ValueError("Non-finite Alicat setpoint")
+        int(parts[2])
+        return requested, parts[3]
+
     def _parse_state(
         self,
         expected_address: str,
@@ -302,6 +379,12 @@ class AlicatAsciiProtocolClient(AlicatProtocolClient):
         status_codes = tuple(
             token.upper() for token in tokens[expected_length:]
         )
+        for token in status_codes:
+            try:
+                float(token)
+            except ValueError:
+                continue
+            raise ValueError("Unexpected numeric frame field; verify the configured frame layout")
         quality = (
             Quality.BAD
             if _BAD_QUALITY_CODES.intersection(status_codes)
@@ -343,6 +426,8 @@ class AlicatAsciiProtocolClient(AlicatProtocolClient):
             ),
             status_codes=status_codes,
             quality=quality,
+            valve_drive_percent=(float(values[AlicatFrameField.VALVE_DRIVE])
+                                 if AlicatFrameField.VALVE_DRIVE in values else None),
         )
 
     @staticmethod

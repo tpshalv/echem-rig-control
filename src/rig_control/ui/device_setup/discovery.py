@@ -1,9 +1,19 @@
+from rig_control.devices.alicat.verification import verify_role
 from collections.abc import Callable
 
 from rig_control.devices.tasi_ta612c.configuration import (
     configuration_from_profile as ta612c_configuration_from_profile,
 )
 from rig_control.diagnostics.tasi_ta612c import read_probe
+from rig_control.devices.atlas_ezo_hum.configuration import (
+    configuration_from_profile as ezo_hum_configuration_from_profile,
+)
+from rig_control.diagnostics.atlas_ezo_hum import check_ezo_hum
+
+from rig_control.devices.kamoer_m1_stp.configuration import (
+    configuration_from_profile as kamoer_m1_stp_configuration_from_profile,
+)
+from rig_control.diagnostics.kamoer_m1_stp import read_pump_state
 
 from rig_control.devices.alicat.configuration import (
     configuration_from_profile as alicat_configuration_from_profile,
@@ -34,6 +44,8 @@ from rig_control.ui.device_setup.types import (
     GuardianChecker,
     Esp32Checker,
     Esp32Scanner,
+    KamoerM1StpChecker,
+    EzoHumChecker,
 )
 from rig_control.ui.device_setup.power_supply import (
     identify_scpi_power_supply,
@@ -53,6 +65,8 @@ class DeviceDiscovery:
         temperature_probe_checker: Callable = read_probe,
         esp32_checker: Esp32Checker = read_esp32_state,
         esp32_scanner: Esp32Scanner = discover_esp32,
+        kamoer_m1_stp_checker: KamoerM1StpChecker = read_pump_state,
+        ezo_hum_checker: EzoHumChecker = check_ezo_hum,
     ) -> None:
         self._profile_provider = profile_provider
         self._readiness = readiness
@@ -64,6 +78,8 @@ class DeviceDiscovery:
         self.identify_temperature_probe = temperature_probe_checker
         self._esp32_checker = esp32_checker
         self._esp32_scanner = esp32_scanner
+        self.identify_kamoer_m1_stp = kamoer_m1_stp_checker
+        self.identify_ezo_hum = ezo_hum_checker
         self.serial_port_error = ""
 
     @property
@@ -131,6 +147,7 @@ class DeviceDiscovery:
                 and isinstance(address, str)
             ):
                 kind = (
+                    "BPR" if role.capability is DeviceCapability.BACK_PRESSURE_CONTROLLER else
                     "Controller"
                     if role.capability is DeviceCapability.MASS_FLOW_CONTROLLER
                     else "Meter"
@@ -150,6 +167,7 @@ class DeviceDiscovery:
                 manufacturer_response=device.manufacturer_response,
                 data_format_response=device.data_format_response,
                 firmware_response=device.firmware_response,
+                control_description=device.control_description,
             )
             for device in self._alicat_scanner(selected_port, baud_rate)
         )
@@ -178,6 +196,30 @@ class DeviceDiscovery:
                     True, f"{role.friendly_name} responded using the selected temperature-probe protocol.",
                     f"Identity: {identity}; " + ", ".join(
                         f"{reading.channel}={reading.measurement.value:g} degC" for reading in readings
+                    ),
+                )
+            elif role.driver == "kamoer_m1_stp":
+                diagnostic = self.identify_kamoer_m1_stp(
+                    kamoer_m1_stp_configuration_from_profile(self._profile, device_id)
+                )
+                if diagnostic.fault_status:
+                    raise ValueError(f"Pump reports fault status {diagnostic.fault_status}")
+                result = ReadinessCheckResult(
+                    True, f"{role.friendly_name} responded and reports no fault.",
+                    f"Running: {diagnostic.running}; direction: {diagnostic.direction.value}; "
+                    f"speed setpoint: {diagnostic.speed_setpoint_rpm:g} rpm.",
+                )
+            elif role.driver == "atlas_ezo_hum":
+                diagnostic = self.identify_ezo_hum(
+                    ezo_hum_configuration_from_profile(self._profile, device_id)
+                )
+                result = ReadinessCheckResult(
+                    True,
+                    f"{role.friendly_name} responded as an EZO-HUM.",
+                    f"Firmware: {diagnostic.identity.firmware_version}; "
+                    + ", ".join(
+                        f"{item.channel}={item.measurement.value:g} {item.measurement.unit}"
+                        for item in diagnostic.readings
                     ),
                 )
             elif role.driver in {"esp32_json", "esp32_dht11", "lumel_re72"}:
@@ -221,6 +263,13 @@ class DeviceDiscovery:
         )
         diagnostic = self.identify_alicat(configuration)
         state = diagnostic.state
+        if configuration.is_controller:
+            observed = diagnostic.control_configuration
+            if observed is None:
+                raise ValueError("Alicat control remains unverified: " + diagnostic.verification_error)
+            verify_role(observed, bpr=configuration.is_bpr, expected_serial=configuration.expected_serial,
+                        expected_frame_signature=configuration.verified_frame_signature,
+                        flow_unit=configuration.limits.flow_unit, downstream_confirmed=configuration.downstream_valve_confirmed)
         return ReadinessCheckResult(
             True,
             f"Alicat {device_id!r} responded at address "

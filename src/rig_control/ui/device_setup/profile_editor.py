@@ -6,6 +6,9 @@ import re
 from rig_control.devices.tasi_ta612c.configuration import (
     configuration_from_profile as ta612c_configuration_from_profile,
 )
+from rig_control.devices.kamoer_m1_stp.configuration import (
+    configuration_from_profile as kamoer_m1_stp_configuration_from_profile,
+)
 
 from rig_control.devices.alicat.configuration import (
     configuration_from_profile as alicat_configuration_from_profile,
@@ -199,6 +202,11 @@ class ProfileEditor:
             if not friendly_name:
                 raise ValueError("Device friendly name cannot be empty")
             system = request.system.strip() or None
+            updated_settings = dict(request.settings)
+            protected = {"frame_fields", "pressure_unit", "flow_unit", "volumetric_flow_unit",
+                         "temperature_unit", "totalized_flow_unit", "downstream_valve_confirmed"}
+            if role.driver == "alicat" and any(updated_settings.get(key) != role.settings.get(key) for key in protected):
+                updated_settings.pop("verified_frame_signature", None)
             updated_role = replace(
                 role,
                 friendly_name=friendly_name,
@@ -207,7 +215,7 @@ class ProfileEditor:
                 system=system,
                 poll_interval_seconds=request.poll_interval_seconds,
                 connection_parameters=request.device_connection_parameters,
-                settings=request.settings,
+                settings=updated_settings,
                 channel_labels=request.channel_labels,
             )
             connections = self._profile.connections
@@ -266,6 +274,8 @@ class ProfileEditor:
             )
         if role.driver == "tasi_ta612c":
             ta612c_configuration_from_profile(validation_profile, device_id)
+        elif role.driver == "kamoer_m1_stp":
+            kamoer_m1_stp_configuration_from_profile(validation_profile, device_id)
         elif role.driver == "alicat":
             alicat_configuration_from_profile(validation_profile, device_id)
         elif role.driver in SCPI_POWER_SUPPLY_DRIVERS:

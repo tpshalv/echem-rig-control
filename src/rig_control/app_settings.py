@@ -59,6 +59,13 @@ def _boolean(value: object) -> AppSettingValue:
 
 
 SETTING_DEFINITIONS = (
+    SettingDefinition("pressure_high_pressure_mode", "High Pressure Mode",
+                      "Override the normal 2.5 bara setpoint ceiling only after upgrading the rig. Software limits do not replace physical relief.",
+                      False, _boolean),
+    SettingDefinition("pressure_maximum_bara", "High Pressure Mode maximum (bara)",
+                      "Active only in High Pressure Mode; the instrument limit still applies.", 2.5, _positive_number),
+    SettingDefinition("pressure_atmospheric_reference_bara", "Fixed atmospheric reference (bara)",
+                      "Used for gauge conversion; this is not a live atmospheric measurement.", 1.01325, _positive_number),
     SettingDefinition(
         key="trend_history_readings",
         label="Default trend history (readings)",
@@ -191,6 +198,13 @@ class AppSettings:
                     f"Application setting {definition.key!r} {error}"
                 ) from error
         object.__setattr__(self, "values", MappingProxyType(validated))
+
+    @property
+    def pressure_policy(self):
+        from rig_control.devices.pressure_controller import PressurePolicy
+        return PressurePolicy(bool(self.values["pressure_high_pressure_mode"]),
+                              float(self.values["pressure_maximum_bara"]),
+                              float(self.values["pressure_atmospheric_reference_bara"]))
 
     @property
     def publish_interval_seconds(self) -> float:

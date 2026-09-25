@@ -10,7 +10,11 @@ from rig_control.control.commands import (
     SetPowerSupplyCurrentLimit,
     SetPowerSupplyOutput,
     SetPowerSupplyVoltage,
+    SetPumpDirection,
+    SetPumpRunning,
+    SetPumpSpeed,
 )
+from rig_control.devices.pump import PumpDirection
 
 
 def test_command_sources_have_stable_values() -> None:
@@ -61,6 +65,31 @@ def test_safe_state_defaults_to_safety_source() -> None:
     assert command.source is CommandSource.SAFETY_SYSTEM
 
 
+def test_pump_commands_store_requests() -> None:
+    speed = SetPumpSpeed("pump1", 42.5, CommandSource.MANUAL)
+    direction = SetPumpDirection("pump1", PumpDirection.REVERSE, CommandSource.MANUAL)
+    running = SetPumpRunning("pump1", True, CommandSource.MANUAL)
+
+    assert speed.rpm == 42.5
+    assert direction.direction is PumpDirection.REVERSE
+    assert running.running is True
+
+
+def test_pump_speed_command_rejects_negative_rpm() -> None:
+    with pytest.raises(ValueError):
+        SetPumpSpeed("pump1", -1.0, CommandSource.MANUAL)
+
+
+def test_pump_direction_command_requires_pump_direction_enum() -> None:
+    with pytest.raises(TypeError):
+        SetPumpDirection("pump1", "reverse", CommandSource.MANUAL)
+
+
+def test_pump_running_command_requires_boolean() -> None:
+    with pytest.raises(TypeError):
+        SetPumpRunning("pump1", 1, CommandSource.MANUAL)
+
+
 @pytest.mark.parametrize(
     "command",
     [
@@ -85,6 +114,9 @@ def test_safe_state_defaults_to_safety_source() -> None:
             CommandSource.MANUAL,
         ),
         lambda: EnterDeviceSafeState(""),
+        lambda: SetPumpSpeed("", 1.0, CommandSource.MANUAL),
+        lambda: SetPumpDirection("", PumpDirection.FORWARD, CommandSource.MANUAL),
+        lambda: SetPumpRunning("", True, CommandSource.MANUAL),
     ],
 )
 def test_commands_reject_empty_device_id(command: object) -> None:

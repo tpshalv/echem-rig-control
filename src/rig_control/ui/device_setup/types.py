@@ -8,7 +8,10 @@ from rig_control.devices.ametek_asterion.configuration import AmetekAsterionConf
 from rig_control.devices.ametek_asterion.protocol import AmetekAsterionIdentity
 from rig_control.devices.keithley_2260b.configuration import Keithley2260BConfiguration
 from rig_control.devices.keithley_2280s.configuration import Keithley2280SConfiguration
+from rig_control.devices.kamoer_m1_stp.configuration import KamoerM1StpConfiguration
 from rig_control.devices.ohaus_guardian_5000.configuration import GuardianConfiguration
+from rig_control.devices.atlas_ezo_hum.configuration import EzoHumConfiguration
+from rig_control.diagnostics.kamoer_m1_stp import KamoerM1StpDiagnosticResult
 from rig_control.diagnostics.ohaus_guardian import GuardianDiagnosticResult
 from rig_control.diagnostics.alicat import AlicatDiagnosticResult, DiscoveredAlicat
 from rig_control.diagnostics.esp32 import Esp32DiscoveryResult, Esp32ReadinessResult
@@ -110,6 +113,7 @@ class AlicatScanRow:
     manufacturer_response: str = ""
     data_format_response: str = ""
     firmware_response: str = ""
+    control_description: str = "Unverified control mode"
 
     @property
     def configuration_status(self) -> str:
@@ -171,6 +175,28 @@ class AddTemperatureProbeRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class AddEzoHumRequest:
+    device_id: str
+    hardware_label: str
+    purpose_label: str
+    port: str
+    timeout_seconds: float = 2.0
+    poll_interval_seconds: float = 1.0
+    include_dew_point: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class AddKamoerM1StpRequest:
+    device_id: str
+    hardware_label: str
+    purpose_label: str
+    port: str
+    slave: int = 1
+    timeout_seconds: float = 2.0
+    maximum_speed_rpm: float = 350.0
+
+
+@dataclass(frozen=True, slots=True)
 class AddEsp32Request:
     port: str
     baud_rate: int = 115200
@@ -193,6 +219,8 @@ type GuardianChecker = Callable[
     [GuardianConfiguration],
     GuardianDiagnosticResult,
 ]
+type EzoHumChecker = Callable[[EzoHumConfiguration], object]
 type Esp32Checker = Callable[[RigProfile, str], Esp32ReadinessResult]
 type Esp32Scanner = Callable[[str, int, float], Esp32DiscoveryResult]
+type KamoerM1StpChecker = Callable[[KamoerM1StpConfiguration], KamoerM1StpDiagnosticResult]
 type ProfileWriter = Callable[[RigProfile, str | Path], Path | None]

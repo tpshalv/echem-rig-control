@@ -8,6 +8,7 @@ import pytest
 from rig_control.app_settings import SETTING_DEFINITIONS, default_app_settings
 from rig_control.devices.manager import DeviceManager
 from rig_control.instrument_settings.re72 import Re72SettingsService
+from rig_control.instrument_settings.pump_calibration import PumpCalibrationSettingsService
 from rig_control.rig_profile_loading import load_rig_profile
 from rig_control.ui.device_setup.model import DeviceSetupViewModel
 from rig_control.ui.device_setup.window import DeviceSetupWindow
@@ -32,6 +33,10 @@ def test_settings_separates_application_files_from_instrument_actions(root):
         require_write_access=lambda: None,
     )
     service.read_settings = Mock(side_effect=AssertionError("Unexpected hardware read"))
+    pump_calibration_service = PumpCalibrationSettingsService(
+        DeviceManager(), load_rig_profile("rig-profile.example.toml"),
+        require_write_access=lambda: None,
+    )
     model = Mock()
     model.settings = settings
     model.settings_path = Path("settings.toml")
@@ -39,7 +44,7 @@ def test_settings_separates_application_files_from_instrument_actions(root):
         AppSettingRow(item.key, item.label, item.description, str(settings.values[item.key]))
         for item in SETTING_DEFINITIONS
     )
-    model.instrument_settings = SimpleNamespace(re72=service)
+    model.instrument_settings = SimpleNamespace(re72=service, pump_calibration=pump_calibration_service)
     window = SettingsWindow(root, model)
     root.update_idletasks()
     assert window._file_frame.winfo_manager() == "grid"

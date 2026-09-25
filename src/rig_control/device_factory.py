@@ -1,3 +1,5 @@
+from rig_control.devices.alicat.pressure import AlicatBackPressureController
+from rig_control.devices.pressure_controller import PressurePolicy
 from collections.abc import Callable, Mapping
 
 from rig_control.devices.base import Device
@@ -6,6 +8,11 @@ from rig_control.devices.tasi_ta612c.configuration import (
 )
 from rig_control.devices.tasi_ta612c.driver import Ta612cTemperatureProbe
 from rig_control.devices.tasi_ta612c.protocol import Ta612cProtocol
+from rig_control.devices.kamoer_m1_stp.configuration import (
+    configuration_from_profile as kamoer_m1_stp_configuration_from_profile,
+)
+from rig_control.devices.kamoer_m1_stp.driver import KamoerM1Stp
+from rig_control.devices.kamoer_m1_stp.protocol import KamoerM1StpProtocol
 from rig_control.transports.pyserial_binary import PySerialBinaryTransport
 from rig_control.devices.ohaus_guardian_5000.configuration import (
     configuration_from_profile as guardian_configuration_from_profile,
@@ -36,6 +43,11 @@ from rig_control.devices.manager import DeviceManager
 from rig_control.devices.esp32_controller import Esp32Controller
 from rig_control.devices.esp32_bus import Esp32Bus
 from rig_control.devices.esp32_dht11 import Esp32Dht11
+from rig_control.devices.atlas_ezo_hum.configuration import (
+    configuration_from_profile as ezo_hum_configuration_from_profile,
+)
+from rig_control.devices.atlas_ezo_hum.driver import AtlasEzoHum
+from rig_control.devices.atlas_ezo_hum.protocol import EzoHumProtocol
 from rig_control.devices.lumel_re72 import LumelRe72
 from rig_control.esp32.session import ControllerSession
 from rig_control.devices.mass_flow_controller import (
@@ -93,6 +105,7 @@ def create_device_manager(
     alicat_transport_factory: AlicatTransportFactory | None = None,
     esp32_transport_factory: Esp32TransportFactory | None = None,
     event_sink: EventSink | None = None,
+    pressure_policy: PressurePolicy | None = None,
 ) -> DeviceManager:
     """Construct all enabled devices described by a rig profile."""
 
@@ -119,6 +132,7 @@ def create_device_manager(
                 esp32_buses,
                 selected_esp32_transport_factory,
                 event_sink,
+                pressure_policy,
             )
         )
 
@@ -133,6 +147,7 @@ def _create_device(
     esp32_buses: dict[str, Esp32Bus],
     esp32_transport_factory: Esp32TransportFactory,
     event_sink: EventSink | None,
+    pressure_policy: PressurePolicy | None = None,
 ) -> Device:
     if role.backend is DeviceBackend.REAL:
         if role.driver == "tasi_ta612c":
@@ -142,6 +157,21 @@ def _create_device(
                 return Ta612cTemperatureProbe(configuration, Ta612cProtocol(transport, configuration.timeout_seconds))
             except (KeyError, TypeError, ValueError) as error:
                 raise DeviceFactoryError(f"Invalid temperature-probe configuration: {error}") from error
+
+        if role.driver == "kamoer_m1_stp":
+            try:
+                configuration = kamoer_m1_stp_configuration_from_profile(profile, role.device_id)
+                transport = PySerialBinaryTransport(
+                    configuration.port,
+                    9600,
+                    configuration.timeout_seconds,
+                )
+                return KamoerM1Stp(
+                    configuration,
+                    KamoerM1StpProtocol(transport, configuration.slave, configuration.timeout_seconds),
+                )
+            except (KeyError, TypeError, ValueError) as error:
+                raise DeviceFactoryError(f"Invalid peristaltic-pump configuration: {error}") from error
 
         if role.driver == "ohaus_guardian_5000":
             try:
@@ -171,6 +201,7 @@ def _create_device(
             role.capability in {
                 DeviceCapability.MASS_FLOW_CONTROLLER,
                 DeviceCapability.MASS_FLOW_METER,
+                DeviceCapability.BACK_PRESSURE_CONTROLLER,
             }
             and role.driver == "alicat"
         ):
@@ -179,6 +210,7 @@ def _create_device(
                 role,
                 alicat_buses,
                 alicat_transport_factory,
+                pressure_policy=pressure_policy, event_sink=event_sink,
             )
 
         if (
@@ -211,6 +243,23 @@ def _create_device(
                     profile, role, esp32_buses, esp32_transport_factory
                 ),
             )
+
+        if (
+            role.driver == "atlas_ezo_hum"
+            and role.capability is DeviceCapability.HUMIDITY_SENSOR
+        ):
+            try:
+                configuration = ezo_hum_configuration_from_profile(
+                    profile, role.device_id
+                )
+                transport = PySerialTextTransport(
+                    configuration.port, 9600, configuration.timeout_seconds
+                )
+                return AtlasEzoHum(configuration, EzoHumProtocol(transport))
+            except (KeyError, TypeError, ValueError) as error:
+                raise DeviceFactoryError(
+                    f"Invalid EZO-HUM configuration: {error}"
+                ) from error
 
         if (
             role.driver == "lumel_re72"
@@ -322,7 +371,8 @@ def _create_real_alicat(
     role: DeviceRole,
     buses: dict[str, AlicatBus],
     transport_factory: AlicatTransportFactory,
-) -> AlicatMassFlowController | AlicatMassFlowMeter:
+    *, pressure_policy: PressurePolicy | None = None, event_sink=None,
+) -> AlicatMassFlowController | AlicatMassFlowMeter | AlicatBackPressureController:
     """Construct a disconnected Alicat on its profile's shared bus."""
 
     try:
@@ -345,8 +395,10 @@ def _create_real_alicat(
             configuration.engineering_units,
             requires_setpoint=configuration.is_controller,
         )
+        if configuration.is_bpr:
+            return AlicatBackPressureController(configuration, protocol, pressure_policy=pressure_policy, event_sink=event_sink)
         if configuration.is_controller:
-            return AlicatMassFlowController(configuration, protocol)
+            return AlicatMassFlowController(configuration, protocol, event_sink=event_sink)
         return AlicatMassFlowMeter(configuration, protocol)
     except (KeyError, TypeError, ValueError) as error:
         raise DeviceFactoryError(

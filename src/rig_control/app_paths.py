@@ -37,5 +37,9 @@ def experiments_directory() -> Path:
     return home_directory() / "experiments"
 
 
+def calibrations_directory() -> Path:
+    return home_directory() / "calibrations"
+
+
 def default_selection_path() -> Path:
     return home_directory() / "app-selection.toml"

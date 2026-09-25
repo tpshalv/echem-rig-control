@@ -1,3 +1,4 @@
+from rig_control.devices.alicat.verification import AlicatControlConfiguration, parse_control_configuration
 import argparse
 import re
 from collections.abc import Sequence
@@ -23,6 +24,8 @@ class AlicatDiagnosticResult:
 
     raw_response: str
     state: AlicatInstrumentState
+    control_configuration: AlicatControlConfiguration | None = None
+    verification_error: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +40,7 @@ class DiscoveredAlicat:
     model: str | None = None
     inferred_kind: str | None = None
     inferred_maximum_flow_sccm: float | None = None
+    control_description: str = "Unverified control mode"
 
 
 def scan_alicat_bus(
@@ -80,6 +84,15 @@ def scan_alicat_bus(
                 manufacturer,
                 data_format,
             )
+            control_description = "Read-only meter" if kind == "meter" else "Unverified control mode"
+            if kind == "controller":
+                try:
+                    observed = parse_control_configuration(device.address, firmware, manufacturer,
+                        _optional_query(selected_transport, f"{device.address}LR"),
+                        _optional_query(selected_transport, f"{device.address}R20"), data_format)
+                    control_description = observed.description
+                except (ValueError, TypeError):
+                    pass
             enriched.append(
                 DiscoveredAlicat(
                     device.address,
@@ -90,6 +103,7 @@ def scan_alicat_bus(
                     model,
                     kind,
                     maximum,
+                    control_description,
                 )
             )
     finally:
@@ -156,6 +170,8 @@ def read_alicat_state(
         requires_setpoint=configuration.is_controller,
     )
 
+    observed = None
+    verification_error = ""
     try:
         bus.connect()
         raw_response = bus.request(configuration.unit_address)
@@ -163,10 +179,15 @@ def read_alicat_state(
             configuration.unit_address,
             raw_response,
         )
+        if configuration.is_controller:
+            try:
+                observed = protocol.read_control_configuration(configuration.unit_address)
+            except Exception as error:
+                verification_error = str(error)
     finally:
         bus.disconnect()
 
-    return AlicatDiagnosticResult(raw_response, state)
+    return AlicatDiagnosticResult(raw_response, state, observed, verification_error)
 
 
 def main(arguments: Sequence[str] | None = None) -> int:
@@ -247,3 +268,17 @@ def main(arguments: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def read_alicat_configuration(configuration, *, transport=None):
+    """Inspect identity and controller settings without issuing any writes."""
+    connection = configuration.connection
+    selected = transport or PySerialTextTransport(connection.port, connection.baud_rate, connection.timeout_seconds)
+    bus = AlicatBus(connection.connection_id, selected)
+    protocol = AlicatAsciiProtocolClient(bus, configuration.frame_fields, configuration.engineering_units,
+                                        requires_setpoint=configuration.is_controller)
+    protocol.connect()
+    try:
+        return protocol.read_control_configuration(configuration.unit_address)
+    finally:
+        protocol.disconnect()

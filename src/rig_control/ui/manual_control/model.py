@@ -5,12 +5,17 @@ from rig_control.control.commands import (
     ControlCommand,
     EnterDeviceSafeState,
     SetMfcFlow,
+    SetPressureSetpoint,
+    ResumePressureControl,
     SetPowerSupplyCurrentLimit,
     SetPowerSupplyOutput,
     SetPowerSupplyVoltage,
     SetControllerOutput,
     RearmController,
     SetTemperatureSetpoint,
+    SetPumpDirection,
+    SetPumpRunning,
+    SetPumpSpeed,
 )
 from rig_control.control.service import RigControlService
 from rig_control.devices.manager import DeviceManager
@@ -18,6 +23,7 @@ from rig_control.devices.power_supply import (
     PowerSupply,
     PowerSupplyOperatingMode,
 )
+from rig_control.devices.pump import PumpDirection
 from rig_control.models import (
     DeviceStatus,
 )
@@ -202,6 +208,12 @@ class ManualControlViewModel:
 
         return tuple(results)
 
+
+    def resume_pressure_control(self, device_id: str) -> ManualActionResult:
+        return self._execute(ResumePressureControl(device_id, CommandSource.MANUAL))
+
+    def set_pressure_setpoint(self, device_id: str, value: float, unit: str = "bara") -> ManualActionResult:
+        return self._execute(SetPressureSetpoint(device_id, value, CommandSource.MANUAL, unit))
 
     def set_mfc_flow(
         self,
@@ -582,3 +594,16 @@ class ManualControlViewModel:
         return self._execute(
             SetTemperatureSetpoint(device_id, value, CommandSource.MANUAL)
         )
+
+    def set_pump_speed(self, device_id: str, rpm: float) -> ManualActionResult:
+        return self._execute(SetPumpSpeed(device_id, rpm, CommandSource.MANUAL))
+
+    def set_pump_direction(
+        self, device_id: str, direction: PumpDirection
+    ) -> ManualActionResult:
+        return self._execute(
+            SetPumpDirection(device_id, direction, CommandSource.MANUAL)
+        )
+
+    def set_pump_running(self, device_id: str, running: bool) -> ManualActionResult:
+        return self._execute(SetPumpRunning(device_id, running, CommandSource.MANUAL))

@@ -58,6 +58,13 @@ def capture_run_context(
                              output_enabled=device.output_enabled)
             if isinstance(device, MassFlowController):
                 state["flow_setpoint"] = device.flow_setpoint
+            if hasattr(device, "control_configuration"):
+                state["alicat_configuration"] = portable_value(device.control_configuration)
+                state["verification"] = device.verification_message
+                state["control_ready"] = device.control_ready
+            if hasattr(device, "pressure_policy"):
+                state["pressure_policy"] = portable_value(device.pressure_policy)
+                state["pressure_setpoint_pa"] = device.pressure_setpoint_pa
             devices.append(state)
     snapshot = {
         "format": "rig-control.run-context",

@@ -16,7 +16,7 @@ from rig_control.data.serialization import (
     experiment_metadata_to_dict,
     measurement_record_to_dict,
 )
-from rig_control.data.export import export_experiment_files, export_wide_csv
+from rig_control.data.export import export_excel, export_experiment_files, export_wide_csv
 from rig_control.data.writer import ExperimentWriter
 from rig_control.models import Event
 
@@ -235,6 +235,18 @@ class DirectoryExperimentWriter(ExperimentWriter):
             self._is_open = False
             self._live_export_executor.shutdown(wait=True)
 
+    def export_excel(self) -> Path:
+        """Queue a snapshot with CSV updates; journal writes remain independent."""
+        if self._experiment_directory is None:
+            raise RuntimeError("No experiment is available to export")
+        if not self.is_open:
+            return export_excel(self._experiment_directory,
+                                bin_seconds=self._export_bin_seconds)
+        return self._live_export_executor.submit(
+            export_excel, self._experiment_directory,
+            bin_seconds=self._export_bin_seconds,
+        ).result()
+
     def _require_open(self) -> None:
         if not self.is_open:
             raise RuntimeError(
@@ -269,6 +281,7 @@ class DirectoryExperimentWriter(ExperimentWriter):
             export_wide_csv,
             self._experiment_directory,
             bin_seconds=self._export_bin_seconds,
+            final=False,
         )
         self._last_live_export_at = now
 

@@ -1,5 +1,4 @@
 from collections import defaultdict
-import csv
 from datetime import datetime, timezone
 import json
 from math import floor
@@ -20,44 +19,69 @@ def export_experiment_files(
     *,
     bin_seconds: float = 1.0,
 ) -> tuple[Path, Path]:
-    """Create convenient wide CSV and Excel views from authoritative journals."""
-    directory = Path(experiment_directory)
-    metadata = json.loads((directory / "metadata.json").read_text(encoding="utf-8"))
-    measurements = _read_jsonl(directory / "measurements.journal.jsonl")
-    events = _read_jsonl(directory / "events.journal.jsonl")
-    headers, rows = build_wide_rows(measurements, bin_seconds=bin_seconds,
-                                    channel_labels=_channel_labels(metadata))
-
-    csv_path = directory / "measurements-wide.csv"
-    _write_csv(csv_path, headers, rows)
-    xlsx_path = directory / "experiment.xlsx"
-    _write_xlsx(
-        xlsx_path,
-        metadata=metadata,
-        wide_headers=headers,
-        wide_rows=rows,
-        measurements=measurements,
-        events=events,
-        bin_seconds=bin_seconds,
-    )
-    return csv_path, xlsx_path
+    """Finish the incremental CSV and stream a compact Excel workbook."""
+    csv_path = export_wide_csv(experiment_directory, bin_seconds=bin_seconds)
+    return csv_path, export_excel(experiment_directory, bin_seconds=bin_seconds,
+                                  refresh=False)
 
 
 def export_wide_csv(
     experiment_directory: str | Path,
     *,
     bin_seconds: float = 1.0,
+    final: bool = True,
 ) -> Path:
-    """Refresh the compact wide CSV view without touching the Excel workbook."""
+    from rig_control.data.incremental_export import IncrementalCsvExporter
+
+    return IncrementalCsvExporter(experiment_directory, bin_seconds).update(final=final)
+
+
+def export_excel(
+    experiment_directory: str | Path,
+    *,
+    bin_seconds: float | None = None,
+    refresh: bool = True,
+) -> Path:
+    """Export a snapshot without stopping recording or loading the run into RAM."""
+    from rig_control.data.incremental_export import IncrementalCsvExporter
+
     directory = Path(experiment_directory)
-    measurements = _read_jsonl(directory / "measurements.journal.jsonl")
-    metadata_path = directory / "metadata.json"
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
-    headers, rows = build_wide_rows(measurements, bin_seconds=bin_seconds,
-                                    channel_labels=_channel_labels(metadata))
-    csv_path = directory / "measurements-wide.csv"
-    _write_csv(csv_path, headers, rows)
-    return csv_path
+    for name in ("metadata.json", "measurements.journal.jsonl", "events.journal.jsonl"):
+        if not (directory / name).is_file():
+            raise ValueError(f"Choose an experiment folder containing {name}")
+    if bin_seconds is None:
+        # A folder selected after restart keeps its recorded export interval.
+        import sqlite3
+
+        cache = directory / "export-cache.sqlite3"
+        bin_seconds = 1.0
+        if cache.exists():
+            connection = sqlite3.connect(cache)
+            try:
+                row = connection.execute(
+                    "SELECT value FROM state WHERE key='bin_seconds'"
+                ).fetchone()
+                if row is not None:
+                    bin_seconds = float(json.loads(row[0]))
+            finally:
+                connection.close()
+    exporter = IncrementalCsvExporter(directory, bin_seconds)
+    if refresh:
+        state_path = directory / "recording-state.json"
+        recording = (state_path.exists() and json.loads(
+            state_path.read_text(encoding="utf-8")).get("state") == "recording")
+        exporter.update(final=not recording)
+    metadata = json.loads((directory / "metadata.json").read_text(encoding="utf-8"))
+    path = directory / "experiment.xlsx"
+    # Capture an event boundary as well, so an active journal cannot keep an
+    # on-demand export running indefinitely.
+    events_path = directory / "events.journal.jsonl"
+    events_end = events_path.stat().st_size
+    with exporter.snapshot() as (signals, rows):
+        _write_xlsx(path, metadata=metadata,
+                    wide_headers=exporter.headers(signals, metadata), wide_rows=rows,
+                    events=_iter_jsonl(events_path, events_end), bin_seconds=bin_seconds)
+    return path
 
 
 def build_wide_rows(
@@ -126,26 +150,21 @@ def _channel_labels(metadata: dict[str, Any]) -> dict[str, dict[str, str]]:
     return labels
 
 
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    records: list[dict[str, Any]] = []
-    with path.open("r", encoding="utf-8") as stream:
-        for line_number, line in enumerate(stream, 1):
-            if not line.strip():
-                continue
-            value = json.loads(line)
-            if not isinstance(value, dict):
-                raise ValueError(f"{path.name} line {line_number} is not an object")
-            records.append(value)
-    return records
+def _iter_jsonl(path: Path, end: int):
+    with path.open("rb") as stream:
+        while stream.tell() < end:
+            line = stream.readline(end - stream.tell())
+            if not line.endswith(b"\n"):
+                break
+            if line.strip():
+                value = json.loads(line)
+                if not isinstance(value, dict):
+                    raise ValueError(f"{path.name} contains a non-object record")
+                yield value
 
 
-def _write_csv(path: Path, headers: list[str], rows: list[list[object]]) -> None:
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    with temporary.open("w", encoding="utf-8-sig", newline="") as stream:
-        writer = csv.writer(stream)
-        writer.writerow(headers)
-        writer.writerows(rows)
-    temporary.replace(path)
+EXCEL_ROW_LIMIT = 1_048_576
+EXCEL_COLUMN_LIMIT = 16_384
 
 
 def _write_xlsx(
@@ -153,99 +172,96 @@ def _write_xlsx(
     *,
     metadata: dict[str, Any],
     wide_headers: list[str],
-    wide_rows: list[list[object]],
-    measurements: list[dict[str, Any]],
-    events: list[dict[str, Any]],
+    wide_rows,
+    events,
     bin_seconds: float,
 ) -> None:
-    try:
-        from openpyxl import Workbook
-        from openpyxl.styles import Font, PatternFill
-        from openpyxl.utils import get_column_letter
-    except ImportError as error:
-        raise RuntimeError(
-            "Excel export requires openpyxl; reinstall the project dependencies"
-        ) from error
+    from openpyxl import Workbook
+    from openpyxl.cell import WriteOnlyCell
+    from openpyxl.styles import Font, PatternFill
+    from openpyxl.utils import get_column_letter
 
-    workbook = Workbook(write_only=False)
-    overview = workbook.active
-    overview.title = "Overview"
-    overview.append(["Experiment export"])
+    if len(wide_headers) > EXCEL_COLUMN_LIMIT:
+        raise ValueError("Too many signals for an Excel worksheet; use the CSV export")
+    workbook = Workbook(write_only=True)
+    header_fill = PatternFill("solid", fgColor="1F4E78")
+    header_font = Font(color="FFFFFF", bold=True)
+    time_format = "yyyy-mm-dd hh:mm:ss" + (".000" if bin_seconds < 1 else "")
+
+    def cells(sheet, values, *, header=False):
+        result = []
+        for value in values:
+            cell = WriteOnlyCell(sheet, value=value)
+            # Labels and operator notes must remain text, including leading '='.
+            if isinstance(value, str):
+                cell.data_type = "s"
+            if isinstance(value, datetime):
+                cell.number_format = time_format
+            if header:
+                cell.fill, cell.font = header_fill, header_font
+            result.append(cell)
+        return result
+
+    def table(name, headers, rows):
+        part = 0
+        sheet = None
+        count = 0
+        for row in rows:
+            if sheet is None or count >= EXCEL_ROW_LIMIT:
+                if sheet is not None:
+                    sheet.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{count}"
+                part += 1
+                sheet = workbook.create_sheet(name if part == 1 else f"{name} {part}")
+                sheet.freeze_panes = "A2"
+                sheet.sheet_view.showGridLines = False
+                for index, label in enumerate(headers, 1):
+                    sheet.column_dimensions[get_column_letter(index)].width = (
+                        23 if index == 1 else min(max(len(label) + 2, 16), 45)
+                    )
+                sheet.append(cells(sheet, headers, header=True))
+                count = 1
+            sheet.append(cells(sheet, row))
+            count += 1
+        if sheet is None:
+            sheet = workbook.create_sheet(name)
+            sheet.freeze_panes = "A2"
+            sheet.append(cells(sheet, headers, header=True))
+            count = 1
+        sheet.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{count}"
+
+    overview = workbook.create_sheet("Overview")
+    overview.column_dimensions["A"].width = 34
+    overview.column_dimensions["B"].width = 85
+    overview.freeze_panes = "A4"
+    overview.sheet_view.showGridLines = False
+    overview.append(cells(overview, ["Experiment export"]))
     overview.append([])
-    overview.append(["Field", "Value"])
+    overview.append(cells(overview, ["Field", "Value"], header=True))
     for key, value in metadata.items():
         if key == "extra":
             for extra_key, extra_value in dict(value).items():
-                overview.append([f"extra.{extra_key}", extra_value])
+                overview.append(cells(overview, [f"extra.{extra_key}", extra_value]))
         else:
-            overview.append([key, value])
-    overview.append([])
-    overview.append(["Wide-data bin size (seconds)", bin_seconds])
-    overview.append([
-        "Binning method",
-        "Nearest regular time bin; multiple observations are averaged; missing signals remain blank.",
-    ])
-    overview.append([
-        "Source of truth",
-        "measurements.journal.jsonl and events.journal.jsonl",
-    ])
-
-    data = workbook.create_sheet("Data")
-    data.append(wide_headers)
-    for row in wide_rows:
-        data.append([_excel_datetime(row[0]), *row[1:]])
-
-    raw = workbook.create_sheet("Raw measurements")
-    raw_headers = [
-        "timestamp", "device_id", "channel", "value", "unit", "quality",
-        "sequence_step_id",
-    ]
-    raw.append(raw_headers)
-    for record in measurements:
-        raw.append([
-            _excel_datetime(record.get("timestamp")),
-            *(record.get(key) for key in raw_headers[1:]),
-        ])
-
-    event_sheet = workbook.create_sheet("Events")
+            overview.append(cells(overview, [key, value]))
+    overview.append(cells(overview, ["Time interval (seconds)", bin_seconds]))
+    overview.append(cells(overview, ["Binning method",
+        "Nearest time bin; readings averaged, setpoints use latest; missing signals blank."]))
+    overview.append(cells(overview, ["Original readings",
+        "Full readings and timestamps remain in measurements.journal.jsonl."]))
+    overview.append(cells(overview, ["Exported at (UTC)", datetime.now(timezone.utc).replace(tzinfo=None)]))
+    table("Data", wide_headers,
+          ([_excel_datetime(row[0]), *row[1:]] for row in wide_rows))
     event_headers = ["timestamp", "severity", "source", "message"]
-    event_sheet.append(event_headers)
-    for event in events:
-        event_sheet.append([
-            _excel_datetime(event.get("timestamp")),
-            *(event.get(key) for key in event_headers[1:]),
-        ])
-
-    header_fill = PatternFill("solid", fgColor="1F4E78")
-    header_font = Font(color="FFFFFF", bold=True)
-    for sheet, header_row in ((overview, 3), (data, 1), (raw, 1), (event_sheet, 1)):
-        sheet.freeze_panes = f"A{header_row + 1}"
-        sheet.sheet_view.showGridLines = False
-        for cell in sheet[header_row]:
-            cell.fill = header_fill
-            cell.font = header_font
-        sheet.auto_filter.ref = sheet.dimensions if sheet is not overview else None
-
-    overview["A1"].font = Font(size=14, bold=True)
-    overview.column_dimensions["A"].width = 32
-    overview.column_dimensions["B"].width = 85
-    for sheet in (data, raw, event_sheet):
-        for cell in sheet["A"][1:]:
-            cell.number_format = "yyyy-mm-dd hh:mm:ss.000"
-        for column_index in range(1, sheet.max_column + 1):
-            letter = get_column_letter(column_index)
-            sample = [
-                str(sheet.cell(row, column_index).value or "")
-                for row in range(1, min(sheet.max_row, 200) + 1)
-            ]
-            sheet.column_dimensions[letter].width = min(
-                max(map(len, sample), default=10) + 2,
-                36,
-            )
-
+    table("Events", event_headers,
+          ([_excel_datetime(event.get("timestamp")),
+            *(event.get(key) for key in event_headers[1:])] for event in events))
     temporary = path.with_name(f"{path.stem}.tmp{path.suffix}")
-    workbook.save(temporary)
-    temporary.replace(path)
+    try:
+        workbook.save(temporary)
+        temporary.replace(path)
+    finally:
+        workbook.close()
+        temporary.unlink(missing_ok=True)
 
 
 def _excel_datetime(value: object) -> datetime | object:

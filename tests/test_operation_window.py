@@ -1,12 +1,26 @@
 from queue import Queue
 from datetime import UTC, datetime
+from tkinter import ttk
 from types import SimpleNamespace
+import tkinter as tk
+
+import pytest
 
 from rig_control.ui.operation.model import LiveMeasurementRow
 from rig_control.ui.operation.window import (
     OperationWindow,
     format_operation_boolean,
 )
+
+
+@pytest.fixture
+def root():
+    window = tk.Tk()
+    window.withdraw()
+    try:
+        yield window
+    finally:
+        window.destroy()
 
 
 class FailingModel:
@@ -217,3 +231,73 @@ def test_watchdog_action_works_from_any_column() -> None:
     window._handle_channel_double_click(SimpleNamespace(x=1, y=1), None)
 
     assert len(actions) == 1
+
+
+class FakeCellTree(ttk.Frame):
+    """A real Tk widget (so it can parent the combobox _begin_cell_edit
+    creates) that fakes just enough Treeview identification/geometry to
+    drive that method without a fully populated tree."""
+
+    def identify_row(self, _y) -> str:
+        return "row"
+
+    def identify_column(self, _x) -> str:
+        return "#4"
+
+    def bbox(self, _item_id, _column=None):
+        return (5, 5, 80, 20)
+
+
+@pytest.mark.parametrize("editor_kind", ["direction", "running"])
+def test_unknown_pump_state_leaves_the_editor_blank_instead_of_guessing(root, editor_kind):
+    # Regression test: an unread direction/running value is None, and the
+    # editor must not pre-select "None" (direction) or "Off" (running) as
+    # if that were a real, confirmed state.
+    window = OperationWindow.__new__(OperationWindow)
+    window._editor = None
+    window._editor_apply = None
+    tree = FakeCellTree(root)
+    window._channel_trees = {None: tree}
+    window._tree_item_keys = {(None, "row"): ("pump1", editor_kind)}
+    window._channel_rows = {
+        ("pump1", editor_kind): SimpleNamespace(writable=True, editor=editor_kind, value=None)
+    }
+
+    window._begin_cell_edit(SimpleNamespace(x=10, y=10), None)
+
+    assert window._editor.get() == ""
+
+
+@pytest.mark.parametrize("recording", [True, False])
+def test_export_excel_uses_active_run_or_selected_folder(recording, monkeypatch):
+    calls = []
+    exports = []
+    model = SimpleNamespace(
+        is_recording=recording, experiment_directory="previous-run",
+        export_excel=lambda directory: exports.append(directory),
+    )
+    window = OperationWindow.__new__(OperationWindow)
+    window._root = None
+    window._view_model = model
+    window._action_in_progress = False
+    window._entries = {}
+    window._run_operation_action = lambda description, action: action()
+
+    def choose(**kwargs):
+        calls.append(kwargs)
+        return "selected-run"
+
+    monkeypatch.setattr("rig_control.ui.operation.window.filedialog.askdirectory", choose)
+    window._export_excel()
+    assert exports == [None if recording else "selected-run"]
+    assert len(calls) == (0 if recording else 1)
+
+
+def test_cancel_excel_folder_selection_does_not_export(monkeypatch):
+    window = OperationWindow.__new__(OperationWindow)
+    window._root = None
+    window._action_in_progress = False
+    window._view_model = SimpleNamespace(is_recording=False, experiment_directory="run")
+    window._run_operation_action = lambda *args: pytest.fail("Cancelled export ran")
+    monkeypatch.setattr("rig_control.ui.operation.window.filedialog.askdirectory", lambda **kwargs: "")
+    window._export_excel()

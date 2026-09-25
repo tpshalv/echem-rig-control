@@ -224,6 +224,10 @@ class OperationWindow:
             actions, text="Start recording", command=self._toggle_recording
         )
         self._record_button.grid(row=0, column=0)
+        self._export_button = ttk.Button(
+            actions, text="Export Excel", command=self._export_excel
+        )
+        self._export_button.grid(row=1, column=0, sticky="w", pady=(8, 0))
         self._recording_status = ttk.Label(
             actions, text="Not recording", font=SECTION_FONT
         )
@@ -326,6 +330,24 @@ class OperationWindow:
                 notes=notes,
             )
         self._run_operation_action("Updating recording", action)
+
+    def _export_excel(self) -> None:
+        if self._action_in_progress:
+            return
+        directory = None
+        if not self._view_model.is_recording:
+            selected = filedialog.askdirectory(
+                parent=self._root,
+                title="Choose an experiment folder to export",
+                initialdir=str(self._view_model.experiment_directory
+                               or self._entries["output"].get() or "."),
+            )
+            if not selected:
+                return
+            directory = selected
+        self._run_operation_action(
+            "Exporting Excel", lambda: self._view_model.export_excel(directory)
+        )
 
     def _browse_output(self) -> None:
         selected = filedialog.askdirectory(parent=self._root)
@@ -445,6 +467,9 @@ class OperationWindow:
         if row is None or not row.writable:
             return
         if row.editor == "action":
+            if row.channel == "resume_pressure_control" and not messagebox.askyesno(
+                "Resume BPR regulation", "Release the outlet valve hold and resume regulation at the existing pressure setpoint?\n\nThis may discharge gas toward the GC.", parent=self._root):
+                return
             self._run_operation_action(
                 f"Updating {row.channel_name}",
                 lambda: self._view_model.apply_channel_value(
@@ -460,13 +485,16 @@ class OperationWindow:
             return
         self._cancel_cell_edit()
         x, y, width, height = box
-        if row.editor in {"boolean", "mode"}:
+        if row.editor in {"boolean", "mode", "direction", "running"}:
             choices = (
-                ("On", "Off") if row.editor == "boolean"
-                else ("constant_voltage", "constant_current")
+                ("On", "Off") if row.editor in {"boolean", "running"}
+                else ("constant_voltage", "constant_current") if row.editor == "mode"
+                else ("forward", "reverse")
             )
             editor = ttk.Combobox(tree, values=choices, state="readonly")
-            if row.editor == "boolean":
+            if row.value is None:
+                pass  # State not yet known - leave blank rather than guessing.
+            elif row.editor in {"boolean", "running"}:
                 editor.set("On" if row.value else "Off")
             else:
                 editor.set(str(row.value))
@@ -496,16 +524,20 @@ class OperationWindow:
     def _commit_cell_edit(self, row: OperationChannelRow, editor: tk.Widget) -> str:
         text = str(editor.get()).strip()  # type: ignore[attr-defined]
         try:
-            if row.editor == "boolean":
+            if row.editor in {"boolean", "running"}:
                 value: float | bool | str = text == "On"
-                if value and not messagebox.askyesno(
-                    "Confirm output enable",
-                    f"Enable output for {row.device_name!r}?\n\nConfirm wiring and limits are safe.",
-                    parent=self._root,
-                ):
-                    self._cancel_cell_edit()
-                    return "break"
-            elif row.editor == "mode":
+                if value:
+                    title, prompt = (
+                        ("Confirm output enable",
+                         f"Enable output for {row.device_name!r}?\n\n"
+                         "Confirm wiring and limits are safe.")
+                        if row.editor == "boolean" else
+                        ("Confirm pump start", f"Start pump {row.device_name!r}?")
+                    )
+                    if not messagebox.askyesno(title, prompt, parent=self._root):
+                        self._cancel_cell_edit()
+                        return "break"
+            elif row.editor in {"mode", "direction"}:
                 value = text
             else:
                 value = float(text)

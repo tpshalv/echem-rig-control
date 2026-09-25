@@ -1,3 +1,6 @@
+from dataclasses import replace
+from rig_control.devices.alicat.verification import frame_signature, verify_role
+from rig_control.diagnostics.alicat import read_alicat_configuration
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
@@ -5,6 +8,15 @@ from rig_control.devices.tasi_ta612c.configuration import (
     configuration_from_profile as ta612c_configuration_from_profile,
 )
 from rig_control.diagnostics.tasi_ta612c import read_probe
+from rig_control.devices.atlas_ezo_hum.configuration import (
+    configuration_from_profile as ezo_hum_configuration_from_profile,
+)
+from rig_control.diagnostics.atlas_ezo_hum import check_ezo_hum
+
+from rig_control.devices.kamoer_m1_stp.configuration import (
+    configuration_from_profile as kamoer_m1_stp_configuration_from_profile,
+)
+from rig_control.diagnostics.kamoer_m1_stp import read_pump_state
 
 from rig_control.devices.alicat.configuration import (
     configuration_from_profile as alicat_configuration_from_profile,
@@ -28,8 +40,9 @@ from rig_control.ui.device_setup.types import (
     SCPI_POWER_SUPPLY_LABEL_TO_DRIVER, SerialPortInfo, DeviceReadinessRow,
     EditDeviceRequest, ReadinessCheckResult, AlicatScanRow, AddAlicatRequest,
     AddKeithleyRequest, AddGuardianRequest, AddTemperatureProbeRequest,
-    AddEsp32Request, SerialPortProvider, AlicatChecker, AlicatScanner,
-    KeithleyChecker, GuardianChecker, Esp32Checker, Esp32Scanner, ProfileWriter,
+    AddEsp32Request, AddKamoerM1StpRequest, AddEzoHumRequest, SerialPortProvider, AlicatChecker,
+    AlicatScanner, KeithleyChecker, GuardianChecker, Esp32Checker, Esp32Scanner,
+    KamoerM1StpChecker, EzoHumChecker, ProfileWriter,
 )
 from rig_control.ui.device_setup.power_supply import (
     identify_scpi_power_supply,
@@ -56,6 +69,8 @@ class DeviceSetupViewModel:
         temperature_probe_checker: Callable = read_probe,
         esp32_checker: Esp32Checker = read_esp32_state,
         esp32_scanner: Esp32Scanner = discover_esp32,
+        kamoer_m1_stp_checker: KamoerM1StpChecker = read_pump_state,
+        ezo_hum_checker: EzoHumChecker = check_ezo_hum,
         profile_writer: ProfileWriter = write_rig_profile,
     ) -> None:
         if not isinstance(profile, RigProfile):
@@ -68,6 +83,8 @@ class DeviceSetupViewModel:
             keithley_checker=keithley_checker, guardian_checker=guardian_checker,
             temperature_probe_checker=temperature_probe_checker,
             esp32_checker=esp32_checker, esp32_scanner=esp32_scanner,
+            kamoer_m1_stp_checker=kamoer_m1_stp_checker,
+            ezo_hum_checker=ezo_hum_checker,
         )
 
     @property
@@ -105,6 +122,53 @@ class DeviceSetupViewModel:
             for role in self._profiles.profile.device_roles
         )
 
+    def inspect_alicat_configuration(self, device_id):
+        configuration = alicat_configuration_from_profile(self.profile, device_id)
+        if not configuration.is_controller:
+            raise ValueError("Select an Alicat controller (MFC or BPR)")
+        return read_alicat_configuration(configuration)
+
+    def commission_alicat(self, device_id, observed, *, frame_confirmed, downstream_confirmed,
+                          frame_fields, pressure_unit, flow_unit, volumetric_flow_unit, temperature_unit,
+                          maximum_pressure_bara=2.5):
+        """Save expectations only; instrument configuration is always read-only."""
+        from rig_control.rig_profile import ExpectedDeviceIdentity
+        try:
+            if not frame_confirmed:
+                raise ValueError("Confirm the field order and units against the displayed instrument table")
+            current = self.inspect_alicat_configuration(device_id)
+            if (current.serial_number, current.loop_variable, current.inverse, current.setpoint_unit,
+                frame_signature(current.frame_description)) != (
+                observed.serial_number, observed.loop_variable, observed.inverse, observed.setpoint_unit,
+                frame_signature(observed.frame_description)):
+                raise ValueError("Instrument changed since inspection; inspect it again")
+            role = self.profile.get_role(device_id)
+            settings = dict(role.settings)
+            settings.update(verified_frame_signature=frame_signature(current.frame_description),
+                            downstream_valve_confirmed=downstream_confirmed, frame_fields=frame_fields,
+                            pressure_unit=pressure_unit, flow_unit=flow_unit,
+                            volumetric_flow_unit=volumetric_flow_unit, temperature_unit=temperature_unit,
+                            maximum_pressure_bara=maximum_pressure_bara)
+            updated = replace(role, settings=settings, expected_identity=ExpectedDeviceIdentity(
+                manufacturer="Alicat", model=current.model, serial_number=current.serial_number))
+            candidate = replace(self.profile, device_roles=tuple(updated if r.device_id == device_id else r
+                                                                  for r in self.profile.device_roles))
+            configuration = alicat_configuration_from_profile(candidate, device_id)
+            verify_role(current, bpr=configuration.is_bpr, expected_serial=configuration.expected_serial,
+                        expected_frame_signature=configuration.verified_frame_signature, flow_unit=flow_unit,
+                        downstream_confirmed=downstream_confirmed)
+            if configuration.is_bpr:
+                from rig_control.devices.pressure_controller import absolute_unit_factor
+                absolute_unit_factor(pressure_unit)
+                absolute_unit_factor(current.setpoint_unit)
+                if current.maximum_setpoint is None:
+                    raise ValueError("BPR control needs verified instrument bounds; this firmware's range query is not yet supported")
+            self._profiles.commit(candidate)
+            self._profiles.readiness[device_id] = "verified"
+            return ReadinessCheckResult(True, f"Commissioned {device_id}: {current.description}. No instrument settings changed.")
+        except Exception as error:
+            return ReadinessCheckResult(False, "Alicat commissioning failed", str(error))
+
     def add_alicat_and_check(
         self,
         request: AddAlicatRequest,
@@ -127,7 +191,7 @@ class DeviceSetupViewModel:
                 f"{type(error).__name__}: {error}",
             )
 
-        self._profiles.readiness[configuration.device_id] = "ready"
+        self._profiles.readiness[configuration.device_id] = "unverified" if configuration.is_controller else "ready"
         backup_text = (
             f" Previous profile backed up to {backup}." if backup else ""
         )
@@ -137,6 +201,7 @@ class DeviceSetupViewModel:
             f"{configuration.device_id!r} on {configuration.connection.port}, "
             f"address {configuration.unit_address}. Read-only response "
             f"confirmed gas {diagnostic.state.gas or 'not reported'}."
+            + (" Use Verify Alicat role before operating this controller." if configuration.is_controller else "")
             + backup_text,
             f"Raw response: {diagnostic.raw_response}",
         )
@@ -237,6 +302,52 @@ class DeviceSetupViewModel:
         label = candidate.get_role(configuration.device_id).friendly_name
         values = ", ".join(f"{r.channel}={r.measurement.value:g} degC" for r in readings)
         return ReadinessCheckResult(True, f"Added {label!r} as {configuration.device_id!r} on {configuration.port}.", f"Identity: {identity}; readings: {values}" + (f" Previous profile backed up to {backup}." if backup else ""))
+
+    def add_kamoer_m1_stp_and_check(
+        self, request: AddKamoerM1StpRequest,
+    ) -> ReadinessCheckResult:
+        try:
+            candidate = DeviceProfileBuilder(self._profiles.profile).with_new_kamoer_m1_stp(request)
+            configuration = kamoer_m1_stp_configuration_from_profile(candidate, request.device_id.strip())
+            diagnostic = self._discovery.identify_kamoer_m1_stp(configuration)
+            if diagnostic.fault_status:
+                raise ValueError(f"Pump reports fault status {diagnostic.fault_status}")
+            backup = self._profiles.commit(candidate)
+        except Exception as error:
+            return ReadinessCheckResult(False, "The peristaltic pump was not added because its read-only check or validation failed.", f"{type(error).__name__}: {error}")
+        self._profiles.readiness[configuration.device_id] = "ready"
+        label = candidate.get_role(configuration.device_id).friendly_name
+        return ReadinessCheckResult(
+            True, f"Added {label!r} as {configuration.device_id!r} on {configuration.port}. Read-only query confirmed the pump is present and reports no fault.",
+            f"Running: {diagnostic.running}; direction: {diagnostic.direction.value}; "
+            f"speed setpoint: {diagnostic.speed_setpoint_rpm:g} rpm."
+            + (f" Previous profile backed up to {backup}." if backup else ""),
+        )
+
+    def add_ezo_hum_and_check(self, request: AddEzoHumRequest) -> ReadinessCheckResult:
+        try:
+            candidate = DeviceProfileBuilder(self._profiles.profile).with_new_ezo_hum(request)
+            configuration = ezo_hum_configuration_from_profile(candidate, request.device_id.strip())
+            diagnostic = self._discovery.identify_ezo_hum(configuration)
+            backup = self._profiles.commit(candidate)
+        except Exception as error:
+            return ReadinessCheckResult(
+                False,
+                "The EZO-HUM probe was not added because configuration or verification failed.",
+                f"{type(error).__name__}: {error}",
+            )
+        self._profiles.readiness[configuration.device_id] = "ready"
+        readings = ", ".join(
+            f"{item.channel}={item.measurement.value:g} {item.measurement.unit}"
+            for item in diagnostic.readings
+        )
+        return ReadinessCheckResult(
+            True,
+            f"Added {candidate.get_role(configuration.device_id).friendly_name!r} "
+            f"as {configuration.device_id!r} on {configuration.port}.",
+            f"EZO-HUM firmware {diagnostic.identity.firmware_version}; {readings}"
+            + (f" Previous profile backed up to {backup}." if backup else ""),
+        )
 
     def _connection_description(self, device_id: str) -> str:
         role = self._profiles.profile.get_role(device_id)

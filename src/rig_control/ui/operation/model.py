@@ -1,3 +1,4 @@
+from rig_control.devices.pressure_controller import PressureController
 from collections import deque
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -9,6 +10,7 @@ from traceback import format_exc
 from rig_control.data.experiment import ExperimentMetadata
 from rig_control.devices.manager import DeviceManager
 from rig_control.experiment_recording import ExperimentRecorder
+from rig_control.instrument_settings.pump_calibration import PumpCalibrationService
 from rig_control.models import Event, Measurement, Quality
 from rig_control.polling import PollingService
 from rig_control.control.service import RigControlService
@@ -16,6 +18,7 @@ from rig_control.devices.mass_flow_controller import MassFlowController
 from rig_control.devices.power_supply import PowerSupply, PowerSupplyOperatingMode
 from rig_control.devices.esp32_controller import Esp32Controller
 from rig_control.devices.lumel_re72 import LumelRe72
+from rig_control.devices.pump import Pump, PumpDirection
 from rig_control.devices.temperature_probe import TemperatureProbe
 from rig_control.models import DeviceStatus
 from rig_control.rig_profile import DeviceCapability, RigProfile
@@ -205,12 +208,14 @@ class OperationViewModel:
         history_limit: int = 120,
         event_limit: int = 1_000,
         power_supply_safety: PowerSupplyManualSafety | None = None,
+        pump_calibration_service: PumpCalibrationService | None = None,
     ) -> None:
         self._validate_history_limit(history_limit)
         self._validate_event_limit(event_limit)
         self._device_manager = device_manager
         self._polling_service = polling_service
         self._experiment_recorder = experiment_recorder
+        self._pump_calibration_service = pump_calibration_service or PumpCalibrationService()
         self.manual_control = ManualControlViewModel(
             device_manager,
             control_service,
@@ -257,7 +262,7 @@ class OperationViewModel:
             self._system_for_device(device_id)
             for device_id in self._device_manager.device_ids
         }
-        preferred = ("Electrical", "Thermal", "Gas flow", "Other")
+        preferred = ("Electrical", "Thermal", "Gas flow", "Fluid handling", "Other")
         return tuple(
             sorted(
                 systems,
@@ -277,6 +282,7 @@ class OperationViewModel:
             writable = (
                 isinstance(device, MassFlowController)
                 and reading.channel == "setpoint"
+                and getattr(device, "control_ready", True)
             ) or (
                 isinstance(device, LumelRe72)
                 and reading.channel == "target_setpoint"
@@ -321,6 +327,34 @@ class OperationViewModel:
                         None,
                         unit, "", None, device_system,
                     )
+            if hasattr(device, "verification_message"):
+                rows[(device_id, "control_verification")] = OperationChannelRow(
+                    device_id, device_name, "control_verification", "Alicat role verification",
+                    device.verification_message, "", "good" if device.control_ready else "bad", None, device_system)
+            if isinstance(device, PressureController):
+                policy = device.pressure_policy
+                ready = device.status is DeviceStatus.READY and device.control_ready
+                actual = device.pressure_setpoint_pa
+                maximum = device.maximum_pressure_pa / 100_000
+                for channel, label, unit, offset in (
+                    ("pressure_setpoint_absolute", "BPR pressure setpoint (absolute)", "bara", 0.0),
+                    ("pressure_setpoint_gauge", "BPR pressure setpoint (gauge, fixed reference)", "barg", policy.atmospheric_reference_bara),
+                ):
+                    rows[(device_id, channel)] = OperationChannelRow(
+                        device_id, device_name, channel, label,
+                        None if actual is None else actual / 100_000 - offset, unit,
+                        "good" if ready else "bad", None, device_system, ready, "number", -offset, maximum - offset)
+                rows[(device_id, "resume_pressure_control")] = OperationChannelRow(
+                    device_id, device_name, "resume_pressure_control", "Resume BPR regulation",
+                    "Resume (may discharge gas downstream)", "", "good" if ready else "bad", None, device_system,
+                    ready and device.valve_hold is not False, "action")
+                rows[(device_id, "pressure_ceiling")] = OperationChannelRow(
+                    device_id, device_name, "pressure_ceiling",
+                    "HIGH PRESSURE OVERRIDE ACTIVE" if policy.overridden else "Maximum permitted pressure",
+                    maximum, "bara", "warning" if policy.overridden else "good", None, device_system)
+                rows[(device_id, "atmospheric_reference")] = OperationChannelRow(
+                    device_id, device_name, "atmospheric_reference", "Fixed atmospheric reference",
+                    policy.atmospheric_reference_bara, "bara", "good", None, device_system)
             if isinstance(device, PowerSupply):
                 voltage_name = (
                     "Voltage setpoint"
@@ -338,7 +372,7 @@ class OperationViewModel:
                     rows[key] = OperationChannelRow(
                         device_id, device_name, "setpoint", "Flow setpoint",
                         device.flow_setpoint, device.limits.flow_unit, "good", None,
-                        device_system, True, "number", 0.0,
+                        device_system, getattr(device, "control_ready", True), "number", 0.0,
                         device.limits.maximum_flow,
                     )
             if isinstance(device, PowerSupply):
@@ -361,6 +395,21 @@ class OperationViewModel:
                 rows[(device_id, "operating_mode")] = OperationChannelRow(
                     device_id, device_name, "operating_mode", "Operating mode",
                     mode.value, "", "good", None, device_system, True, "mode",
+                )
+            if isinstance(device, Pump):
+                rows[(device_id, "speed_setpoint")] = OperationChannelRow(
+                    device_id, device_name, "speed_setpoint", "Speed setpoint",
+                    device.speed_setpoint_rpm, "rpm", "good", None, device_system,
+                    True, "number", 0.0, device.limits.maximum_speed_rpm,
+                )
+                rows[(device_id, "direction")] = OperationChannelRow(
+                    device_id, device_name, "direction", "Direction",
+                    device.direction.value if device.direction is not None else None,
+                    "", "good", None, device_system, True, "direction",
+                )
+                rows[(device_id, "running")] = OperationChannelRow(
+                    device_id, device_name, "running", "Running",
+                    device.running, "", "good", None, device_system, True, "running",
                 )
             if isinstance(device, Esp32Controller):
                 status = device.controller_status
@@ -392,7 +441,11 @@ class OperationViewModel:
     ) -> OperationActionResult:
         """Apply one editable channel through existing typed commands."""
 
-        if channel == "setpoint":
+        if channel in {"pressure_setpoint_absolute", "pressure_setpoint_gauge"}:
+            result = self.manual_control.set_pressure_setpoint(device_id, float(value), "barg" if channel.endswith("gauge") else "bara")
+        elif channel == "resume_pressure_control":
+            result = self.manual_control.resume_pressure_control(device_id)
+        elif channel == "setpoint":
             result = self.manual_control.set_mfc_flow(device_id, float(value))
         elif channel == "voltage_setpoint":
             result = self.manual_control.set_power_supply_voltage(device_id, float(value))
@@ -410,6 +463,14 @@ class OperationViewModel:
             result = self.manual_control.set_temperature_setpoint(
                 device_id, float(value)
             )
+        elif channel == "speed_setpoint":
+            result = self.manual_control.set_pump_speed(device_id, float(value))
+        elif channel == "direction":
+            result = self.manual_control.set_pump_direction(
+                device_id, PumpDirection(str(value))
+            )
+        elif channel == "running":
+            result = self.manual_control.set_pump_running(device_id, bool(value))
         else:
             return OperationActionResult(False, f"Channel {channel!r} is read-only.")
         return OperationActionResult(
@@ -420,7 +481,8 @@ class OperationViewModel:
         if self._profile is None:
             return device_id
         try:
-            return self._profile.get_role(device_id).friendly_name
+            role = self._profile.get_role(device_id)
+            return role.friendly_name + (" [BPR]" if role.capability is DeviceCapability.BACK_PRESSURE_CONTROLLER else "")
         except KeyError:
             return device_id
 
@@ -478,11 +540,14 @@ class OperationViewModel:
         if capability in {
             DeviceCapability.MASS_FLOW_CONTROLLER,
             DeviceCapability.MASS_FLOW_METER,
+            DeviceCapability.BACK_PRESSURE_CONTROLLER,
             DeviceCapability.PRESSURE_SENSOR_ABSOLUTE,
             DeviceCapability.PRESSURE_SENSOR_RELATIVE,
             DeviceCapability.PRESSURE_SENSOR_DIFFERENTIAL,
         }:
             return "Gas flow"
+        if capability is DeviceCapability.PERISTALTIC_PUMP:
+            return "Fluid handling"
         return "Other"
 
     def _labelled_channel_name(self, device_id: str, channel: str) -> str:
@@ -632,6 +697,35 @@ class OperationViewModel:
             return self._failure("stop monitoring", error)
         return OperationActionResult(True, "Background monitoring stopped.")
 
+    def _pump_calibration_metadata(self) -> dict[str, str | float]:
+        """Record which calibration was active for each pump at run start.
+
+        Stores the calibration ID rather than a bare file path: each pump's
+        calibration history file is append-only, so a path alone would not
+        say which entry inside it was active for this particular run. The
+        fitted slope/intercept are also copied in directly, so a run's
+        recorded flow stays self-describing even if the history file is
+        later edited or lost. A pump with no accepted calibration, or a
+        calibration history that cannot be read, is simply omitted - this
+        is traceability metadata, not something that should block starting
+        a recording.
+        """
+
+        extra: dict[str, str | float] = {}
+        for device_id in self._device_manager.device_ids:
+            if not isinstance(self._device_manager.get(device_id), Pump):
+                continue
+            try:
+                calibration = self._pump_calibration_service.active_calibration(device_id)
+            except Exception:
+                continue
+            if calibration is None:
+                continue
+            extra[f"{device_id}_calibration_id"] = calibration.calibration_id
+            extra[f"{device_id}_calibration_slope"] = calibration.fit.slope
+            extra[f"{device_id}_calibration_intercept"] = calibration.fit.intercept
+        return extra
+
     def start_recording(
         self,
         *,
@@ -661,6 +755,7 @@ class OperationViewModel:
                         role.device_id: dict(role.channel_labels)
                         for role in self._profile.enabled_roles if role.channel_labels
                     }, ensure_ascii=False)} if self._profile is not None else {}),
+                    **self._pump_calibration_metadata(),
                 },
             )
             self._experiment_recorder.start(
@@ -680,6 +775,17 @@ class OperationViewModel:
         except Exception as error:
             return self._failure("stop experiment recording", error)
         return OperationActionResult(True, "Experiment recording completed.")
+
+    @property
+    def experiment_directory(self) -> Path | None:
+        return self._experiment_recorder.experiment_directory
+
+    def export_excel(self, directory: str | Path | None = None) -> OperationActionResult:
+        try:
+            path = self._experiment_recorder.export_excel(directory)
+        except Exception as error:
+            return self._failure("export Excel", error)
+        return OperationActionResult(True, f"Excel exported to {path}")
 
     def collect_polling_results(self) -> int:
         """Drain queued batches; intended for a Tk ``after`` callback."""

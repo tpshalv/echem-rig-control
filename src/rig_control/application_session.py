@@ -36,7 +36,8 @@ class ApplicationSession:
         )
         self.device_manager: DeviceManager = create_device_manager(
             profile,
-            event_sink=self.technical_log.record,
+            event_sink=self.record_control_event,
+            pressure_policy=settings.pressure_policy,
         )
         self.control_service = RigControlService(
             self.device_manager, event_sink=self.record_control_event,

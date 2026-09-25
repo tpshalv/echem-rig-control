@@ -1,7 +1,10 @@
 from dataclasses import replace
 import re
 
+from rig_control.devices.kamoer_m1_stp.configuration import KamoerM1StpConfiguration
+from rig_control.devices.pump import PumpLimits
 from rig_control.devices.tasi_ta612c.configuration import Ta612cConfiguration
+from rig_control.devices.atlas_ezo_hum.configuration import EzoHumConfiguration
 
 from rig_control.rig_profile import (
     ConnectionDefinition,
@@ -18,7 +21,9 @@ from rig_control.ui.device_setup.types import (
     AddAlicatRequest,
     AddKeithleyRequest,
     AddGuardianRequest,
+    AddKamoerM1StpRequest,
     AddTemperatureProbeRequest,
+    AddEzoHumRequest,
 )
 
 class DeviceProfileBuilder:
@@ -51,8 +56,8 @@ class DeviceProfileBuilder:
         if request.maximum_flow <= 0:
             raise ValueError("Maximum flow must be greater than zero")
         device_kind = request.device_kind.strip().casefold()
-        if device_kind not in {"controller", "meter"}:
-            raise ValueError("Alicat device kind must be controller or meter")
+        if device_kind not in {"controller", "meter", "bpr"}:
+            raise ValueError("Alicat device kind must be controller, meter or bpr")
         flow_unit = request.flow_unit.strip()
         if not flow_unit:
             raise ValueError("Alicat flow unit cannot be empty")
@@ -97,11 +102,13 @@ class DeviceProfileBuilder:
             "temperature_unit": "degC",
             "frame_fields": (
                 "absolute_pressure,gas_temperature,volumetric_flow,mass_flow,"
-                + ("setpoint," if device_kind == "controller" else "")
+                + ("setpoint," if device_kind != "meter" else "")
                 + "gas"
             ),
             "hardware_label": hardware_label,
         }
+        if device_kind == "bpr":
+            settings.update(downstream_valve_confirmed=False, maximum_pressure_bara=2.5)
         purpose = request.purpose_label.strip()
         if purpose:
             settings["purpose_label"] = purpose
@@ -110,6 +117,7 @@ class DeviceProfileBuilder:
             device_id=device_id,
             friendly_name=hardware_label,
             capability=(
+                DeviceCapability.BACK_PRESSURE_CONTROLLER if device_kind == "bpr" else
                 DeviceCapability.MASS_FLOW_CONTROLLER
                 if device_kind == "controller"
                 else DeviceCapability.MASS_FLOW_METER
@@ -384,6 +392,87 @@ class DeviceProfileBuilder:
         if request.purpose_label.strip():
             settings["purpose_label"] = request.purpose_label.strip()
         role = DeviceRole(device_id, hardware_label, DeviceCapability.TEMPERATURE_SENSOR, "tasi_ta612c", connection_id=connection_id, settings=settings, system="Thermal", poll_interval_seconds=request.poll_interval_seconds)
+        return replace(self._profile, connections=self._profile.connections + (connection,), device_roles=self._profile.device_roles + (role,))
+
+    def with_new_ezo_hum(self, request: AddEzoHumRequest) -> RigProfile:
+        if not isinstance(request, AddEzoHumRequest):
+            raise TypeError("request must be an AddEzoHumRequest")
+        device_id, hardware_label = self._validate_new_device_identity(
+            request.device_id, request.hardware_label
+        )
+        configuration = EzoHumConfiguration(
+            device_id, request.port.strip(), request.timeout_seconds,
+            request.include_dew_point,
+        )
+        for role in self._profile.enabled_roles:
+            if role.connection_id is None:
+                continue
+            connection = self._profile.get_connection(role.connection_id)
+            existing_port = connection.parameters.get("port")
+            if (
+                isinstance(existing_port, str)
+                and existing_port.casefold() == configuration.port.casefold()
+            ):
+                raise ValueError(
+                    f"Port {configuration.port!r} is already used by {role.device_id!r}"
+                )
+        connection_id = self._unique_connection_id(
+            f"ezo_hum_serial_{configuration.port}"
+        )
+        connection = ConnectionDefinition(
+            connection_id, "serial_text", {
+                "port": configuration.port,
+                "baud_rate": 9600,
+                "timeout_seconds": configuration.timeout_seconds,
+            }
+        )
+        settings: dict[str, object] = {
+            "hardware_label": hardware_label,
+            "include_dew_point": configuration.include_dew_point,
+        }
+        purpose = request.purpose_label.strip()
+        if purpose:
+            settings["purpose_label"] = purpose
+        role = DeviceRole(
+            device_id, hardware_label, DeviceCapability.HUMIDITY_SENSOR,
+            "atlas_ezo_hum", backend=DeviceBackend.REAL,
+            connection_id=connection_id, settings=settings,
+            expected_identity=ExpectedDeviceIdentity(
+                manufacturer="Atlas Scientific", model="EZO-HUM"
+            ),
+            system="Gas handling", poll_interval_seconds=request.poll_interval_seconds,
+        )
+        return replace(
+            self._profile,
+            connections=self._profile.connections + (connection,),
+            device_roles=self._profile.device_roles + (role,),
+        )
+
+    def with_new_kamoer_m1_stp(self, request: AddKamoerM1StpRequest) -> RigProfile:
+        if not isinstance(request, AddKamoerM1StpRequest):
+            raise TypeError("request must be an AddKamoerM1StpRequest")
+        device_id, hardware_label = self._validate_new_device_identity(request.device_id, request.hardware_label)
+        port = request.port.strip()
+        if not port:
+            raise ValueError("Peristaltic pump requires a serial port")
+        # Reuses the driver's own validation (slave range, timeout, speed limit)
+        # rather than duplicating it here.
+        configuration = KamoerM1StpConfiguration(
+            device_id, port, request.slave, float(request.timeout_seconds),
+            PumpLimits(request.maximum_speed_rpm),
+        )
+        for role in self._profile.enabled_roles:
+            if role.connection_id is None:
+                continue
+            connection = self._profile.get_connection(role.connection_id)
+            if role.driver == "kamoer_m1_stp" and str(connection.parameters.get("port", "")).casefold() == port.casefold():
+                raise ValueError(f"Port {port!r} is already used by {role.device_id!r}")
+        connection_id = self._unique_connection_id(f"pump_serial_{port}")
+        connection = ConnectionDefinition(connection_id, "serial_binary", {"port": port, "baud_rate": 9600, "timeout_seconds": configuration.timeout_seconds})
+        settings = {"slave": configuration.slave, "maximum_speed_rpm": configuration.limits.maximum_speed_rpm}
+        if request.purpose_label.strip():
+            settings["purpose_label"] = request.purpose_label.strip()
+        role = DeviceRole(device_id, hardware_label, DeviceCapability.PERISTALTIC_PUMP, "kamoer_m1_stp", connection_id=connection_id, settings=settings, system="Fluid handling")
         return replace(self._profile, connections=self._profile.connections + (connection,), device_roles=self._profile.device_roles + (role,))
 
     def _find_alicat_connection(

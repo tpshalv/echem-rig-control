@@ -99,7 +99,7 @@ def load_configuration(path: Path) -> AlicatMfcConfiguration:
     )
 
 
-def test_read_only_diagnostic_sends_one_address_poll() -> None:
+def test_read_only_diagnostic_polls_and_attempts_configuration_verification() -> None:
     configuration = configuration_from_profile(
         load_rig_profile("rig-profile.example.toml"),
         "nitrogen_mfc",
@@ -112,7 +112,9 @@ def test_read_only_diagnostic_sends_one_address_poll() -> None:
 
     result = diagnostic.read_alicat_state(configuration, transport)
 
-    assert transport.requests == ("A",)
+    assert transport.requests == ("A", "AVE")
+    assert result.control_configuration is None
+    assert result.verification_error
     assert transport.is_open is False
     assert result.raw_response.endswith("N2 LCK")
     assert result.state.mass_flow == 12.3
@@ -147,7 +149,7 @@ def test_bus_scan_finds_addressed_devices_without_sending_commands() -> None:
     assert found[1].inferred_maximum_flow_sccm == 500.0
     assert transport.requests == [
         *[chr(code) for code in range(ord("A"), ord("Z") + 1)],
-        "A??M*", "A??D*", "AVE",
+        "A??M*", "A??D*", "AVE", "ALR", "AR20",
         "B??M*", "B??D*", "BVE",
     ]
     assert transport.is_open is False

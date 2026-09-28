@@ -1,3 +1,4 @@
+from rig_control.devices.alicat.setup_report import AlicatSetupReport
 from rig_control.devices.alicat.configuration import AlicatMfcConfiguration
 from rig_control.devices.alicat.protocol import (
     AlicatInstrumentState,
@@ -8,7 +9,7 @@ from rig_control.devices.measurement_source import DeviceMeasurement, Measuremen
 from rig_control.models import DeviceStatus, Measurement
 
 
-class AlicatMassFlowMeter(Device, MeasurementSource):
+class AlicatMassFlowMeter(AlicatSetupReport, Device, MeasurementSource):
     """Read-only rig adapter for one addressed Alicat mass-flow meter."""
 
     def __init__(

@@ -103,7 +103,8 @@ def test_models_and_capability_specific_queries(model, heat, stir, temp):
     assert ("STOP_STIR" in transport.messages) is stir
 
 
-@pytest.mark.parametrize("model", [" e-g52hsrda ", "E-G52HSRDA-K1", "e-G52HSRDA 230V EU"])
+@pytest.mark.parametrize("model", [" e-g52hsrda ", "E-G52HSRDA-K1", "e-G52HSRDA 230V EU",
+                                   "e-G52HSRTM"])
 def test_model_normalisation(model):
     assert normalize_model(model) == "e-G52HSRDA"
     spec = MODEL_SPECS[normalize_model(model)]
@@ -252,12 +253,37 @@ def test_timer_and_error_readback():
     assert "TIMER_RESET" in transport.messages
     assert device.read_error_code() == "0"
     assert "PARAM 0" in transport.messages
+    transport.failures["PARAM 0"] = "00:00:00,1,0,30.0,23.0,300,0,0,"  # Captured, idle.
+    assert device.read_error_code() == "0"
     transport.failures["PARAM 0"] = "00:10:00,1,99,100,95.5,500,0,E3,"
     assert device.read_error_code() == "E3"
     assert device.status is DeviceStatus.FAULTED
     for value in (0, 59, 61, 359941):
         with pytest.raises(ValueError):
             device.set_timer(value)
+
+
+def test_instrument_error_reports_its_error_code():
+    device, transport = connected()
+    transport.mode = 99
+    transport.failures["PARAM 0"] = "00:10:00,1,99,100,95.5,500,0,E3,"
+    with pytest.raises(RuntimeError, match=r"instrument error \(error code E3: Stir error\)"):
+        device.read_measurements()
+    transport.failures["PARAM 0"] = "00:10:00,1,99,100,95.5,500,0,E6,"
+    with pytest.raises(RuntimeError, match="error code unavailable.*'E6'"):
+        device.read_measurements()  # There is no E6 in the OHAUS table.
+    transport.failures["PARAM 0"] = "00:10:00,1,99,100,95.5,500,0,E3,"
+    with pytest.raises(RuntimeError, match="error code E3"):
+        device.start_heating()
+    assert device.status is DeviceStatus.FAULTED
+
+
+def test_instrument_error_is_reported_even_if_the_code_cannot_be_read():
+    device, transport = connected()
+    transport.mode = 99
+    transport.failures["PARAM 0"] = "garbage"
+    with pytest.raises(RuntimeError, match="instrument error \\(error code unavailable"):
+        device.read_measurements()
 
 
 def test_protocol_parsing_and_framing():
@@ -274,6 +300,8 @@ def test_protocol_parsing_and_framing():
     transport.open()
     protocol = GuardianProtocol(transport)
     transport.failures["MODEL"] = "MODEL e-G52HSRDA"
+    assert protocol.query("MODEL") == "e-G52HSRDA"
+    transport.failures["MODEL"] = "MODEL A e-G52HSRDA"
     assert protocol.query("MODEL") == "e-G52HSRDA"
     transport.failures["MODE"] = "MODE A"
     with pytest.raises(GuardianProtocolError):

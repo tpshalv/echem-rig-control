@@ -19,6 +19,12 @@ from rig_control.control.commands.pump import (
     SetPumpRunning,
     SetPumpSpeed,
 )
+from rig_control.control.commands.hotplate import (
+    SetHotplateHeating,
+    SetHotplateSpeed,
+    SetHotplateStirring,
+    SetHotplateTemperature,
+)
 
 
 ControlCommand = (
@@ -35,6 +41,10 @@ ControlCommand = (
     | SetPumpSpeed
     | SetPumpDirection
     | SetPumpRunning
+    | SetHotplateTemperature
+    | SetHotplateSpeed
+    | SetHotplateHeating
+    | SetHotplateStirring
 )
 
 
@@ -54,4 +64,8 @@ __all__ = [
     "SetPumpDirection",
     "SetPumpRunning",
     "SetPumpSpeed",
+    "SetHotplateHeating",
+    "SetHotplateSpeed",
+    "SetHotplateStirring",
+    "SetHotplateTemperature",
 ]

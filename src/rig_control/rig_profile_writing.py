@@ -1,9 +1,9 @@
 import json
-import os
 import shutil
 from collections.abc import Mapping
 from pathlib import Path
 
+from rig_control.atomic_replace import replace_atomically
 from rig_control.rig_profile import ConfigurationValue, RigProfile
 
 
@@ -27,7 +27,7 @@ def write_rig_profile(profile: RigProfile, path: str | Path) -> Path | None:
             encoding="utf-8",
             newline="\n",
         )
-        os.replace(temporary, destination)
+        replace_atomically(temporary, destination)
     finally:
         if temporary.exists():
             temporary.unlink()

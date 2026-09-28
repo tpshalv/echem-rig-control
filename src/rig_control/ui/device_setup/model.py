@@ -1,5 +1,5 @@
 from dataclasses import replace
-from rig_control.devices.alicat.verification import frame_signature, verify_role
+from math import isclose
 from rig_control.diagnostics.alicat import read_alicat_configuration
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -25,23 +25,28 @@ from rig_control.devices.ohaus_guardian_5000.configuration import (
     configuration_from_profile as guardian_configuration_from_profile,
 )
 from rig_control.diagnostics.ohaus_guardian import read_guardian_state
-from rig_control.diagnostics.alicat import read_alicat_state, scan_alicat_bus
+from rig_control.diagnostics.alicat import (
+    probe_alicat_address,
+    read_alicat_state,
+    scan_alicat_bus,
+)
 from rig_control.diagnostics.esp32 import (
     Esp32DiscoveryResult,
     discover_esp32,
     read_esp32_state,
 )
-from rig_control.rig_profile import DeviceBackend, RigProfile
+from rig_control.rig_profile import DeviceBackend, DeviceCapability, RigProfile
 from rig_control.rig_profile_writing import write_rig_profile
 
 
 from rig_control.ui.device_setup.types import (
     SCPI_POWER_SUPPLY_DRIVERS, SCPI_POWER_SUPPLY_DRIVER_LABELS,
     SCPI_POWER_SUPPLY_LABEL_TO_DRIVER, SerialPortInfo, DeviceReadinessRow,
+    BPR_INSTALLATION_WARNING,
     EditDeviceRequest, ReadinessCheckResult, AlicatScanRow, AddAlicatRequest,
     AddKeithleyRequest, AddGuardianRequest, AddTemperatureProbeRequest,
     AddEsp32Request, AddKamoerM1StpRequest, AddEzoHumRequest, SerialPortProvider, AlicatChecker,
-    AlicatScanner, KeithleyChecker, GuardianChecker, Esp32Checker, Esp32Scanner,
+    AlicatProbe, AlicatScanner, KeithleyChecker, GuardianChecker, Esp32Checker, Esp32Scanner,
     KamoerM1StpChecker, EzoHumChecker, ProfileWriter,
 )
 from rig_control.ui.device_setup.power_supply import (
@@ -64,6 +69,7 @@ class DeviceSetupViewModel:
         serial_port_provider: SerialPortProvider | None = None,
         alicat_checker: AlicatChecker = read_alicat_state,
         alicat_scanner: AlicatScanner = scan_alicat_bus,
+        alicat_probe: AlicatProbe = probe_alicat_address,
         keithley_checker: KeithleyChecker = identify_scpi_power_supply,
         guardian_checker: GuardianChecker = read_guardian_state,
         temperature_probe_checker: Callable = read_probe,
@@ -80,6 +86,7 @@ class DeviceSetupViewModel:
             lambda: self._profiles.profile, self._profiles.readiness,
             serial_port_provider=serial_port_provider,
             alicat_checker=alicat_checker, alicat_scanner=alicat_scanner,
+            alicat_probe=alicat_probe,
             keithley_checker=keithley_checker, guardian_checker=guardian_checker,
             temperature_probe_checker=temperature_probe_checker,
             esp32_checker=esp32_checker, esp32_scanner=esp32_scanner,
@@ -122,66 +129,114 @@ class DeviceSetupViewModel:
             for role in self._profiles.profile.device_roles
         )
 
-    def inspect_alicat_configuration(self, device_id):
+    def inspect_alicat_configuration(self, device_id: str):
+        """Re-read one saved Alicat's configuration without changing it."""
+
         configuration = alicat_configuration_from_profile(self.profile, device_id)
         if not configuration.is_controller:
             raise ValueError("Select an Alicat controller (MFC or BPR)")
         return read_alicat_configuration(configuration)
 
-    def commission_alicat(self, device_id, observed, *, frame_confirmed, downstream_confirmed,
-                          frame_fields, pressure_unit, flow_unit, volumetric_flow_unit, temperature_unit,
-                          maximum_pressure_bara=2.5):
-        """Save expectations only; instrument configuration is always read-only."""
-        from rig_control.rig_profile import ExpectedDeviceIdentity
+    def probe_alicat(self, port: str, address: str, baud_rate: int = 19200):
+        """Read one address's live configuration before adding it."""
+
+        return self._discovery.probe_alicat(port, address, baud_rate)
+
+    def acknowledge_bpr_installation(self, device_id: str) -> ReadinessCheckResult:
+        """Record the hardware acknowledgement for one already-saved BPR.
+
+        Adding a BPR records this automatically. This exists for devices saved
+        by an earlier version, so they never need a commissioning procedure.
+        """
+
         try:
-            if not frame_confirmed:
-                raise ValueError("Confirm the field order and units against the displayed instrument table")
-            current = self.inspect_alicat_configuration(device_id)
-            if (current.serial_number, current.loop_variable, current.inverse, current.setpoint_unit,
-                frame_signature(current.frame_description)) != (
-                observed.serial_number, observed.loop_variable, observed.inverse, observed.setpoint_unit,
-                frame_signature(observed.frame_description)):
-                raise ValueError("Instrument changed since inspection; inspect it again")
-            role = self.profile.get_role(device_id)
-            settings = dict(role.settings)
-            settings.update(verified_frame_signature=frame_signature(current.frame_description),
-                            downstream_valve_confirmed=downstream_confirmed, frame_fields=frame_fields,
-                            pressure_unit=pressure_unit, flow_unit=flow_unit,
-                            volumetric_flow_unit=volumetric_flow_unit, temperature_unit=temperature_unit,
-                            maximum_pressure_bara=maximum_pressure_bara)
-            updated = replace(role, settings=settings, expected_identity=ExpectedDeviceIdentity(
-                manufacturer="Alicat", model=current.model, serial_number=current.serial_number))
-            candidate = replace(self.profile, device_roles=tuple(updated if r.device_id == device_id else r
-                                                                  for r in self.profile.device_roles))
-            configuration = alicat_configuration_from_profile(candidate, device_id)
-            verify_role(current, bpr=configuration.is_bpr, expected_serial=configuration.expected_serial,
-                        expected_frame_signature=configuration.verified_frame_signature, flow_unit=flow_unit,
-                        downstream_confirmed=downstream_confirmed)
-            if configuration.is_bpr:
-                from rig_control.devices.pressure_controller import absolute_unit_factor
-                absolute_unit_factor(pressure_unit)
-                absolute_unit_factor(current.setpoint_unit)
-                if current.maximum_setpoint is None:
-                    raise ValueError("BPR control needs verified instrument bounds; this firmware's range query is not yet supported")
+            role = self._profiles.profile.get_role(device_id)
+            if role.driver != "alicat" or role.capability is not (
+                DeviceCapability.BACK_PRESSURE_CONTROLLER
+            ):
+                raise ValueError(f"{device_id!r} is not a saved Alicat BPR")
+            observed = self.inspect_alicat_configuration(device_id)
+            if observed.detected_role != "bpr":
+                raise ValueError(
+                    f"This device is saved as a BPR but now reports "
+                    f"{observed.description}. Acknowledgement was not recorded."
+                )
+            updated = replace(
+                role,
+                settings=dict(role.settings, downstream_valve_confirmed=True),
+            )
+            candidate = replace(
+                self.profile,
+                device_roles=tuple(
+                    updated if item.device_id == device_id else item
+                    for item in self.profile.device_roles
+                ),
+            )
             self._profiles.commit(candidate)
-            self._profiles.readiness[device_id] = "verified"
-            return ReadinessCheckResult(True, f"Commissioned {device_id}: {current.description}. No instrument settings changed.")
         except Exception as error:
-            return ReadinessCheckResult(False, "Alicat commissioning failed", str(error))
+            return ReadinessCheckResult(
+                False,
+                f"The back-pressure installation acknowledgement was not saved "
+                f"for {device_id!r}.",
+                f"{type(error).__name__}: {error}",
+            )
+        return ReadinessCheckResult(
+            True,
+            f"Recorded the back-pressure installation acknowledgement for "
+            f"{device_id!r}. It will not be asked for again on reconnect.",
+        )
 
     def add_alicat_and_check(
         self,
         request: AddAlicatRequest,
     ) -> ReadinessCheckResult:
-        """Read-only check a proposed Alicat, then save it on success."""
+        """Detect one Alicat's role, check it read-only, then save it.
+
+        The operator never chooses MFC, MFM or BPR: the role comes from the
+        instrument's control variable and inverse-control register.
+        """
 
         try:
-            candidate = DeviceProfileBuilder(self._profiles.profile).with_new_alicat(request)
+            detected = self._discovery.probe_alicat(
+                request.port.strip(),
+                request.unit_address.strip().upper(),
+            )
+        except Exception as error:
+            return ReadinessCheckResult(
+                False,
+                "The Alicat's configuration could not be read, so nothing was "
+                "saved. Check the COM port, address and cabling, then try again.",
+                f"{type(error).__name__}: {error}",
+            )
+
+        if not detected.usable:
+            return ReadinessCheckResult(
+                False,
+                "The Alicat was not added because its configuration could not "
+                "be interpreted.",
+                detected.configuration_error
+                or "The control variable and inverse setting were not readable.",
+            )
+
+        if detected.detected_role == "bpr" and not request.downstream_valve_acknowledged:
+            return ReadinessCheckResult(
+                False,
+                "This Alicat reports back-pressure control and needs one "
+                "hardware acknowledgement before it is saved.",
+                detected.control_description,
+                requires_acknowledgement=BPR_INSTALLATION_WARNING,
+            )
+
+        try:
+            candidate = DeviceProfileBuilder(self._profiles.profile).with_new_alicat(
+                request, detected
+            )
             configuration = alicat_configuration_from_profile(
                 candidate,
                 request.device_id.strip(),
             )
             diagnostic = self._discovery.identify_alicat(configuration)
+            self._confirm_alicat_frame(configuration, diagnostic, detected)
             backup = self._profiles.commit(candidate)
         except Exception as error:
             return ReadinessCheckResult(
@@ -191,7 +246,7 @@ class DeviceSetupViewModel:
                 f"{type(error).__name__}: {error}",
             )
 
-        self._profiles.readiness[configuration.device_id] = "unverified" if configuration.is_controller else "ready"
+        self._profiles.readiness[configuration.device_id] = "ready"
         backup_text = (
             f" Previous profile backed up to {backup}." if backup else ""
         )
@@ -199,12 +254,57 @@ class DeviceSetupViewModel:
             True,
             f"Added {configuration.friendly_name!r} as "
             f"{configuration.device_id!r} on {configuration.connection.port}, "
-            f"address {configuration.unit_address}. Read-only response "
-            f"confirmed gas {diagnostic.state.gas or 'not reported'}."
-            + (" Use Verify Alicat role before operating this controller." if configuration.is_controller else "")
+            f"address {configuration.unit_address}, detected automatically as "
+            f"{detected.control_description}. It is ready to use."
             + backup_text,
-            f"Raw response: {diagnostic.raw_response}",
+            f"Raw response: {diagnostic.raw_response}; frame "
+            f"{','.join(field.value for field in configuration.frame_fields)}",
         )
+
+    @staticmethod
+    def _confirm_alicat_frame(configuration, diagnostic, detected) -> None:
+        """Confirm the saved frame layout really decodes this instrument.
+
+        The setpoint column is cross-checked against the instrument's own LS
+        readback, so a misread data-frame description cannot silently put the
+        wrong measurement, or the wrong unit, against a channel.
+        """
+
+        if not configuration.is_controller:
+            return
+        observed = diagnostic.control_configuration
+        if observed is None:
+            raise ValueError(
+                "The control configuration could not be re-read during the "
+                "read-only check: " + (diagnostic.verification_error or "no detail")
+            )
+        if observed.detected_role != detected.detected_role:
+            raise ValueError(
+                f"The instrument's configuration changed during setup: it now "
+                f"reports {observed.description}"
+            )
+        readback = diagnostic.setpoint_readback
+        if readback is None:
+            return
+        value, unit = readback
+        expected_unit = configuration.engineering_units.setpoint
+        if unit.strip().casefold() != expected_unit.strip().casefold():
+            raise ValueError(
+                f"The instrument reports setpoints in {unit!r} but the saved "
+                f"frame expects {expected_unit!r}"
+            )
+        if not isclose(
+            value,
+            diagnostic.state.setpoint,
+            rel_tol=1e-3,
+            abs_tol=max(abs(value), 1.0) * 1e-3,
+        ):
+            raise ValueError(
+                "The data frame could not be confirmed: its setpoint column "
+                f"reads {diagnostic.state.setpoint:g} but the instrument "
+                f"reports a setpoint of {value:g} {unit}. The reported frame "
+                "layout does not match the live frame."
+            )
 
     def add_keithley_and_check(
         self,

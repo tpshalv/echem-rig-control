@@ -187,7 +187,14 @@ class SettingsWindow:
         ttk.Label(parent, text=f"{row.label}:").grid(
             row=index, column=0, sticky="w", pady=4
         )
-        entry = ttk.Entry(parent, width=48)
+        # A setting with a fixed set of values is chosen from a list, so it
+        # cannot be mistyped into a validation error.
+        if getattr(row, "choices", ()):
+            entry = ttk.Combobox(
+                parent, width=45, values=list(row.choices), state="readonly"
+            )
+        else:
+            entry = ttk.Entry(parent, width=48)
         entry.grid(row=index, column=1, sticky="ew", padx=8, pady=4)
         self._entries[row.key] = entry
         if row.key == "default_output_directory":
@@ -207,6 +214,20 @@ class SettingsWindow:
                 row=index, column=2, sticky="w", pady=4
             )
 
+    @staticmethod
+    def _show_value(entry, value: str) -> None:
+        """Put one value into its field, whichever kind of field it is.
+
+        A read-only combobox refuses delete/insert, so it is set instead.
+        """
+
+        setter = getattr(entry, "set", None)
+        if callable(setter):
+            setter(value)
+            return
+        entry.delete(0, "end")
+        entry.insert(0, value)
+
     def refresh(self) -> None:
         self._path_label.configure(
             text=f"{self._view_model.settings.friendly_name} — {self._view_model.settings_path}"
@@ -215,8 +236,7 @@ class SettingsWindow:
             entry = self._entries.get(row.key)
             if entry is None:
                 continue
-            entry.delete(0, "end")
-            entry.insert(0, row.value)
+            self._show_value(entry, row.value)
         self._high_current_var.set(
             self._view_model.settings.power_supply_high_current_mode
         )

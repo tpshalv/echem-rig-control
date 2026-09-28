@@ -14,6 +14,16 @@ timeout_seconds = 2.0
 controller_id = "esp32_main_controller"
 
 
+[[connections]]
+connection_id = "guardian_serial_com9"
+connection_type = "serial_text"
+
+[connections.parameters]
+port = "COM9"
+baud_rate = 9600
+timeout_seconds = 2.0
+
+
 [[devices]]
 device_id = "esp32_main_controller"
 friendly_name = "Main ESP32 controller"
@@ -55,3 +65,21 @@ poll_interval_seconds = 1.0
 [devices.settings]
 controller_id = "esp32_main_controller"
 slave = 1
+
+
+[[devices]]
+device_id = "hotplate"
+friendly_name = "Guardian 5000"
+capability = "hotplate_stirrer"
+driver = "ohaus_guardian_5000"
+backend = "real"
+required = true
+enabled = true
+connection_id = "guardian_serial_com9"
+poll_interval_seconds = 2.0
+
+[devices.identity]
+manufacturer = "OHAUS"
+
+[devices.settings]
+hardware_label = "Guardian 5000"

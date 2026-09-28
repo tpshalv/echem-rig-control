@@ -5,6 +5,7 @@ from rig_control.devices.alicat.protocol import (
     AlicatFrameField,
     AlicatInstrumentState,
 )
+from rig_control.devices.alicat.verification import AlicatFrameColumn
 from rig_control.devices.ametek_asterion.configuration import (
     AmetekAsterionConfiguration,
 )
@@ -44,6 +45,7 @@ def make_model(
     alicat_checker=None,
     keithley_checker=None,
     alicat_scanner=None,
+    alicat_probe=None,
 ) -> DeviceSetupViewModel:
     arguments = {
         "serial_port_provider": lambda: serial_ports,
@@ -54,9 +56,156 @@ def make_model(
         arguments["keithley_checker"] = keithley_checker
     if alicat_scanner is not None:
         arguments["alicat_scanner"] = alicat_scanner
+    if alicat_probe is not None:
+        arguments["alicat_probe"] = alicat_probe
     return DeviceSetupViewModel(
         load_rig_profile("rig-profile.example.toml"),
         **arguments,
+    )
+
+
+#: The column order and units a real MC-2SLPM-D reports on 10v22 firmware,
+#: including the totaliser column between setpoint and gas.
+CONTROLLER_FRAME_COLUMNS = (
+    AlicatFrameColumn(AlicatFrameField.ABSOLUTE_PRESSURE, "PSIA"),
+    AlicatFrameColumn(AlicatFrameField.GAS_TEMPERATURE, "degC"),
+    AlicatFrameColumn(AlicatFrameField.VOLUMETRIC_FLOW, "LPM"),
+    AlicatFrameColumn(AlicatFrameField.MASS_FLOW, "SLPM"),
+    AlicatFrameColumn(AlicatFrameField.SETPOINT, "SLPM"),
+    AlicatFrameColumn(AlicatFrameField.TOTALIZED_FLOW, "SL"),
+    AlicatFrameColumn(AlicatFrameField.GAS),
+)
+METER_FRAME_COLUMNS = tuple(
+    column for column in CONTROLLER_FRAME_COLUMNS
+    if column.field is not AlicatFrameField.SETPOINT
+)
+CONTROLLER_FRAME_FIELDS = tuple(
+    column.field for column in CONTROLLER_FRAME_COLUMNS
+)
+
+
+def detected_mfc(address: str = "A", **changes) -> DiscoveredAlicat:
+    """One instrument that reports mass-flow control with forward regulation."""
+
+    return replace(
+        DiscoveredAlicat(
+            address=address,
+            raw_response=f"{address} +014.81 +021.13 +0.0000 +0.0000 +0.0000 +0000.000 CO2",
+            model="MC-2SLPM-D",
+            serial_number="539144",
+            detected_role="mfc",
+            is_controller=True,
+            setpoint_unit="SLPM",
+            minimum_setpoint=0.0,
+            maximum_setpoint=2.0,
+            frame_columns=CONTROLLER_FRAME_COLUMNS,
+        ),
+        **changes,
+    )
+
+
+def detected_bpr(address: str = "B", **changes) -> DiscoveredAlicat:
+    """One instrument that reports absolute-pressure control, inverse."""
+
+    return replace(
+        DiscoveredAlicat(
+            address=address,
+            raw_response=f"{address} +020.00 +021.13 +0.0000 +0.0000 +020.000 +0000.000 CO2",
+            model="MC-2SLPM-D",
+            serial_number="539145",
+            detected_role="bpr",
+            is_controller=True,
+            setpoint_unit="PSIA",
+            minimum_setpoint=0.0,
+            maximum_setpoint=160.0,
+            frame_columns=CONTROLLER_FRAME_COLUMNS,
+        ),
+        **changes,
+    )
+
+
+def alicat_state(**changes) -> AlicatInstrumentState:
+    return replace(
+        AlicatInstrumentState(
+            mass_flow=0.0,
+            mass_flow_unit="SLPM",
+            volumetric_flow=0.0,
+            volumetric_flow_unit="LPM",
+            absolute_pressure=14.81,
+            pressure_unit="PSIA",
+            gas_temperature=21.13,
+            temperature_unit="degC",
+            setpoint=0.0,
+            setpoint_unit="SLPM",
+            gas="CO2",
+        ),
+        **changes,
+    )
+
+
+def alicat_configuration_reply(role: str = "mfc", setpoint_unit: str | None = None):
+    """A control configuration matching one detected role."""
+
+    from datetime import UTC, datetime
+
+    from rig_control.devices.alicat.verification import AlicatControlConfiguration
+
+    if role == "bpr":
+        return AlicatControlConfiguration(
+            "539145", "MC-2SLPM-D", "10v22.0-R24", 34, "PSIA", True, 0.0, 160.0,
+            "frame", datetime.now(UTC),
+        )
+    return AlicatControlConfiguration(
+        "539144", "MC-2SLPM-D", "10v22.0-R24", 37, setpoint_unit or "SLPM",
+        False, 0.0, 2.0, "frame", datetime.now(UTC),
+    )
+
+
+def alicat_checker_for(role: str = "mfc", setpoint_unit: str | None = None, **state_changes):
+    """A read-only check that answers consistently with one detected role."""
+
+    def check(configuration: AlicatMfcConfiguration) -> AlicatDiagnosticResult:
+        if role == "bpr":
+            state = alicat_state(
+                setpoint=20.0, setpoint_unit="PSIA", **state_changes
+            )
+            readback = (20.0, "PSIA")
+        else:
+            state = alicat_state(
+                setpoint_unit=setpoint_unit or "SLPM",
+                mass_flow_unit=setpoint_unit or "SLPM",
+                **state_changes,
+            )
+            readback = (state.setpoint, state.setpoint_unit)
+        return AlicatDiagnosticResult(
+            state.gas and f"{configuration.unit_address} raw frame" or "raw",
+            state,
+            alicat_configuration_reply(role, setpoint_unit)
+            if configuration.is_controller
+            else None,
+            "",
+            readback if configuration.is_controller else None,
+        )
+
+    return check
+
+
+def empty_model(tmp_path, *, role="mfc", probe=None, checker=None):
+    """A view model with no saved devices and one detectable instrument."""
+
+    empty_profile = replace(
+        load_rig_profile("rig-profile.example.toml"),
+        connections=(),
+        device_roles=(),
+    )
+    detected = probe if probe is not None else (
+        detected_bpr() if role == "bpr" else detected_mfc()
+    )
+    return DeviceSetupViewModel(
+        empty_profile,
+        profile_path=tmp_path / "rig-profile.toml",
+        alicat_checker=checker or alicat_checker_for(role),
+        alicat_probe=lambda port, address, baud=19200: detected,
     )
 
 
@@ -412,9 +561,42 @@ def test_alicat_scan_passes_selected_port_and_baud_rate() -> None:
     found = model.scan_alicats(" COM5 ", 19200)
 
     assert found == (
-        AlicatScanRow("B", "B 14.7 22.5 0 0 Air"),
+        AlicatScanRow(
+            "B", "B 14.7 22.5 0 0 Air",
+            control_description="Control mode could not be read",
+        ),
     )
     assert calls == [("COM5", 19200)]
+
+
+def test_scan_row_carries_the_detected_role_rather_than_descriptive_text() -> None:
+    model = make_model(
+        alicat_scanner=lambda port, baud: (detected_mfc("A"), detected_bpr("B")),
+    )
+
+    mfc, bpr = model.scan_alicats("COM5", 19200)
+
+    assert (mfc.detected_role, mfc.detected_type) == ("mfc", "MFC")
+    assert (bpr.detected_role, bpr.detected_type) == ("bpr", "BPR")
+    assert mfc.usable and bpr.usable
+    assert bpr.setpoint_unit == "PSIA"
+
+
+def test_scan_row_reports_an_unreadable_configuration_as_unusable() -> None:
+    model = make_model(
+        alicat_scanner=lambda port, baud: (
+            detected_mfc(
+                "A", detected_role=None, is_controller=None,
+                configuration_error="Control configuration could not be read at address A",
+            ),
+        ),
+    )
+
+    row = model.scan_alicats("COM5", 19200)[0]
+
+    assert row.usable is False
+    assert row.detected_type == "unknown"
+    assert "could not be read" in row.configuration_error
 
 
 def test_alicat_scan_marks_matching_profile_device_as_already_added() -> None:
@@ -437,22 +619,7 @@ def test_alicat_poll_alone_does_not_authorize_controller_operation() -> None:
 
     def check(configuration: AlicatMfcConfiguration) -> AlicatDiagnosticResult:
         captured.append(configuration)
-        return AlicatDiagnosticResult(
-            "A 14.7 22.5 0.0 0.0 0.0 N2",
-            AlicatInstrumentState(
-                mass_flow=0.0,
-                mass_flow_unit="sccm",
-                volumetric_flow=0.0,
-                volumetric_flow_unit="sccm",
-                absolute_pressure=14.7,
-                pressure_unit="psia",
-                gas_temperature=22.5,
-                temperature_unit="degC",
-                setpoint=0.0,
-                setpoint_unit="sccm",
-                gas="N2",
-            ),
-        )
+        return AlicatDiagnosticResult("A 14.7 22.5 0.0 0.0 0.0 N2", alicat_state())
 
     model = make_model(alicat_checker=check)
 
@@ -460,9 +627,41 @@ def test_alicat_poll_alone_does_not_authorize_controller_operation() -> None:
 
     assert result.succeeded is False
     assert captured[0].unit_address == "A"
-    assert "unverified" in result.technical_details
+    assert "could not be read" in result.technical_details
     rows = {row.device_id: row for row in model.device_rows()}
     assert rows["nitrogen_mfc"].readiness != "ready"
+
+
+def test_reconnect_rechecks_configuration_and_reports_a_saved_role_mismatch() -> None:
+    def check(configuration: AlicatMfcConfiguration) -> AlicatDiagnosticResult:
+        # The saved role is an MFC, but the instrument now reports pressure.
+        return AlicatDiagnosticResult(
+            "A 14.7 22.5 0.0 0.0 0.0 N2",
+            alicat_state(),
+            alicat_configuration_reply("bpr"),
+            "",
+            (20.0, "psia"),
+        )
+
+    model = make_model(alicat_checker=check)
+
+    result = model.check_device("nitrogen_mfc")
+
+    assert result.succeeded is False
+    assert "Saved role does not match" in result.technical_details
+    assert "absolute pressure" in result.technical_details
+
+
+def test_correctly_configured_controller_reconnects_without_commissioning() -> None:
+    # The saved profile records sccm, and the instrument still reports sccm.
+    model = make_model(alicat_checker=alicat_checker_for("mfc", "sccm"))
+
+    result = model.check_device("nitrogen_mfc")
+
+    assert result.succeeded is True
+    assert "mass flow" in result.summary
+    rows = {row.device_id: row for row in model.device_rows()}
+    assert rows["nitrogen_mfc"].readiness == "ready"
 
 
 def test_keithley_check_uses_identification_diagnostic() -> None:
@@ -554,39 +753,8 @@ def test_esp32_sensor_readiness_reports_live_values() -> None:
     assert "humidity=47 %RH" in result.summary
 
 
-def test_checked_alicat_is_saved_to_new_local_profile(tmp_path) -> None:
-    profile_path = tmp_path / "rig-profile.toml"
-    empty_profile = replace(
-        load_rig_profile("rig-profile.example.toml"),
-        connections=(),
-        device_roles=(),
-    )
-
-    def check(configuration: AlicatMfcConfiguration) -> AlicatDiagnosticResult:
-        assert configuration.connection.port == "COM5"
-        assert configuration.unit_address == "A"
-        return AlicatDiagnosticResult(
-            "A 14.7 22.5 0.0 0.0 0.0 N2",
-            AlicatInstrumentState(
-                mass_flow=0.0,
-                mass_flow_unit="sccm",
-                volumetric_flow=0.0,
-                volumetric_flow_unit="sccm",
-                absolute_pressure=14.7,
-                pressure_unit="psia",
-                gas_temperature=22.5,
-                temperature_unit="degC",
-                setpoint=0.0,
-                setpoint_unit="sccm",
-                gas="N2",
-            ),
-        )
-
-    model = DeviceSetupViewModel(
-        empty_profile,
-        profile_path=profile_path,
-        alicat_checker=check,
-    )
+def test_detected_mfc_is_added_ready_to_use_without_a_verification_step(tmp_path) -> None:
+    model = empty_model(tmp_path, role="mfc")
 
     result = model.add_alicat_and_check(
         AddAlicatRequest(
@@ -599,32 +767,114 @@ def test_checked_alicat_is_saved_to_new_local_profile(tmp_path) -> None:
     )
 
     assert result.succeeded is True
-    saved = load_rig_profile(profile_path)
+    assert not result.requires_acknowledgement
+    assert "Mass-flow controller" in result.summary
+    assert "verif" not in result.summary.casefold()
+    rows = {row.device_id: row for row in model.device_rows()}
+    assert rows["mfc_a"].readiness == "ready"
+
+    saved = load_rig_profile(tmp_path / "rig-profile.toml")
     role = saved.get_role("mfc_a")
+    assert role.capability is DeviceCapability.MASS_FLOW_CONTROLLER
     assert role.friendly_name == "MFC A"
     assert role.settings["purpose_label"] == "Nitrogen"
-    assert role.settings["maximum_flow"] == 2000.0
-    assert role.settings["flow_unit"] == "SCCM"
-    assert role.poll_interval_seconds == 1.0
+    # The range and units come from the instrument, not from a form default.
+    assert role.settings["maximum_flow"] == 2.0
+    assert role.settings["flow_unit"] == "SLPM"
+    assert role.settings["volumetric_flow_unit"] == "LPM"
+    assert role.settings["pressure_unit"] == "PSIA"
+    assert role.settings["temperature_unit"] == "degC"
+    assert role.settings["totalized_flow_unit"] == "SL"
+    # The totaliser column is saved in its reported position, so the gas name
+    # is not read out of the totaliser's value.
+    assert role.settings["frame_fields"] == (
+        "absolute_pressure,gas_temperature,volumetric_flow,mass_flow,"
+        "setpoint,totalized_flow,gas"
+    )
     assert role.connection_parameters["address"] == "A"
     assert saved.get_connection(role.connection_id).parameters["port"] == "COM5"
 
 
-def test_failed_check_does_not_write_profile(tmp_path) -> None:
-    profile_path = tmp_path / "rig-profile.toml"
+def test_detected_bpr_needs_one_acknowledgement_and_then_saves_it(tmp_path) -> None:
+    model = empty_model(tmp_path, role="bpr")
+    request = AddAlicatRequest(
+        device_id="outlet_bpr",
+        hardware_label="Outlet BPR",
+        purpose_label="",
+        port="COM5",
+        unit_address="B",
+    )
+
+    first = model.add_alicat_and_check(request)
+
+    assert first.succeeded is False
+    assert "valve is downstream of the sensing section" in first.requires_acknowledgement
+    assert not (tmp_path / "rig-profile.toml").exists()
+
+    second = model.add_alicat_and_check(
+        replace(request, downstream_valve_acknowledged=True)
+    )
+
+    assert second.succeeded is True
+    saved = load_rig_profile(tmp_path / "rig-profile.toml")
+    role = saved.get_role("outlet_bpr")
+    assert role.capability is DeviceCapability.BACK_PRESSURE_CONTROLLER
+    # The acknowledgement is stored with the installation, so reconnects
+    # never ask for it again.
+    assert role.settings["downstream_valve_confirmed"] is True
+    assert role.settings["maximum_pressure_bara"] == 2.5
+    # A pressure loop's LR unit is the pressure unit a setpoint is sent in.
+    assert role.settings["pressure_unit"] == "PSIA"
+
+
+def test_added_bpr_reconnects_without_any_further_confirmation(tmp_path) -> None:
+    model = empty_model(tmp_path, role="bpr")
+    model.add_alicat_and_check(
+        AddAlicatRequest(
+            "outlet_bpr", "Outlet BPR", "", "COM5", "B",
+            downstream_valve_acknowledged=True,
+        )
+    )
+
+    result = model.check_device("outlet_bpr")
+
+    assert result.succeeded is True
+    assert "absolute pressure" in result.summary
+
+
+def test_unknown_control_configuration_is_reported_and_never_assumed_to_be_an_mfc(
+    tmp_path,
+) -> None:
+    unreadable = detected_mfc(
+        detected_role=None,
+        is_controller=None,
+        configuration_error="Control configuration could not be read at address A",
+    )
+    model = empty_model(tmp_path, probe=unreadable)
+
+    result = model.add_alicat_and_check(
+        AddAlicatRequest("mfc_a", "MFC A", "", "COM5", "A")
+    )
+
+    assert result.succeeded is False
+    assert "could not be read" in result.technical_details
+    assert not (tmp_path / "rig-profile.toml").exists()
+
+
+def test_unreadable_port_gives_a_specific_retryable_error(tmp_path) -> None:
     empty_profile = replace(
         load_rig_profile("rig-profile.example.toml"),
         connections=(),
         device_roles=(),
     )
 
-    def fail(_: AlicatMfcConfiguration) -> AlicatDiagnosticResult:
-        raise TimeoutError("no response")
+    def fail(port, address, baud=19200):
+        raise TimeoutError("no response from address A")
 
     model = DeviceSetupViewModel(
         empty_profile,
-        profile_path=profile_path,
-        alicat_checker=fail,
+        profile_path=tmp_path / "rig-profile.toml",
+        alicat_probe=fail,
     )
 
     result = model.add_alicat_and_check(
@@ -632,7 +882,60 @@ def test_failed_check_does_not_write_profile(tmp_path) -> None:
     )
 
     assert result.succeeded is False
-    assert not profile_path.exists()
+    assert "COM port, address and cabling" in result.summary
+    assert "TimeoutError: no response" in result.technical_details
+    assert not (tmp_path / "rig-profile.toml").exists()
+
+
+def test_missing_model_and_serial_labels_do_not_prevent_adding(tmp_path) -> None:
+    anonymous = detected_mfc(model=None, serial_number=None)
+    model = empty_model(tmp_path, probe=anonymous)
+
+    result = model.add_alicat_and_check(
+        AddAlicatRequest("mfc_a", "MFC A", "", "COM5", "A")
+    )
+
+    assert result.succeeded is True
+    role = load_rig_profile(tmp_path / "rig-profile.toml").get_role("mfc_a")
+    assert role.expected_identity.manufacturer == "Alicat"
+    assert role.expected_identity.serial_number is None
+
+
+def test_frame_layout_is_confirmed_against_the_instrument_setpoint(tmp_path) -> None:
+    def check(configuration: AlicatMfcConfiguration) -> AlicatDiagnosticResult:
+        # The frame column disagrees with the instrument's own LS readback,
+        # so the reported layout cannot be trusted.
+        return AlicatDiagnosticResult(
+            "A raw frame",
+            alicat_state(setpoint=14.7),
+            alicat_configuration_reply("mfc"),
+            "",
+            (50.0, "SLPM"),
+        )
+
+    model = empty_model(tmp_path, checker=check)
+
+    result = model.add_alicat_and_check(
+        AddAlicatRequest("mfc_a", "MFC A", "", "COM5", "A")
+    )
+
+    assert result.succeeded is False
+    assert "data frame could not be confirmed" in result.technical_details
+    assert not (tmp_path / "rig-profile.toml").exists()
+
+
+def test_failed_check_does_not_write_profile(tmp_path) -> None:
+    def fail(_: AlicatMfcConfiguration) -> AlicatDiagnosticResult:
+        raise TimeoutError("no response")
+
+    model = empty_model(tmp_path, checker=fail)
+
+    result = model.add_alicat_and_check(
+        AddAlicatRequest("mfc_a", "MFC A", "", "COM5", "A")
+    )
+
+    assert result.succeeded is False
+    assert not (tmp_path / "rig-profile.toml").exists()
 
 
 def test_duplicate_address_on_shared_bus_is_rejected_without_check() -> None:
@@ -643,7 +946,10 @@ def test_duplicate_address_on_shared_bus_is_rejected_without_check() -> None:
         calls += 1
         raise AssertionError("check should not run")
 
-    model = make_model(alicat_checker=check)
+    model = make_model(
+        alicat_checker=check,
+        alicat_probe=lambda port, address, baud=19200: detected_mfc(address),
+    )
 
     result = model.add_alicat_and_check(
         AddAlicatRequest("another_mfc", "MFC D", "", "CHANGE_ME", "A")
@@ -655,27 +961,16 @@ def test_duplicate_address_on_shared_bus_is_rejected_without_check() -> None:
 
 
 def test_second_saved_device_reuses_same_bb3_connection(tmp_path) -> None:
-    profile_path = tmp_path / "rig-profile.toml"
     empty_profile = replace(
         load_rig_profile("rig-profile.example.toml"),
         connections=(),
         device_roles=(),
     )
-
-    def check(configuration: AlicatMfcConfiguration) -> AlicatDiagnosticResult:
-        address = configuration.unit_address
-        return AlicatDiagnosticResult(
-            f"{address} 14.7 22.5 0 0 0 N2",
-            AlicatInstrumentState(
-                0, "sccm", 0, "sccm", 14.7, "psia", 22.5, "degC",
-                0, "sccm", "N2",
-            ),
-        )
-
     model = DeviceSetupViewModel(
         empty_profile,
-        profile_path=profile_path,
-        alicat_checker=check,
+        profile_path=tmp_path / "rig-profile.toml",
+        alicat_checker=alicat_checker_for("mfc"),
+        alicat_probe=lambda port, address, baud=19200: detected_mfc(address),
     )
     first = model.add_alicat_and_check(
         AddAlicatRequest("mfc_a", "MFC A", "N2", "COM5", "A")
@@ -685,12 +980,54 @@ def test_second_saved_device_reuses_same_bb3_connection(tmp_path) -> None:
     )
 
     assert first.succeeded and second.succeeded
-    saved = load_rig_profile(profile_path)
+    saved = load_rig_profile(tmp_path / "rig-profile.toml")
     assert len(saved.connections) == 1
     assert saved.get_role("mfc_a").connection_id == saved.get_role(
         "mfc_b"
     ).connection_id
-    assert profile_path.with_suffix(".toml.bak").exists()
+    assert (tmp_path / "rig-profile.toml").with_suffix(".toml.bak").exists()
+
+
+def test_acknowledgement_can_be_recorded_for_a_bpr_saved_earlier(tmp_path) -> None:
+    model = empty_model(tmp_path, role="bpr")
+    model.add_alicat_and_check(
+        AddAlicatRequest(
+            "outlet_bpr", "Outlet BPR", "", "COM5", "B",
+            downstream_valve_acknowledged=True,
+        )
+    )
+    # Simulate a device saved before the acknowledgement was stored with it.
+    role = model.profile.get_role("outlet_bpr")
+    legacy = replace(
+        model.profile,
+        device_roles=(
+            replace(role, settings=dict(role.settings, downstream_valve_confirmed=False)),
+        ),
+    )
+    model = DeviceSetupViewModel(
+        legacy,
+        profile_path=tmp_path / "rig-profile.toml",
+        alicat_checker=alicat_checker_for("bpr"),
+    )
+
+    blocked = model.check_device("outlet_bpr")
+    assert blocked.succeeded is False
+    assert "not been acknowledged" in blocked.technical_details
+
+    def inspect(configuration):
+        return alicat_configuration_reply("bpr")
+
+    import rig_control.ui.device_setup.model as model_module
+
+    original = model_module.read_alicat_configuration
+    model_module.read_alicat_configuration = inspect
+    try:
+        acknowledged = model.acknowledge_bpr_installation("outlet_bpr")
+    finally:
+        model_module.read_alicat_configuration = original
+
+    assert acknowledged.succeeded is True
+    assert model.check_device("outlet_bpr").succeeded is True
 
 
 def test_identified_keithley_is_saved_to_local_profile(tmp_path) -> None:
@@ -773,12 +1110,17 @@ def test_failed_keithley_identity_does_not_write_profile(tmp_path) -> None:
     assert not profile_path.exists()
 
 
-def test_read_only_alicat_meter_is_saved_without_setpoint_field(tmp_path) -> None:
-    profile_path = tmp_path / "rig-profile.toml"
-    empty_profile = replace(
-        load_rig_profile("rig-profile.example.toml"),
-        connections=(),
-        device_roles=(),
+def test_detected_meter_is_saved_without_a_setpoint_field(tmp_path) -> None:
+    detected = detected_mfc(
+        "B",
+        detected_role=None,
+        is_controller=False,
+        setpoint_unit=None,
+        minimum_setpoint=None,
+        maximum_setpoint=None,
+        frame_columns=METER_FRAME_COLUMNS,
+        inferred_maximum_flow_sccm=500.0,
+        model="M-500SCCM-D",
     )
 
     def check(configuration: AlicatMfcConfiguration) -> AlicatDiagnosticResult:
@@ -787,16 +1129,12 @@ def test_read_only_alicat_meter_is_saved_without_setpoint_field(tmp_path) -> Non
         return AlicatDiagnosticResult(
             "B 14.7 22.5 1.8 1.9 Air",
             AlicatInstrumentState(
-                1.9, "SLPM", 1.8, "LPM", 14.7, "psia", 22.5, "degC",
+                1.9, "SLPM", 1.8, "LPM", 14.7, "PSIA", 22.5, "degC",
                 0.0, "SLPM", "Air",
             ),
         )
 
-    model = DeviceSetupViewModel(
-        empty_profile,
-        profile_path=profile_path,
-        alicat_checker=check,
-    )
+    model = empty_model(tmp_path, probe=detected, checker=check)
     result = model.add_alicat_and_check(
         AddAlicatRequest(
             "flow_meter_b",
@@ -804,17 +1142,16 @@ def test_read_only_alicat_meter_is_saved_without_setpoint_field(tmp_path) -> Non
             "Outlet measurement",
             "COM5",
             "B",
-            maximum_flow=2.0,
-            device_kind="meter",
-            flow_unit="SLPM",
         )
     )
 
     assert result.succeeded is True
-    saved = load_rig_profile(profile_path)
+    saved = load_rig_profile(tmp_path / "rig-profile.toml")
     role = saved.get_role("flow_meter_b")
     assert role.capability is DeviceCapability.MASS_FLOW_METER
-    assert role.settings["maximum_flow"] == 2.0
+    # The model states 500 SCCM; this instrument reports SLPM, so the saved
+    # limit is converted rather than being a thousand times too large.
+    assert role.settings["maximum_flow"] == 0.5
     assert role.settings["flow_unit"] == "SLPM"
     assert "setpoint" not in role.settings["frame_fields"]
 
@@ -1226,3 +1563,24 @@ def test_duplicate_pump_port_is_rejected_without_check(tmp_path) -> None:
     assert result.succeeded is False
     assert "already used" in result.technical_details
     assert calls == 1
+
+
+def test_setpoint_unit_disagreeing_with_the_frame_blocks_the_add(tmp_path) -> None:
+    def check(configuration: AlicatMfcConfiguration) -> AlicatDiagnosticResult:
+        return AlicatDiagnosticResult(
+            "A raw frame",
+            alicat_state(),
+            alicat_configuration_reply("mfc"),
+            "",
+            (0.0, "SCCM"),
+        )
+
+    model = empty_model(tmp_path, checker=check)
+
+    result = model.add_alicat_and_check(
+        AddAlicatRequest("mfc_a", "MFC A", "", "COM5", "A")
+    )
+
+    assert result.succeeded is False
+    assert "reports setpoints in 'SCCM'" in result.technical_details
+    assert not (tmp_path / "rig-profile.toml").exists()

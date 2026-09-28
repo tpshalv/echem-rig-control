@@ -16,6 +16,10 @@ class _SerialPort(Protocol):
 
     def readline(self) -> bytes: ...
 
+    # Optional. pyserial provides it; simple test doubles need not, and fall
+    # back to readline().
+    # def read_until(self, expected: bytes) -> bytes: ...
+
 
 type SerialPortFactory = Callable[..., _SerialPort]
 
@@ -107,7 +111,14 @@ class PySerialTextTransport(SerialTextTransport):
                 f"wrote {written} of {len(encoded)} bytes"
             )
         self._serial.flush()
-        response = self._serial.readline()
+        response = self._read_reply()
+        # Some instruments pad a reply with an extra terminator (the Guardian
+        # G52 sends 'SERIAL A ...\r\n\r\n'). Left queued, that blank line would
+        # be taken as the next request's reply, so skip blank lines here.
+        for _ in range(8):
+            if not response or response.strip(b"\r\n"):
+                break
+            response = self._read_reply()
         if not response:
             raise TimeoutError(
                 f"No response from serial port {self._port!r} "
@@ -120,7 +131,7 @@ class PySerialTextTransport(SerialTextTransport):
             # queued for a subsequent addressed request.
             lines = [response]
             for _ in range(63):
-                following = self._serial.readline()
+                following = self._read_reply()
                 if not following:
                     response = b"\n".join(line.rstrip(b"\r\n") for line in lines)
                     break
@@ -146,6 +157,22 @@ class PySerialTextTransport(SerialTextTransport):
                 f"request {message!r}"
             )
         return decoded
+
+    def _read_reply(self) -> bytes:
+        """Read one reply, ending at this device's own line terminator.
+
+        readline() ends at a line feed, but several instruments here end a
+        reply with a carriage return alone. Waiting for a line feed that never
+        arrives made every single request cost the full read timeout, which is
+        why polling and device setup were slow rather than failing outright.
+        The terminator this transport was configured with is the one the
+        device sends, so reading up to it returns as soon as the reply lands.
+        """
+
+        reader = getattr(self._serial, "read_until", None)
+        if callable(reader):
+            return reader(self._line_ending.encode("ascii"))
+        return self._serial.readline()
 
     @staticmethod
     def _load_pyserial_factory() -> SerialPortFactory:

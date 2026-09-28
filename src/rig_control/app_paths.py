@@ -37,6 +37,16 @@ def experiments_directory() -> Path:
     return home_directory() / "experiments"
 
 
+def device_dumps_directory() -> Path:
+    """Read-only settings dumps taken from instruments, kept per machine.
+
+    These record what a device was set to on a date. They are deliberately
+    separate from application logs, and are not part of the source checkout.
+    """
+
+    return home_directory() / "device-dumps"
+
+
 def calibrations_directory() -> Path:
     return home_directory() / "calibrations"
 

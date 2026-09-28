@@ -1,8 +1,9 @@
 import json
-import os
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
+
+from rig_control.atomic_replace import replace_atomically
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,7 +46,7 @@ def write_app_selection(selection: AppSelection, path: str | Path) -> None:
     )
     try:
         temporary.write_text(text, encoding="utf-8", newline="\n")
-        os.replace(temporary, destination)
+        replace_atomically(temporary, destination)
     finally:
         if temporary.exists():
             temporary.unlink()

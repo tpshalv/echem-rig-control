@@ -5,6 +5,11 @@ from time import perf_counter
 from traceback import format_exc
 
 from rig_control.devices.measurement_source import MeasurementSource
+from rig_control.diagnostics.device_dump import (
+    dump_device,
+    dump_unavailable_reason,
+    write_dump,
+)
 from rig_control.devices.manager import DeviceManager
 from rig_control.models import DeviceStatus
 from rig_control.runtime_diagnostics import RuntimeDiagnostics, RuntimeHealthPoint
@@ -64,6 +69,61 @@ class DiagnosticViewModel:
                 status=summary.status.value,
             )
             for summary in self._device_manager.summaries()
+        )
+
+    def dump_unavailable_reason(self, device_id: str) -> str:
+        """Return why this device's settings cannot be dumped, or "".
+
+        The screen uses this to disable the option and say what is missing,
+        rather than offering something that would fail.
+        """
+
+        try:
+            device = self._device_manager.get(device_id)
+        except Exception:
+            return "Select a device."
+        return dump_unavailable_reason(device)
+
+    def dump_device_settings(self, device_id: str) -> DiagnosticActionResult:
+        """Save a read-only record of one device's settings."""
+
+        try:
+            device = self._device_manager.get(device_id)
+            device_type = next(
+                (
+                    summary.device_type
+                    for summary in self._device_manager.summaries()
+                    if summary.device_id == device_id
+                ),
+                "",
+            )
+            # Take the bus the same way every other diagnostic action does,
+            # so a dump never interleaves with a polling read.
+            with self._device_manager.operation(device_id):
+                dump = dump_device(device, device_type)
+            path = write_dump(dump)
+        except Exception as error:
+            return self._failure_result(
+                operation="dump settings for",
+                device_id=device_id,
+                error=error,
+            )
+
+        answered = len(dump.queries) - len(dump.failures)
+        summary = [
+            f"Saved a settings dump for {device_id!r}: {answered} of "
+            f"{len(dump.queries)} queries answered.",
+            f"File: {path}",
+        ]
+        if dump.failures:
+            summary.append(
+                "Unanswered: "
+                + ", ".join(query.command for query in dump.failures)
+            )
+        return DiagnosticActionResult(
+            succeeded=True,
+            summary="\n".join(summary),
+            technical_details=dump.to_text(),
         )
 
     def connect_device(

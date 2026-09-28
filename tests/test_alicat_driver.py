@@ -1,4 +1,7 @@
-from rig_control.devices.alicat.verification import AlicatControlConfiguration, frame_signature
+from rig_control.devices.alicat.verification import (
+    AlicatControlConfiguration,
+    AlicatControlMode,
+)
 from dataclasses import replace
 from datetime import UTC, datetime
 
@@ -26,10 +29,20 @@ class FakeAlicatProtocol(AlicatProtocolClient):
         self.set_requests: list[tuple[str, float]] = []
         self.read_error: Exception | None = None
         self.set_error: Exception | None = None
+        self.configuration_reads: list[str] = []
+        self.mode_reads: list[str] = []
+        self.loop_variable = 37
+        self.inverse = False
 
     def read_control_configuration(self, unit_address):
-        return AlicatControlConfiguration("123", "MC-200SCCM-D", "10v05", 37, "sccm", False,
+        self.configuration_reads.append(unit_address)
+        return AlicatControlConfiguration("123", "MC-200SCCM-D", "10v05",
+                                          self.loop_variable, "sccm", self.inverse,
                                           0, 200, "test frame", datetime.now(UTC))
+
+    def read_control_mode(self, unit_address):
+        self.mode_reads.append(unit_address)
+        return AlicatControlMode(self.loop_variable, "sccm", self.inverse, 0, 200)
 
     def read_setpoint(self, unit_address):
         return self.set_requests[-1][1], "sccm"
@@ -76,7 +89,6 @@ def make_driver(
         AlicatMfcConfiguration(
             device_id="mfc_a",
             expected_serial="123",
-            verified_frame_signature=frame_signature("test frame"),
             friendly_name="MFC A",
             unit_address="A",
             connection=AlicatSerialConfiguration(
@@ -303,3 +315,86 @@ def test_safe_state_commands_zero_and_verifies_it() -> None:
 
     assert protocol.set_requests == [("A", 0.0)]
     assert driver.flow_setpoint == 0.0
+
+
+def test_setup_metadata_is_read_once_and_polling_uses_the_small_check() -> None:
+    protocol = FakeAlicatProtocol([state(), state(), state()])
+    driver = make_driver(protocol)
+
+    driver.connect()
+
+    # Identity, firmware and data frame belong to setup, not to every reading.
+    assert protocol.configuration_reads == ["A"]
+    assert protocol.mode_reads == []
+
+    driver.read_measurements()
+    driver.measure_flow()
+
+    assert protocol.configuration_reads == ["A"]
+    assert protocol.mode_reads == ["A", "A"]
+    assert driver.control_ready is True
+
+
+def test_live_mode_change_blocks_control_without_a_full_re_read() -> None:
+    protocol = FakeAlicatProtocol([state(), state()])
+    driver = make_driver(protocol)
+    driver.connect()
+
+    protocol.loop_variable = 34
+    protocol.inverse = True
+
+    with pytest.raises(RuntimeError, match="Saved role does not match"):
+        driver.read_measurements()
+
+    assert driver.control_ready is False
+    assert "absolute pressure" in driver.verification_message
+    assert protocol.set_requests == []
+
+
+def test_reconnecting_reads_the_full_configuration_again() -> None:
+    protocol = FakeAlicatProtocol([state(), state()])
+    driver = make_driver(protocol)
+    driver.connect()
+    driver.disconnect()
+    driver.connect()
+
+    assert protocol.configuration_reads == ["A", "A"]
+
+
+def test_control_stays_settable_while_its_mode_is_being_rechecked() -> None:
+    """The screen reads control_ready from another thread to decide whether a
+    setpoint may be entered. It must not flicker to read-only mid-check."""
+
+    observed: list[bool] = []
+
+    class WatchingProtocol(FakeAlicatProtocol):
+        def read_control_mode(self, unit_address):
+            # Sampled at the moment the screen would read it, part-way
+            # through a re-check.
+            observed.append(self.driver.control_ready)
+            return super().read_control_mode(unit_address)
+
+    protocol = WatchingProtocol([state(), state(), state()])
+    driver = make_driver(protocol)
+    protocol.driver = driver
+    driver.connect()
+
+    driver.read_measurements()
+    driver.read_measurements()
+
+    assert observed == [True, True]
+    assert driver.control_ready is True
+
+
+def test_a_failed_recheck_does_clear_control_ready() -> None:
+    protocol = FakeAlicatProtocol([state(), state()])
+    driver = make_driver(protocol)
+    driver.connect()
+    assert driver.control_ready is True
+
+    protocol.loop_variable = 34
+    protocol.inverse = True
+    with pytest.raises(RuntimeError):
+        driver.read_measurements()
+
+    assert driver.control_ready is False

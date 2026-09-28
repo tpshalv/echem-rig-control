@@ -22,7 +22,11 @@ from rig_control.devices.ohaus_guardian_5000.configuration import (
     configuration_from_profile as guardian_configuration_from_profile,
 )
 from rig_control.diagnostics.ohaus_guardian import read_guardian_state
-from rig_control.diagnostics.alicat import read_alicat_state, scan_alicat_bus
+from rig_control.diagnostics.alicat import (
+    probe_alicat_address,
+    read_alicat_state,
+    scan_alicat_bus,
+)
 from rig_control.diagnostics.esp32 import (
     Esp32DiscoveryResult,
     discover_esp32,
@@ -39,6 +43,7 @@ from rig_control.ui.device_setup.types import (
     AddEsp32Request,
     SerialPortProvider,
     AlicatChecker,
+    AlicatProbe,
     AlicatScanner,
     KeithleyChecker,
     GuardianChecker,
@@ -60,6 +65,7 @@ class DeviceDiscovery:
         serial_port_provider: SerialPortProvider | None = None,
         alicat_checker: AlicatChecker = read_alicat_state,
         alicat_scanner: AlicatScanner = scan_alicat_bus,
+        alicat_probe: AlicatProbe = probe_alicat_address,
         keithley_checker: KeithleyChecker = identify_scpi_power_supply,
         guardian_checker: GuardianChecker = read_guardian_state,
         temperature_probe_checker: Callable = read_probe,
@@ -73,6 +79,7 @@ class DeviceDiscovery:
         self._serial_port_provider = serial_port_provider or _list_windows_serial_ports
         self.identify_alicat = alicat_checker
         self._alicat_scanner = alicat_scanner
+        self._alicat_probe = alicat_probe
         self.identify_keithley = keithley_checker
         self.identify_guardian = guardian_checker
         self.identify_temperature_probe = temperature_probe_checker
@@ -160,17 +167,28 @@ class DeviceDiscovery:
                 configured_device_id=configured.get(device.address, (None, None))[0],
                 configured_kind=configured.get(device.address, (None, None))[1],
                 model=device.model,
-                inferred_kind=device.inferred_kind,
+                serial_number=device.serial_number,
+                detected_role=device.detected_role,
+                is_controller=device.is_controller,
+                setpoint_unit=device.setpoint_unit,
+                maximum_setpoint=device.maximum_setpoint,
                 inferred_maximum_flow_sccm=(
                     device.inferred_maximum_flow_sccm
                 ),
-                manufacturer_response=device.manufacturer_response,
-                data_format_response=device.data_format_response,
-                firmware_response=device.firmware_response,
                 control_description=device.control_description,
+                configuration_error=device.configuration_error,
             )
             for device in self._alicat_scanner(selected_port, baud_rate)
         )
+
+    def probe_alicat(self, port: str, address: str, baud_rate: int = 19200):
+        """Read one address's configuration so its role can be detected."""
+
+        if not isinstance(port, str) or not port.strip():
+            raise ValueError("Select or enter an Alicat COM port")
+        if not isinstance(baud_rate, int) or isinstance(baud_rate, bool) or baud_rate <= 0:
+            raise ValueError("Alicat baud rate must be a positive integer")
+        return self._alicat_probe(port.strip(), address, baud_rate)
 
     def check_device(self, device_id: str) -> ReadinessCheckResult:
         try:
@@ -263,19 +281,26 @@ class DeviceDiscovery:
         )
         diagnostic = self.identify_alicat(configuration)
         state = diagnostic.state
+        detected = ""
         if configuration.is_controller:
+            # The live configuration is re-read on every check, so a device
+            # whose instrument settings have changed is reported, not reused.
             observed = diagnostic.control_configuration
             if observed is None:
-                raise ValueError("Alicat control remains unverified: " + diagnostic.verification_error)
-            verify_role(observed, bpr=configuration.is_bpr, expected_serial=configuration.expected_serial,
-                        expected_frame_signature=configuration.verified_frame_signature,
-                        flow_unit=configuration.limits.flow_unit, downstream_confirmed=configuration.downstream_valve_confirmed)
+                raise ValueError(
+                    "The instrument's control configuration could not be read: "
+                    + (diagnostic.verification_error or "no detail was reported")
+                )
+            verify_role(observed, bpr=configuration.is_bpr,
+                        flow_unit=configuration.limits.flow_unit,
+                        downstream_confirmed=configuration.downstream_valve_confirmed)
+            detected = f" Detected {observed.description}."
         return ReadinessCheckResult(
             True,
             f"Alicat {device_id!r} responded at address "
             f"{configuration.unit_address!r}: mass flow "
             f"{state.mass_flow:g} {state.mass_flow_unit}, gas "
-            f"{state.gas or 'not reported'}.",
+            f"{state.gas or 'not reported'}." + detected,
             f"Raw response: {diagnostic.raw_response}",
         )
 

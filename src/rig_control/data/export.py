@@ -5,6 +5,8 @@ from math import floor
 from pathlib import Path
 from typing import Any
 
+from rig_control.atomic_replace import replace_atomically
+
 
 LAST_VALUE_CHANNELS = {
     "active_setpoint",
@@ -258,7 +260,7 @@ def _write_xlsx(
     temporary = path.with_name(f"{path.stem}.tmp{path.suffix}")
     try:
         workbook.save(temporary)
-        temporary.replace(path)
+        replace_atomically(temporary, path)
     finally:
         workbook.close()
         temporary.unlink(missing_ok=True)

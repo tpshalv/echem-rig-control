@@ -1,10 +1,10 @@
 import json
-import os
 import shutil
 import tomllib
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from rig_control.atomic_replace import replace_atomically
 from rig_control.rig_profile import RigProfile
 
 
@@ -176,7 +176,7 @@ def write_experiment_profile(
             encoding="utf-8",
             newline="\n",
         )
-        os.replace(temporary, destination)
+        replace_atomically(temporary, destination)
     finally:
         if temporary.exists():
             temporary.unlink()

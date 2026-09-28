@@ -13,6 +13,7 @@ class ProfileDialogs(SetupDialog):
     def _switch_profile(self) -> None:
         selected = filedialog.askopenfilename(
             parent=self._root,
+            initialdir=str(profiles_directory()),
             filetypes=(("TOML rig profiles", "*.toml"),),
         )
         if not selected:
@@ -30,14 +31,12 @@ class ProfileDialogs(SetupDialog):
         frame.grid(row=0, column=0, sticky="nsew")
         frame.columnconfigure(1, weight=1)
         friendly_name = tk.StringVar()
-        profile_id = tk.StringVar()
         destination = tk.StringVar()
         destination.set(str(profiles_directory() / "rig-profile.toml"))
         for row, (label, variable) in enumerate(
             (
                 ("Display name", friendly_name),
-                ("Internal ID", profile_id),
-                ("Profile filename", destination),
+                ("Rig file", destination),
             )
         ):
             ttk.Label(frame, text=f"{label}:").grid(row=row, column=0, sticky="w")
@@ -45,21 +44,11 @@ class ProfileDialogs(SetupDialog):
             entry.grid(
                 row=row, column=1, sticky="ew", padx=(8, 4), pady=3
             )
-            if variable is destination:
-                entry.bind(
-                    "<FocusOut>",
-                    lambda _event: update_id_from_filename(),
-                )
 
         ttk.Label(
             frame,
             text="Shown in the app; spaces and capitals are allowed.",
         ).grid(row=0, column=2, sticky="w")
-        ttk.Label(
-            frame,
-            text="Stable software label, for example main_echem_rig.",
-        ).grid(row=1, column=2, sticky="w")
-
         def id_from_filename(filename: str) -> str:
             stem = Path(filename).stem.casefold()
             for prefix in ("rig-profile.", "rig_profile_", "rig-profile-"):
@@ -71,31 +60,23 @@ class ProfileDialogs(SetupDialog):
                 value = "rig_" + value
             return value
 
-        def update_id_from_filename() -> None:
-            derived = id_from_filename(destination.get())
-            if derived:
-                profile_id.set(derived)
-
         def browse() -> None:
-            suggested_id = profile_id.get().strip() or id_from_filename(
-                friendly_name.get()
-            )
+            current = destination.get().strip()
+            current_path = Path(current) if current else profiles_directory() / "rig-profile.toml"
+            if current_path.parent == Path("."):
+                current_path = profiles_directory() / current_path.name
             selected = filedialog.asksaveasfilename(
                 parent=dialog,
                 defaultextension=".toml",
-                initialfile=(
-                    f"rig-profile.{suggested_id}.toml"
-                    if suggested_id
-                    else "rig-profile.toml"
-                ),
+                initialdir=str(current_path.parent),
+                initialfile=current_path.name,
                 filetypes=(("TOML rig profiles", "*.toml"),),
             )
             if selected:
                 destination.set(selected)
-                update_id_from_filename()
 
-        ttk.Button(frame, text="Browse…", command=browse).grid(
-            row=2, column=2, pady=3
+        ttk.Button(frame, text="Browse...", command=browse).grid(
+            row=1, column=2, pady=3
         )
         ttk.Label(
             frame,
@@ -104,11 +85,12 @@ class ProfileDialogs(SetupDialog):
                 "Devices can be added after creation."
             ),
             wraplength=480,
-        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(8, 4))
+        ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(8, 4))
 
         def create() -> None:
+            profile_id = id_from_filename(destination.get())
             result = self._view_model.create_new_profile(
-                profile_id.get(),
+                profile_id,
                 friendly_name.get(),
                 destination.get(),
             )
@@ -124,7 +106,7 @@ class ProfileDialogs(SetupDialog):
                 )
 
         buttons = ttk.Frame(frame)
-        buttons.grid(row=4, column=0, columnspan=3, sticky="e", pady=(10, 0))
+        buttons.grid(row=3, column=0, columnspan=3, sticky="e", pady=(10, 0))
         ttk.Button(buttons, text="Cancel", command=dialog.destroy).grid(
             row=0, column=0, padx=(0, 8)
         )
@@ -134,6 +116,7 @@ class ProfileDialogs(SetupDialog):
         selected = filedialog.asksaveasfilename(
             parent=self._root,
             defaultextension=".toml",
+            initialdir=str(self._view_model.profile_path.parent if self._view_model.profile_path else profiles_directory()),
             filetypes=(("TOML rig profiles", "*.toml"),),
         )
         if not selected:
@@ -165,7 +148,6 @@ class ProfileDialogs(SetupDialog):
             "Display name": tk.StringVar(
                 value=self._view_model.profile.friendly_name
             ),
-            "Internal ID": tk.StringVar(value=self._view_model.profile.profile_id),
         }
         for row, (label, variable) in enumerate(values.items()):
             ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w")
@@ -176,14 +158,9 @@ class ProfileDialogs(SetupDialog):
             frame,
             text="Shown in the app; spaces and capitals are allowed.",
         ).grid(row=0, column=2, sticky="w", padx=(8, 0))
-        ttk.Label(
-            frame,
-            text="Stable software label, for example main_echem_rig.",
-        ).grid(row=1, column=2, sticky="w", padx=(8, 0))
-
         def save() -> None:
             result = self._view_model.update_profile_identity(
-                values["Internal ID"].get(),
+                self._view_model.profile.profile_id,
                 values["Display name"].get(),
             )
             self._record_result(result)
@@ -192,5 +169,5 @@ class ProfileDialogs(SetupDialog):
                 self.refresh()
 
         ttk.Button(frame, text="Save", command=save).grid(
-            row=2, column=1, sticky="e", pady=(10, 0)
+            row=1, column=1, sticky="e", pady=(10, 0)
         )

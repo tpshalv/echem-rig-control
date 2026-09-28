@@ -99,38 +99,72 @@ class ReadinessCheckResult:
     succeeded: bool
     summary: str
     technical_details: str = ""
+    #: Non-empty when the operator must acknowledge something before the
+    #: action can be completed. The caller shows this text and retries.
+    requires_acknowledgement: str = ""
+
+
+#: Shown once while a detected back-pressure controller is being added, and
+#: saved with the device so ordinary reconnects do not ask again.
+BPR_INSTALLATION_WARNING = (
+    "This Alicat reports back-pressure control configuration. The software "
+    "cannot detect whether its physical valve position and plumbing are "
+    "correct. Check that the valve is downstream of the sensing section and "
+    "the instrument is installed for back-pressure regulation before continuing."
+)
 
 
 @dataclass(frozen=True, slots=True)
 class AlicatScanRow:
+    """One scanned address, carrying its structured detected role."""
+
     address: str
     raw_response: str
     configured_device_id: str | None = None
     configured_kind: str | None = None
     model: str | None = None
-    inferred_kind: str | None = None
+    serial_number: str | None = None
+    detected_role: str | None = None
+    is_controller: bool | None = None
+    setpoint_unit: str | None = None
+    maximum_setpoint: float | None = None
     inferred_maximum_flow_sccm: float | None = None
-    manufacturer_response: str = ""
-    data_format_response: str = ""
-    firmware_response: str = ""
-    control_description: str = "Unverified control mode"
+    control_description: str = "Control mode could not be read"
+    configuration_error: str = ""
 
     @property
     def configuration_status(self) -> str:
         return "Already added" if self.configured_device_id else "New device"
 
+    @property
+    def usable(self) -> bool:
+        return self.detected_role is not None or self.is_controller is False
+
+    @property
+    def detected_type(self) -> str:
+        if self.detected_role == "bpr":
+            return "BPR"
+        if self.detected_role == "mfc":
+            return "MFC"
+        if self.is_controller is False:
+            return "MFM"
+        return "unknown"
+
 
 @dataclass(frozen=True, slots=True)
 class AddAlicatRequest:
+    """Naming and settings for a new Alicat; its role is always detected."""
+
     device_id: str
     hardware_label: str
     purpose_label: str
     port: str
     unit_address: str
-    maximum_flow: float = 2000.0
-    device_kind: str = "controller"
-    flow_unit: str = "SCCM"
+    #: None keeps the range read from the instrument, or its model range.
+    maximum_flow: float | None = None
     poll_interval_seconds: float = 1.0
+    #: Set only after the operator acknowledges the BPR installation warning.
+    downstream_valve_acknowledged: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,6 +246,7 @@ type AlicatChecker = Callable[
     AlicatDiagnosticResult,
 ]
 type AlicatScanner = Callable[[str, int], tuple[DiscoveredAlicat, ...]]
+type AlicatProbe = Callable[[str, str, int], DiscoveredAlicat]
 type KeithleyChecker = Callable[
     [Keithley2260BConfiguration | Keithley2280SConfiguration | AmetekAsterionConfiguration],
     KeithleyIdentity | AmetekAsterionIdentity,

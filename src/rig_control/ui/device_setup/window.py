@@ -131,8 +131,8 @@ class DeviceSetupWindow:
             command=self._check_selected,
         )
         self._check_button.grid(row=0, column=2, padx=(0, 8))
-        ttk.Button(device_buttons, text="Verify Alicat role",
-                   command=self._alicat_dialogs._open_verify_alicat).grid(row=1, column=0, columnspan=2, sticky="w", pady=4)
+        ttk.Button(device_buttons, text="Acknowledge BPR installation",
+                   command=self._alicat_dialogs._acknowledge_bpr_installation).grid(row=1, column=0, columnspan=2, sticky="w", pady=4)
         ttk.Button(
             device_buttons,
             text="Edit measurement interval",

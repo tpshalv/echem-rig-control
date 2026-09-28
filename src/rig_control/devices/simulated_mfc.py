@@ -3,6 +3,7 @@ from math import isfinite
 from rig_control.devices.mass_flow_controller import (
     MassFlowController,
     MassFlowControllerLimits,
+    convert_mass_flow,
 )
 from rig_control.models import DeviceStatus, Measurement
 
@@ -47,10 +48,9 @@ class SimulatedMassFlowController(MassFlowController):
         self.enter_safe_state()
         self._status = DeviceStatus.DISCONNECTED
 
-    def set_flow_setpoint(self, flow: float) -> None:
+    def set_flow_setpoint(self, flow: float, unit: str = "") -> None:
         self._require_ready()
-        numeric_flow = self._validate_flow(flow)
-        self._flow_setpoint = numeric_flow
+        self._flow_setpoint = self._validate_flow(flow, unit)
 
     def measure_flow(self) -> Measurement:
         self._require_ready()
@@ -79,7 +79,7 @@ class SimulatedMassFlowController(MassFlowController):
                 "is not ready"
             )
 
-    def _validate_flow(self, flow: float) -> float:
+    def _validate_flow(self, flow: float, unit: str = "") -> float:
         if isinstance(flow, bool) or not isinstance(flow, (int, float)):
             raise TypeError("Flow must be an int or float")
 
@@ -87,6 +87,12 @@ class SimulatedMassFlowController(MassFlowController):
 
         if not isfinite(numeric_flow):
             raise ValueError("Flow must be finite")
+
+        if unit:
+            # Convert into this device's own unit before its limits apply.
+            numeric_flow = convert_mass_flow(
+                numeric_flow, unit, self.limits.flow_unit
+            )
 
         if numeric_flow < 0:
             raise ValueError("Flow cannot be negative")

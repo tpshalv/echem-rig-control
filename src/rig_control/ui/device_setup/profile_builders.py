@@ -16,6 +16,10 @@ from rig_control.rig_profile import (
 )
 
 
+from rig_control.devices.alicat.protocol_fields import AlicatFrameField
+from rig_control.devices.alicat.verification import default_frame_layout
+from rig_control.diagnostics.alicat import DiscoveredAlicat
+
 from rig_control.ui.device_setup.types import (
     SCPI_POWER_SUPPLY_DRIVERS,
     AddAlicatRequest,
@@ -35,9 +39,18 @@ class DeviceProfileBuilder:
     def with_new_alicat(
         self,
         request: AddAlicatRequest,
+        detected: DiscoveredAlicat,
     ) -> RigProfile:
+        """Build a candidate profile for one Alicat, using its detected role.
+
+        The capability, frame layout and engineering units all come from the
+        instrument itself. Nothing here asks the operator to choose a role.
+        """
+
         if not isinstance(request, AddAlicatRequest):
             raise TypeError("request must be an AddAlicatRequest")
+        if not isinstance(detected, DiscoveredAlicat):
+            raise TypeError("detected must be a DiscoveredAlicat")
         device_id, hardware_label = self._validate_new_device_identity(
             request.device_id,
             request.hardware_label,
@@ -48,19 +61,30 @@ class DeviceProfileBuilder:
         address = request.unit_address.strip().upper()
         if len(address) != 1 or not "A" <= address <= "Z":
             raise ValueError("Alicat address must be one letter A-Z")
-        if isinstance(request.maximum_flow, bool) or not isinstance(
-            request.maximum_flow,
-            (int, float),
-        ):
-            raise TypeError("Maximum flow must be numeric")
-        if request.maximum_flow <= 0:
-            raise ValueError("Maximum flow must be greater than zero")
-        device_kind = request.device_kind.strip().casefold()
-        if device_kind not in {"controller", "meter", "bpr"}:
-            raise ValueError("Alicat device kind must be controller, meter or bpr")
-        flow_unit = request.flow_unit.strip()
-        if not flow_unit:
-            raise ValueError("Alicat flow unit cannot be empty")
+        if address != detected.address.strip().upper():
+            raise ValueError(
+                f"The configuration was read from address {detected.address!r}, "
+                f"not {address!r}"
+            )
+        if not detected.usable:
+            raise ValueError(
+                detected.configuration_error
+                or "The instrument's control configuration could not be read"
+            )
+
+        is_controller = detected.is_controller is not False
+        is_bpr = detected.detected_role == "bpr"
+        if is_bpr and not request.downstream_valve_acknowledged:
+            raise ValueError(
+                "The back-pressure installation warning has not been acknowledged"
+            )
+
+        frame_fields = detected.frame_fields or default_frame_layout(
+            controller=is_controller
+        )
+        units = alicat_frame_units(detected, frame_fields)
+        flow_unit = units["flow_unit"]
+        maximum_flow = _alicat_maximum_flow(request, detected, flow_unit)
 
         connection = self._find_alicat_connection(port)
         connections = self._profile.connections
@@ -93,22 +117,23 @@ class DeviceProfileBuilder:
                 )
 
         settings = {
-            "maximum_flow": float(request.maximum_flow),
+            "maximum_flow": float(maximum_flow),
             "flow_unit": flow_unit,
-            "volumetric_flow_unit": (
-                "LPM" if flow_unit.casefold() == "slpm" else flow_unit
-            ),
-            "pressure_unit": "psia",
-            "temperature_unit": "degC",
-            "frame_fields": (
-                "absolute_pressure,gas_temperature,volumetric_flow,mass_flow,"
-                + ("setpoint," if device_kind != "meter" else "")
-                + "gas"
-            ),
+            "volumetric_flow_unit": units["volumetric_flow_unit"],
+            "pressure_unit": units["pressure_unit"],
+            "temperature_unit": units["temperature_unit"],
+            "frame_fields": ",".join(field.value for field in frame_fields),
             "hardware_label": hardware_label,
         }
-        if device_kind == "bpr":
-            settings.update(downstream_valve_confirmed=False, maximum_pressure_bara=2.5)
+        if units["totalized_flow_unit"] is not None:
+            settings["totalized_flow_unit"] = units["totalized_flow_unit"]
+        if is_bpr:
+            # The acknowledgement belongs to this installation, so ordinary
+            # reconnects never ask for it again.
+            settings.update(
+                downstream_valve_confirmed=True,
+                maximum_pressure_bara=DEFAULT_MAXIMUM_PRESSURE_BARA,
+            )
         purpose = request.purpose_label.strip()
         if purpose:
             settings["purpose_label"] = purpose
@@ -117,9 +142,9 @@ class DeviceProfileBuilder:
             device_id=device_id,
             friendly_name=hardware_label,
             capability=(
-                DeviceCapability.BACK_PRESSURE_CONTROLLER if device_kind == "bpr" else
+                DeviceCapability.BACK_PRESSURE_CONTROLLER if is_bpr else
                 DeviceCapability.MASS_FLOW_CONTROLLER
-                if device_kind == "controller"
+                if is_controller
                 else DeviceCapability.MASS_FLOW_METER
             ),
             driver="alicat",
@@ -128,6 +153,8 @@ class DeviceProfileBuilder:
             enabled=True,
             expected_identity=ExpectedDeviceIdentity(
                 manufacturer="Alicat",
+                model=detected.model,
+                serial_number=detected.serial_number,
             ),
             connection_id=connection.connection_id,
             connection_parameters={"address": address},
@@ -532,3 +559,85 @@ class DeviceProfileBuilder:
         if not hardware_label:
             raise ValueError("Hardware label cannot be empty")
         return device_id, hardware_label
+
+
+#: The rig's normal ceiling; a deliberate override lives in app settings.
+DEFAULT_MAXIMUM_PRESSURE_BARA = 2.5
+
+#: Unused by a pressure controller, which never accepts a flow setpoint.
+BPR_PLACEHOLDER_FLOW_LIMIT = 1.0
+
+#: Used only for a column the instrument did not print a unit for.
+_FALLBACK_UNITS = {
+    AlicatFrameField.MASS_FLOW: "SCCM",
+    AlicatFrameField.VOLUMETRIC_FLOW: "CCM",
+    AlicatFrameField.ABSOLUTE_PRESSURE: "psia",
+    AlicatFrameField.GAS_TEMPERATURE: "degC",
+}
+
+
+def alicat_frame_units(
+    detected: DiscoveredAlicat,
+    frame_fields: tuple[AlicatFrameField, ...],
+) -> dict[str, str | None]:
+    """Associate each frame column with the unit the instrument reports.
+
+    The data-frame table names a unit per column, so a reading keeps the unit
+    its instrument printed. For the controlled variable the LR setpoint unit
+    wins: it is what a setpoint is accepted and read back in.
+    """
+
+    def column(field: AlicatFrameField) -> str | None:
+        return detected.unit_for(field) or _FALLBACK_UNITS.get(field)
+
+    units: dict[str, str | None] = {
+        "flow_unit": column(AlicatFrameField.MASS_FLOW),
+        "volumetric_flow_unit": column(AlicatFrameField.VOLUMETRIC_FLOW),
+        "pressure_unit": column(AlicatFrameField.ABSOLUTE_PRESSURE),
+        "temperature_unit": column(AlicatFrameField.GAS_TEMPERATURE),
+        "totalized_flow_unit": None,
+    }
+    setpoint_unit = (detected.setpoint_unit or "").strip()
+    if setpoint_unit:
+        if detected.detected_role == "bpr":
+            units["pressure_unit"] = setpoint_unit
+        else:
+            units["flow_unit"] = setpoint_unit
+    if AlicatFrameField.TOTALIZED_FLOW in frame_fields:
+        units["totalized_flow_unit"] = (
+            detected.unit_for(AlicatFrameField.TOTALIZED_FLOW)
+            or units["volumetric_flow_unit"]
+        )
+    return units
+
+
+def _alicat_maximum_flow(
+    request: AddAlicatRequest,
+    detected: DiscoveredAlicat,
+    flow_unit: str,
+) -> float:
+    if request.maximum_flow is not None:
+        if isinstance(request.maximum_flow, bool) or not isinstance(
+            request.maximum_flow, (int, float)
+        ):
+            raise TypeError("Maximum flow must be numeric")
+        if request.maximum_flow <= 0:
+            raise ValueError("Maximum flow must be greater than zero")
+        return float(request.maximum_flow)
+    if detected.detected_role == "mfc" and detected.maximum_setpoint:
+        return float(detected.maximum_setpoint)
+    if detected.inferred_maximum_flow_sccm:
+        # The model name states a range in SCCM. Convert it into the unit this
+        # instrument actually reports, or a meter would be given a limit a
+        # thousand times too large.
+        scale = {"sccm": 1.0, "slpm": 0.001}.get(flow_unit.strip().casefold())
+        if scale is not None:
+            return float(detected.inferred_maximum_flow_sccm) * scale
+    if detected.detected_role == "bpr":
+        # A pressure controller is never sent a flow setpoint, so this limit
+        # is a placeholder; its pressure ceiling is what bounds its control.
+        return BPR_PLACEHOLDER_FLOW_LIMIT
+    raise ValueError(
+        f"The instrument did not report a flow range in {flow_unit}, so enter "
+        "its maximum flow"
+    )

@@ -16,6 +16,10 @@ from rig_control.control.commands import (
     SetPumpDirection,
     SetPumpRunning,
     SetPumpSpeed,
+    SetHotplateHeating,
+    SetHotplateSpeed,
+    SetHotplateStirring,
+    SetHotplateTemperature,
 )
 from rig_control.control.service import RigControlService
 from rig_control.devices.manager import DeviceManager
@@ -219,12 +223,14 @@ class ManualControlViewModel:
         self,
         device_id: str,
         flow: float,
+        unit: str = "",
     ) -> ManualActionResult:
         return self._execute(
             SetMfcFlow(
                 device_id=device_id,
                 flow=flow,
                 source=CommandSource.MANUAL,
+                unit=unit,
             )
         )
 
@@ -607,3 +613,15 @@ class ManualControlViewModel:
 
     def set_pump_running(self, device_id: str, running: bool) -> ManualActionResult:
         return self._execute(SetPumpRunning(device_id, running, CommandSource.MANUAL))
+
+    def set_hotplate_temperature(self, device_id: str, value: float) -> ManualActionResult:
+        return self._execute(SetHotplateTemperature(device_id, value, CommandSource.MANUAL))
+
+    def set_hotplate_speed(self, device_id: str, rpm: float) -> ManualActionResult:
+        return self._execute(SetHotplateSpeed(device_id, rpm, CommandSource.MANUAL))
+
+    def set_hotplate_heating(self, device_id: str, enabled: bool) -> ManualActionResult:
+        return self._execute(SetHotplateHeating(device_id, enabled, CommandSource.MANUAL))
+
+    def set_hotplate_stirring(self, device_id: str, enabled: bool) -> ManualActionResult:
+        return self._execute(SetHotplateStirring(device_id, enabled, CommandSource.MANUAL))

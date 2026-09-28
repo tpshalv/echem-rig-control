@@ -15,6 +15,7 @@ from uuid import uuid4
 import json
 import re
 
+from rig_control.atomic_replace import replace_atomically
 from rig_control.app_paths import calibrations_directory
 from rig_control.devices.manager import DeviceManager
 from rig_control.devices.pump import Pump
@@ -127,7 +128,7 @@ class PumpCalibrationService:
         temporary_path = path.with_name(f"{path.name}.tmp-{uuid4().hex}")
         try:
             temporary_path.write_text(text, encoding="utf-8")
-            temporary_path.replace(path)
+            replace_atomically(temporary_path, path)
         finally:
             temporary_path.unlink(missing_ok=True)
 

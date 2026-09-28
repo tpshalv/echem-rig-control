@@ -83,3 +83,40 @@ def test_device_setup_constructs_and_opens_extracted_add_dialogs(root):
         dialogs = [child for child in root.winfo_children() if isinstance(child, tk.Toplevel)]
         assert len(dialogs) == 1
         dialogs[0].destroy()
+
+
+def test_unit_settings_are_chosen_from_a_list_not_typed(root):
+    """A fixed set of valid values should not be a free-text field."""
+
+    from tkinter import ttk
+
+    from rig_control.app_settings import FLOW_UNITS, PRESSURE_UNITS
+
+    definitions = {row.key: row for row in SETTING_DEFINITIONS}
+    assert definitions["display_pressure_unit"].choices == PRESSURE_UNITS
+    assert definitions["display_flow_unit"].choices == FLOW_UNITS
+
+    window = SettingsWindow.__new__(SettingsWindow)
+    window._entries = {}
+    frame = ttk.Frame(root)
+    window._add_setting_row(frame, 0, definitions["display_flow_unit"])
+    window._add_setting_row(frame, 1, definitions["export_bin_seconds"])
+
+    assert isinstance(window._entries["display_flow_unit"], ttk.Combobox)
+    assert str(window._entries["display_flow_unit"].cget("state")) == "readonly"
+    assert list(window._entries["display_flow_unit"].cget("values")) == list(FLOW_UNITS)
+    # A free-form setting keeps its plain entry field.
+    assert not isinstance(window._entries["export_bin_seconds"], ttk.Combobox)
+
+
+def test_refreshing_fills_both_kinds_of_field(root):
+    from tkinter import ttk
+
+    box = ttk.Combobox(root, values=["native", "SCCM"], state="readonly")
+    entry = ttk.Entry(root)
+
+    SettingsWindow._show_value(box, "SCCM")
+    SettingsWindow._show_value(entry, "5.0")
+
+    assert box.get() == "SCCM"
+    assert entry.get() == "5.0"

@@ -25,18 +25,23 @@ MODEL_SPECS = MappingProxyType({
     "e-G52ST07C": ModelSpec(False, True, None, 50, 1800),
 })
 
+# MODEL replies that differ from the catalog number on the rating label.
+# Observed on a new unit labelled e-G52HSRDA (2026-09-28).
+FIRMWARE_MODEL_ALIASES = MappingProxyType({"E-G52HSRTM": "e-G52HSRDA"})
+
 
 def normalize_model(model: str) -> str:
     # Accept documented K1 kits and voltage/region descriptions, not arbitrary
     # prefixes (in particular, older G51 instruments are not G52 instruments).
     match = re.fullmatch(
-        r"(e-G52(?:HSRDA|HS10C|HS07C|HP07C|ST07C))(?:-K1)?"
+        r"(e-G52(?:HSRDA|HSRTM|HS10C|HS07C|HP07C|ST07C))(?:-K1)?"
         r"(?:\s+(?:120|230)V(?:\s+(?:EU|UK|US|AU))?)?",
         model.strip(), re.IGNORECASE,
     )
     if match is None:
         raise ValueError(f"Unsupported Guardian 5000 model: {model!r}")
-    return next(key for key in MODEL_SPECS if key.upper() == match[1].upper())
+    name = FIRMWARE_MODEL_ALIASES.get(match[1].upper(), match[1])
+    return next(key for key in MODEL_SPECS if key.upper() == name.upper())
 
 
 def finite_number(value: object, name: str) -> float:

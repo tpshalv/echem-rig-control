@@ -546,6 +546,62 @@ def test_pump_dashboard_rows_and_manual_commands() -> None:
     assert rows[("pump1", "running")].value is True
 
 
+def test_hotplate_dashboard_rows_and_manual_commands() -> None:
+    from rig_control.devices.ohaus_guardian_5000 import OhausGuardian5000
+    from rig_control.devices.ohaus_guardian_5000.configuration import GuardianLimits
+    from tests.test_ohaus_guardian_5000 import Instrument
+
+    manager = DeviceManager()
+    hotplate = OhausGuardian5000("hotplate", Instrument(),
+                                 GuardianLimits(maximum_temperature=300.0))
+    manager.register(hotplate)
+    writer = InMemoryExperimentWriter()
+    recorder = ExperimentRecorder(writer_factory=lambda _root: writer)
+    polling = PollingService(manager, interval_seconds=60, batch_handler=recorder.record_batch)
+    profile = RigProfile("rig", "Rig", (
+        DeviceRole("hotplate", "Guardian 5000", DeviceCapability.HOTPLATE_STIRRER,
+                   "ohaus_guardian_5000", DeviceBackend.REAL),
+    ))
+    model = OperationViewModel(
+        manager, polling, recorder, RigControlService(manager),
+        profile_id="rig", profile=profile,
+    )
+    assert model.channel_rows() == ()  # Nothing until connected.
+
+    results = model.connect_all()
+    assert results[0].succeeded is True
+    # A second press reports the device as already connected, not an error.
+    again = model.connect_all()
+    assert again[0].succeeded is True and "already connected" in again[0].summary
+
+    assert model.systems() == ("Thermal",)
+    rows = {row.channel: row for row in model.channel_rows()}
+    assert rows["temperature"].value is None and rows["temperature"].unit == "degC"
+    assert rows["stir_speed"].unit == "rpm"
+    assert rows["target_temperature"].writable is True
+    assert rows["target_temperature"].value == 100.0
+    assert rows["target_temperature"].maximum == 300.0  # Rig ceiling below 360 rating.
+    assert rows["target_speed"].minimum == 50.0 and rows["target_speed"].maximum == 1800
+    assert rows["heating_enabled"].editor == "boolean"
+    assert rows["heating_enabled"].value is False
+    assert rows["operating_mode_readback"].value == "idle"
+
+    assert model.apply_channel_value("hotplate", "target_temperature", 150.0).succeeded
+    assert model.apply_channel_value("hotplate", "target_speed", 400.0).succeeded
+    assert model.apply_channel_value("hotplate", "heating_enabled", True).succeeded
+    assert model.apply_channel_value("hotplate", "stirring_enabled", True).succeeded
+    rows = {row.channel: row for row in model.channel_rows()}
+    assert rows["target_temperature"].value == 150.0
+    assert rows["target_speed"].value == 400.0
+    assert rows["heating_enabled"].value is True
+    assert rows["stirring_enabled"].value is True
+
+    refused = model.apply_channel_value("hotplate", "target_temperature", 350.0)
+    assert refused.succeeded is False  # Above the rig ceiling.
+    assert model.apply_channel_value("hotplate", "heating_enabled", False).succeeded
+    assert hotplate.heating_enabled is False
+
+
 def test_channel_labels_swap_with_power_supply_operating_mode() -> None:
     manager = DeviceManager()
     manager.register(SimulatedPowerSupply("supply", PowerSupplyLimits(30, 108, 1080)))
@@ -640,3 +696,54 @@ def test_watchdog_rearm_uses_existing_manual_control_path() -> None:
 
     assert result.succeeded is True
     assert calls == ["esp32"]
+
+
+def test_flow_rows_and_entries_follow_the_chosen_display_unit():
+    """A flow typed in SCCM must reach a SLPM instrument as SLPM."""
+
+    from rig_control.devices.mass_flow_controller import MassFlowControllerLimits
+    from rig_control.devices.simulated_mfc import SimulatedMassFlowController
+    from rig_control.display_units import DisplayUnits
+
+    device = SimulatedMassFlowController("mfc_a", MassFlowControllerLimits(2.0, "SLPM"))
+    manager = DeviceManager()
+    manager.register(device)
+    device.connect()
+    model = OperationViewModel(
+        manager,
+        PollingService(manager),
+        ExperimentRecorder(),
+        RigControlService(manager),
+        profile_id="test",
+        display_units=DisplayUnits(flow="SCCM"),
+    )
+
+    row = {r.channel: r for r in model.channel_rows()}["setpoint"]
+    assert row.unit == "SCCM"
+    assert row.maximum == 2000.0  # 2 SLPM shown in SCCM
+
+    assert model.apply_channel_value("mfc_a", "setpoint", 200).succeeded
+
+    # The device holds its own unit; 200 SCCM is 0.2 SLPM.
+    assert device.flow_setpoint == pytest.approx(0.2)
+    assert {r.channel: r for r in model.channel_rows()}["setpoint"].value == pytest.approx(200.0)
+
+
+def test_native_display_units_leave_flow_exactly_as_the_device_has_it():
+    from rig_control.devices.mass_flow_controller import MassFlowControllerLimits
+    from rig_control.devices.simulated_mfc import SimulatedMassFlowController
+
+    device = SimulatedMassFlowController("mfc_a", MassFlowControllerLimits(2.0, "SLPM"))
+    manager = DeviceManager()
+    manager.register(device)
+    device.connect()
+    model = OperationViewModel(
+        manager, PollingService(manager), ExperimentRecorder(),
+        RigControlService(manager), profile_id="test",
+    )
+
+    assert model.apply_channel_value("mfc_a", "setpoint", 1.5).succeeded
+
+    assert device.flow_setpoint == 1.5
+    row = {r.channel: r for r in model.channel_rows()}["setpoint"]
+    assert (row.unit, row.value, row.maximum) == ("SLPM", 1.5, 2.0)

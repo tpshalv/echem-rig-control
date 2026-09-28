@@ -1,0 +1,20 @@
+# Alicat MC-2SLPM-D, serial 539145, firmware 10v22.0-R24, address C.
+# Captured 2026-09-28 from the bench bus on COM5 at 19200 baud.
+# Configuration: valve physically moved downstream of the sensing section,
+# control loop set to absolute pressure, inverse control enabled.
+# Expected detection: BPR, 0-160 PSIA.
+#
+# Register 20 read 9239 while this unit was in mass-flow mode. Changing the
+# loop variable to pressure left 8471, and enabling inverse control added
+# 32768 to give 41239. Only bit 32768 may be read: the rest of the register
+# moves when other settings change.
+
+C          -> 'C +014.72 +019.98 -0.0001 -0.0001 +000.00 +0000.000    CO2'   (status frame (polling reply for this address))
+CVE        -> 'C   10v22.0-R24 Apr 29 2025,10:58:06'   (firmware version)
+C??M*      -> 'C  M00 ALICAT SCIENTIFIC\rC  M01 www.alicat.com\rC  M02 Ph   520-290-6060\rC  M03 info@alicat.com\rC  M04 Model Number MC-2SLPM-D\rC  M05 Serial Number 539145\rC  M06 Date Manufactured 06/23/2025\rC  M07 Date Calibrated   06/23/2025\rC  M08 Calibrated By     TM\rC  M09 Software Revision 10v22.0-R24'   (manufacturer/identity table)
+C??D*      -> 'C D00 ID_ NAME______________________ TYPE_______ WIDTH NOTES___________________\rC D01 700 Unit ID                    string          1                         \rC D02 002 Abs Press                  s decimal     7/2 010 02 PSIA             \rC D03 003 Flow Temp                  s decimal     7/2 002 02 `C               \rC D04 004 Volu Flow                  s decimal     7/4 007 02 LPM              \rC D05 005 Mass Flow                  s decimal     7/4 007 02 SLPM             \rC D06 034 Abs Press Setpt            s decimal     7/2 010 02 PSIA             \rC D07 009 Mass Total 1               s decimal     9/3 004 02 SL               \rC D08 703 Gas                        string          6                         \rC D09 701 *Error                     string          3 ADC                     \rC D10 702 *Status                    string          3 HLD                     '   (data-frame description (column order and units))
+CLR        -> 'C 34 +000.00 +160.00 10 PSIA'   (loop control variable, units and range)
+CR20       -> 'C   020 = 41239'   (register 20 (bit 32768 = inverse control))
+CR122      -> 'C   122 = 34'   (register 122 (control point on some firmware))
+CLS        -> 'C +000.00 +000.00 10 PSIA'   (current setpoint and its units)
+CFPF 2     -> 'C +160.00 10 PSIA'   (absolute-pressure full scale)

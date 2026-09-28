@@ -5,9 +5,10 @@ from collections.abc import Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
-from time import monotonic, sleep
+from time import monotonic
 from typing import TextIO
 
+from rig_control.atomic_replace import replace_atomically
 from rig_control.data.experiment import ExperimentMetadata
 from rig_control.data.records import MeasurementRecord
 from rig_control.data.serialization import (
@@ -354,18 +355,7 @@ class DirectoryExperimentWriter(ExperimentWriter):
             file.flush()
             os.fsync(file.fileno())
 
-        for attempt in range(10):
-            try:
-                temporary_path.replace(path)
-                return
-            except PermissionError:
-                if attempt == 9:
-                    raise
-
-                # Windows antivirus or indexing may briefly hold the
-                # existing JSON file open. Retrying preserves the
-                # atomic replacement rather than deleting it first.
-                sleep(0.05)
+        replace_atomically(temporary_path, path)
 
     @staticmethod
     def _validate_export_bin_seconds(value: float) -> float:

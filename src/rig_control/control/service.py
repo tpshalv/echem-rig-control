@@ -22,8 +22,13 @@ from rig_control.control.commands import (
     SetPumpDirection,
     SetPumpRunning,
     SetPumpSpeed,
+    SetHotplateHeating,
+    SetHotplateSpeed,
+    SetHotplateStirring,
+    SetHotplateTemperature,
 )
 from rig_control.devices.esp32_controller import Esp32Controller
+from rig_control.devices.ohaus_guardian_5000.driver import OhausGuardian5000
 from rig_control.devices.lumel_re72 import LumelRe72
 from rig_control.devices.manager import DeviceManager
 from rig_control.devices.mass_flow_controller import (
@@ -320,11 +325,11 @@ class RigControlService:
                     "mass flow controller"
                 )
 
-            device.set_flow_setpoint(command.flow)
+            device.set_flow_setpoint(command.flow, command.unit)
 
             return (
                 f"Set MFC {command.device_id!r} flow to "
-                f"{command.flow} {device.limits.flow_unit}."
+                f"{command.flow} {command.unit or device.limits.flow_unit}."
             )
 
         if isinstance(command, SetPowerSupplyVoltage):
@@ -404,6 +409,37 @@ class RigControlService:
             state = "started" if command.running else "stopped"
             return f"Pump {command.device_id!r} {state}."
 
+        if isinstance(command, SetHotplateTemperature):
+            hotplate = self._require_hotplate(device, command.device_id)
+            hotplate.set_target_temperature(command.temperature)
+            return (
+                f"Set hotplate {command.device_id!r} target temperature to "
+                f"{command.temperature:g} degC."
+            )
+
+        if isinstance(command, SetHotplateSpeed):
+            hotplate = self._require_hotplate(device, command.device_id)
+            hotplate.set_target_speed(command.rpm)
+            return f"Set hotplate {command.device_id!r} stir speed to {command.rpm:g} rpm."
+
+        if isinstance(command, SetHotplateHeating):
+            hotplate = self._require_hotplate(device, command.device_id)
+            if command.enabled:
+                hotplate.start_heating()
+            else:
+                hotplate.stop_heating()
+            state = "started" if command.enabled else "stopped"
+            return f"Hotplate {command.device_id!r} heating {state}."
+
+        if isinstance(command, SetHotplateStirring):
+            hotplate = self._require_hotplate(device, command.device_id)
+            if command.enabled:
+                hotplate.start_stirring()
+            else:
+                hotplate.stop_stirring()
+            state = "started" if command.enabled else "stopped"
+            return f"Hotplate {command.device_id!r} stirring {state}."
+
         if isinstance(command, EnterDeviceSafeState):
             if not isinstance(device, SafeStateCapable):
                 raise TypeError(
@@ -448,6 +484,12 @@ class RigControlService:
         return device
 
     @staticmethod
+    def _require_hotplate(device: object, device_id: str) -> OhausGuardian5000:
+        if not isinstance(device, OhausGuardian5000):
+            raise TypeError(f"Device {device_id!r} is not a hotplate")
+        return device
+
+    @staticmethod
     def _validate_command_type(command: object) -> None:
         supported_types = (
             SetMfcFlow,
@@ -463,6 +505,10 @@ class RigControlService:
             SetPumpSpeed,
             SetPumpDirection,
             SetPumpRunning,
+            SetHotplateTemperature,
+            SetHotplateSpeed,
+            SetHotplateHeating,
+            SetHotplateStirring,
         )
 
         if not isinstance(command, supported_types):

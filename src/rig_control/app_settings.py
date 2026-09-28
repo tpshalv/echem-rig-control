@@ -5,6 +5,12 @@ from types import MappingProxyType
 
 from rig_control.app_paths import experiments_directory, logs_directory
 
+#: Repeated here rather than imported from rig_control.display_units, so that
+#: reading settings never pulls in the device drivers that module needs.
+NATIVE = "native"
+PRESSURE_UNITS = (NATIVE, "bara", "psia", "kpaa")
+FLOW_UNITS = (NATIVE, "SCCM", "SLPM")
+
 
 type AppSettingValue = str | int | float | bool
 
@@ -16,6 +22,8 @@ class SettingDefinition:
     description: str
     default: AppSettingValue
     validator: Callable[[object], AppSettingValue]
+    #: A fixed set of valid values, offered as a list rather than free text.
+    choices: tuple[str, ...] = ()
 
 
 def _positive_number(value: object) -> AppSettingValue:
@@ -58,6 +66,23 @@ def _boolean(value: object) -> AppSettingValue:
     return value
 
 
+def _display_pressure_unit(value: object) -> AppSettingValue:
+    return _one_of(value, PRESSURE_UNITS, "display pressure unit")
+
+
+def _display_flow_unit(value: object) -> AppSettingValue:
+    return _one_of(value, FLOW_UNITS, "display flow unit")
+
+
+def _one_of(value: object, allowed: tuple[str, ...], name: str) -> AppSettingValue:
+    if not isinstance(value, str):
+        raise TypeError("must be text")
+    for item in allowed:
+        if item.casefold() == value.strip().casefold():
+            return item
+    raise ValueError(f"{name} must be one of: {', '.join(allowed)}")
+
+
 SETTING_DEFINITIONS = (
     SettingDefinition("pressure_high_pressure_mode", "High Pressure Mode",
                       "Override the normal 2.5 bara setpoint ceiling only after upgrading the rig. Software limits do not replace physical relief.",
@@ -66,6 +91,30 @@ SETTING_DEFINITIONS = (
                       "Active only in High Pressure Mode; the instrument limit still applies.", 2.5, _positive_number),
     SettingDefinition("pressure_atmospheric_reference_bara", "Fixed atmospheric reference (bara)",
                       "Used for gauge conversion; this is not a live atmospheric measurement.", 1.01325, _positive_number),
+    SettingDefinition(
+        key="display_pressure_unit",
+        label="Show pressures in",
+        description=(
+            "Display and entry only. Instruments are still commanded in their "
+            "own units, and recordings keep the units each instrument reports. "
+            "'native' leaves every reading as its instrument sends it."
+        ),
+        default=NATIVE,
+        validator=_display_pressure_unit,
+        choices=PRESSURE_UNITS,
+    ),
+    SettingDefinition(
+        key="display_flow_unit",
+        label="Show mass flows in",
+        description=(
+            "Display and entry only. A value typed here is converted into the "
+            "instrument's own unit before it is sent, so a setpoint entered in "
+            "SCCM can never be acted on as SLPM."
+        ),
+        default=NATIVE,
+        validator=_display_flow_unit,
+        choices=FLOW_UNITS,
+    ),
     SettingDefinition(
         key="trend_history_readings",
         label="Default trend history (readings)",
@@ -198,6 +247,17 @@ class AppSettings:
                     f"Application setting {definition.key!r} {error}"
                 ) from error
         object.__setattr__(self, "values", MappingProxyType(validated))
+
+    @property
+    def display_units(self):
+        """Units the screens show and accept; control is unaffected."""
+
+        from rig_control.display_units import DisplayUnits
+
+        return DisplayUnits(
+            pressure=str(self.values["display_pressure_unit"]),
+            flow=str(self.values["display_flow_unit"]),
+        )
 
     @property
     def pressure_policy(self):

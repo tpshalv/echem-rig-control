@@ -203,10 +203,6 @@ class ProfileEditor:
                 raise ValueError("Device friendly name cannot be empty")
             system = request.system.strip() or None
             updated_settings = dict(request.settings)
-            protected = {"frame_fields", "pressure_unit", "flow_unit", "volumetric_flow_unit",
-                         "temperature_unit", "totalized_flow_unit", "downstream_valve_confirmed"}
-            if role.driver == "alicat" and any(updated_settings.get(key) != role.settings.get(key) for key in protected):
-                updated_settings.pop("verified_frame_signature", None)
             updated_role = replace(
                 role,
                 friendly_name=friendly_name,

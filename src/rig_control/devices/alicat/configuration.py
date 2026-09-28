@@ -67,7 +67,6 @@ class AlicatMfcConfiguration:
     is_controller: bool = True
     is_bpr: bool = False
     expected_serial: str | None = None
-    verified_frame_signature: str | None = None
     downstream_valve_confirmed: bool = False
     maximum_pressure_bara: float = 2.5
     setpoint_tolerance: float = 0.001
@@ -230,8 +229,7 @@ def configuration_from_profile(
         is_controller=is_controller,
         is_bpr=is_bpr,
         expected_serial=(role.expected_identity.serial_number if role.expected_identity else None),
-        verified_frame_signature=_optional_text(role.settings, "verified_frame_signature", "verified_frame_signature"),
-        downstream_valve_confirmed=role.settings.get("downstream_valve_confirmed", False),
+        downstream_valve_confirmed=bool(role.settings.get("downstream_valve_confirmed", False)),
         maximum_pressure_bara=role.settings.get("maximum_pressure_bara", 2.5),
         setpoint_tolerance=role.settings.get("setpoint_tolerance", 0.001),
     )

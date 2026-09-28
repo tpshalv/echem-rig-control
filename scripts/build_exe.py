@@ -17,6 +17,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 ENTRY_POINT = ROOT / "src" / "rig_control" / "ui" / "home" / "window.py"
 APP_NAME = "echem-rig-control"
+# A console tool built into the same folder: it prints and saves one Alicat's
+# read-only replies, for when device setup cannot interpret a configuration.
+TOOL_ENTRY_POINT = ROOT / "scripts" / "alicat_dump.py"
+TOOL_NAME = "alicat-dump"
 # Modules PyInstaller cannot discover because they are imported dynamically.
 HIDDEN_IMPORT_PACKAGES = ["pyvisa_py", "pyvisa", "serial"]
 RECENT_COMMIT_COUNT = 20
@@ -60,25 +64,24 @@ def collect_build_info(version: str, built_at: datetime) -> dict[str, object]:
     }
 
 
-def main() -> int:
-    version = read_version()
-    built_at = datetime.now()
-    info = collect_build_info(version, built_at)
-    suffix = f"{built_at:%Y%m%d}-{info['git_commit']}" + ("-dirty" if info["uncommitted_changes"] else "")
-    build_name = f"{APP_NAME}-{version}-{suffix}"
-    dist_dir = ROOT / "dist"
-    work_dir = ROOT / "build"
-
+def pyinstaller_command(
+    entry_point: Path,
+    name: str,
+    dist_dir: Path,
+    work_dir: Path,
+    *,
+    windowed: bool,
+) -> list[str]:
     command = [
         sys.executable,
         "-m",
         "PyInstaller",
-        str(ENTRY_POINT),
+        str(entry_point),
         "--noconfirm",
         "--clean",
-        "--windowed",
+        "--windowed" if windowed else "--console",
         "--name",
-        build_name,
+        name,
         "--paths",
         str(ROOT / "src"),
         "--distpath",
@@ -90,11 +93,39 @@ def main() -> int:
     ]
     for package in HIDDEN_IMPORT_PACKAGES:
         command += ["--collect-submodules", package]
+    return command
 
+
+def main() -> int:
+    version = read_version()
+    built_at = datetime.now()
+    info = collect_build_info(version, built_at)
+    suffix = f"{built_at:%Y%m%d}-{info['git_commit']}" + ("-dirty" if info["uncommitted_changes"] else "")
+    build_name = f"{APP_NAME}-{version}-{suffix}"
+    dist_dir = ROOT / "dist"
+    work_dir = ROOT / "build"
+
+    command = pyinstaller_command(
+        ENTRY_POINT, build_name, dist_dir, work_dir, windowed=True
+    )
     print("Running:", " ".join(command))
     subprocess.run(command, check=True, cwd=ROOT)
 
     output_dir = dist_dir / build_name
+
+    # The diagnostic tool is built into its own folder, then its executable is
+    # copied next to the app so the release folder stays a single deliverable.
+    tool_dist = work_dir / "tools"
+    tool_command = pyinstaller_command(
+        TOOL_ENTRY_POINT, TOOL_NAME, tool_dist, work_dir, windowed=False
+    )
+    print("Running:", " ".join(tool_command))
+    subprocess.run(tool_command, check=True, cwd=ROOT)
+    tool_exe = tool_dist / TOOL_NAME / f"{TOOL_NAME}.exe"
+    if tool_exe.exists():
+        shutil.copytree(
+            tool_dist / TOOL_NAME, output_dir / TOOL_NAME, dirs_exist_ok=True
+        )
     for name in SIDECAR_FILES:
         source = ROOT / name
         if source.exists():
@@ -104,6 +135,7 @@ def main() -> int:
 
     print(f"\nBuilt {build_name} -> {output_dir}")
     print(f"Run: {output_dir / (build_name + '.exe')}")
+    print(f"Alicat diagnostic: {output_dir / TOOL_NAME / (TOOL_NAME + '.exe')}")
     return 0
 
 

@@ -1,131 +1,70 @@
 import tkinter as tk
+from dataclasses import replace
 from queue import Empty, Queue
 from threading import Thread
 from tkinter import messagebox, ttk
 
-from rig_control.ui.device_setup.types import AddAlicatRequest
+from rig_control.ui.device_setup.types import (
+    BPR_INSTALLATION_WARNING,
+    AddAlicatRequest,
+)
 
 
 from rig_control.ui.device_setup.dialogs.base import SetupDialog
 
 
 class AlicatDialogs(SetupDialog):
-    def _open_verify_alicat(self) -> None:
+    def _acknowledge_bpr_installation(self) -> None:
+        """Record the hardware acknowledgement for a BPR saved earlier.
+
+        Adding a BPR records this automatically; this button exists only for
+        devices saved before the acknowledgement was stored with them.
+        """
+
         device_id = self._selected_device_id()
         if not device_id:
-            messagebox.showinfo("Select Alicat", "Select an Alicat MFC or BPR first.", parent=self._root)
+            messagebox.showinfo(
+                "Select Alicat",
+                "Select the saved Alicat BPR first.",
+                parent=self._root,
+            )
             return
         role = self._view_model.profile.get_role(device_id)
-        if role.driver != "alicat" or role.capability.value not in {"mass_flow_controller", "back_pressure_controller"}:
-            messagebox.showinfo("Select controller", "Select an Alicat MFC or BPR.", parent=self._root)
+        if (
+            role.driver != "alicat"
+            or role.capability.value != "back_pressure_controller"
+        ):
+            messagebox.showinfo(
+                "Select a BPR",
+                "Select an Alicat back-pressure controller.",
+                parent=self._root,
+            )
             return
-        dialog = tk.Toplevel(self._root)
-        dialog.title(f"Read-only Alicat verification: {role.friendly_name}")
-        dialog.transient(self._root)
-        dialog.grab_set()
-        frame = ttk.Frame(dialog, padding=12)
-        frame.pack(fill="both", expand=True)
-        status = ttk.Label(frame, text="Reading identity, mode and frame description...")
-        status.grid(row=0, column=0, columnspan=2, sticky="w")
-        raw = tk.Text(frame, height=14, width=85, wrap="word")
-        raw.grid(row=1, column=0, columnspan=2, sticky="nsew")
-        fields = {}
-        for index, (key, label, default) in enumerate((
-            ("frame_fields", "Frame fields in reported order", ""),
-            ("pressure_unit", "Absolute-pressure frame unit", "psia"),
-            ("flow_unit", "Mass-flow frame unit", "SCCM"),
-            ("volumetric_flow_unit", "Volumetric-flow frame unit", "CCM"),
-            ("temperature_unit", "Temperature frame unit", "degC"),
-            ("maximum_pressure_bara", "Installed instrument pressure ceiling (bara)", 2.5),
-        ), start=2):
-            ttk.Label(frame, text=label).grid(row=index, column=0, sticky="w")
-            entry = ttk.Entry(frame, width=60)
-            entry.insert(0, str(role.settings.get(key, default)))
-            entry.grid(row=index, column=1, sticky="ew")
-            fields[key] = entry
-        confirmed = tk.BooleanVar(value=False)
-        downstream = tk.BooleanVar(value=False)
-        ttk.Checkbutton(frame, text="I checked the field order and units against the instrument table above",
-                        variable=confirmed).grid(row=8, column=0, columnspan=2, sticky="w")
-        ttk.Checkbutton(frame, text="BPR: valve is physically downstream of the pressure sensing section",
-                        variable=downstream).grid(row=9, column=0, columnspan=2, sticky="w")
-        ttk.Label(frame, text="Saving records this device's intended role. It does not change any instrument settings.",
-                  wraplength=650).grid(row=10, column=0, columnspan=2, sticky="w")
-        results = Queue()
-        observed = None
-
-        def inspect():
-            try:
-                results.put(("inspect", self._view_model.inspect_alicat_configuration(device_id)))
-            except Exception as error:
-                results.put(("inspect", error))
-
-        def save():
-            if observed is None:
-                return
-            try:
-                values = {key: entry.get().strip() for key, entry in fields.items()}
-                values["maximum_pressure_bara"] = float(values["maximum_pressure_bara"])
-                kwargs = dict(values, frame_confirmed=confirmed.get(), downstream_confirmed=downstream.get())
-            except ValueError as error:
-                messagebox.showerror("Invalid value", str(error), parent=dialog)
-                return
-            save_button.configure(state="disabled")
-            def commit():
-                result = self._view_model.commission_alicat(device_id, observed, **kwargs)
-                results.put(("save", result))
-            Thread(target=commit, daemon=True).start()
-            dialog.after(100, poll)
-
-        def poll():
-            nonlocal observed
-            if not dialog.winfo_exists():
-                return
-            try:
-                action, result = results.get_nowait()
-            except Empty:
-                dialog.after(100, poll)
-                return
-            if isinstance(result, Exception):
-                status.configure(text=f"Verification unavailable: {result}")
-                return
-            if action == "inspect":
-                observed = result
-                if role.capability.value == "back_pressure_controller" and result.maximum_setpoint is not None:
-                    from rig_control.devices.pressure_controller import absolute_unit_factor
-                    try:
-                        maximum_bara = result.maximum_setpoint * absolute_unit_factor(result.setpoint_unit) / 100_000
-                        fields["maximum_pressure_bara"].delete(0, "end")
-                        fields["maximum_pressure_bara"].insert(0, f"{maximum_bara:.10g}")
-                    except ValueError:
-                        pass
-                status.configure(text=f"Expected role: {role.capability.value}; detected {result.description}")
-                raw.insert("1.0", f"Model: {result.model}\nFirmware: {result.firmware}\n"
-                           f"Setpoint bounds: {result.minimum_setpoint} to {result.maximum_setpoint} {result.setpoint_unit}\n\n"
-                           + result.frame_description)
-                raw.configure(state="disabled")
-                save_button.configure(state="normal")
-            else:
-                self._record_result(result)
-                self.refresh()
-                status.configure(text=result.summary)
-                save_button.configure(state="normal")
-                if result.succeeded:
-                    dialog.destroy()
-                else:
-                    messagebox.showerror("Verification failed", result.technical_details, parent=dialog)
-
-        save_button = ttk.Button(frame, text="Verify again and save expected role", command=save, state="disabled")
-        save_button.grid(row=11, column=1, sticky="e", pady=10)
-        Thread(target=inspect, daemon=True).start()
-        dialog.after(100, poll)
+        if not messagebox.askokcancel(
+            "Back-pressure installation",
+            BPR_INSTALLATION_WARNING,
+            parent=self._root,
+            icon=messagebox.WARNING,
+        ):
+            return
+        result = self._view_model.acknowledge_bpr_installation(device_id)
+        self._record_result(result)
+        self.refresh()
+        if result.succeeded:
+            messagebox.showinfo("Acknowledged", result.summary, parent=self._root)
+        else:
+            messagebox.showerror(
+                "Not acknowledged",
+                result.summary + "\n\n" + result.technical_details,
+                parent=self._root,
+            )
 
     def _open_scan_alicat(self) -> None:
         dialog = tk.Toplevel(self._root)
-        dialog.title("Find Alicat mass-flow device")
+        dialog.title("Find Alicat devices")
         dialog.transient(self._root)
         dialog.grab_set()
-        dialog.geometry("780x470")
+        dialog.geometry("820x460")
         dialog.columnconfigure(0, weight=1)
         dialog.rowconfigure(2, weight=1)
 
@@ -133,21 +72,15 @@ class AlicatDialogs(SetupDialog):
         frame.grid(row=0, column=0, sticky="nsew")
         frame.columnconfigure(1, weight=1)
         frame.rowconfigure(3, weight=1)
-        description = ttk.Label(
+        ttk.Label(
             frame,
-            wraplength=700,
-        )
-        description.grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 10))
-        ttk.Label(frame, text="Device function").grid(row=1, column=0, sticky="w")
-        device_function = tk.StringVar(value="Controller (MFC)")
-        function_selector = ttk.Combobox(
-            frame,
-            textvariable=device_function,
-            values=("Controller (MFC)", "Meter (MFM)", "Back-pressure controller (BPR)"),
-            state="readonly",
-            width=20,
-        )
-        function_selector.grid(row=1, column=1, sticky="w", padx=(8, 16))
+            wraplength=740,
+            text=(
+                "Scanning addresses A-Z read-only. Each Alicat's type is read "
+                "from its own control settings, so there is nothing to choose "
+                "and no separate verification step."
+            ),
+        ).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 10))
         ttk.Label(frame, text="COM port").grid(row=2, column=0, sticky="w")
         known_ports = tuple(
             port.device for port in self._view_model.serial_ports()
@@ -165,29 +98,38 @@ class AlicatDialogs(SetupDialog):
 
         results = ttk.Treeview(
             frame,
-            columns=("status", "type", "model", "range", "device_id", "response"),
+            columns=("status", "detected", "saved", "model", "range", "device_id"),
             show="tree headings",
             selectmode="browse",
             height=10,
         )
         results.heading("#0", text="Address")
         results.heading("status", text="Configuration")
-        results.heading("type", text="Saved type")
-        results.heading("model", text="Detected model/type")
-        results.heading("range", text="Inferred range")
+        results.heading("detected", text="Detected type")
+        results.heading("saved", text="Saved type")
+        results.heading("model", text="Reported configuration")
+        results.heading("range", text="Range")
         results.heading("device_id", text="Device ID")
-        results.heading("response", text="Raw response")
         results.column("#0", width=65)
-        results.column("status", width=105)
-        results.column("type", width=80)
-        results.column("model", width=135)
+        results.column("status", width=95)
+        results.column("detected", width=85)
+        results.column("saved", width=80)
+        results.column("model", width=280)
         results.column("range", width=105)
-        results.column("device_id", width=115)
-        results.column("response", width=220)
+        results.column("device_id", width=110)
         results.grid(row=3, column=0, columnspan=4, sticky="nsew", pady=10)
 
         result_queue: Queue[object] = Queue()
         discovered_by_address = {}
+
+        def range_text(device) -> str:
+            if device.detected_role == "bpr" and device.maximum_setpoint is not None:
+                return f"{device.maximum_setpoint:g} {device.setpoint_unit or ''}".strip()
+            if device.maximum_setpoint is not None:
+                return f"{device.maximum_setpoint:g} {device.setpoint_unit or ''}".strip()
+            if device.inferred_maximum_flow_sccm is not None:
+                return f"{device.inferred_maximum_flow_sccm:g} SCCM"
+            return "enter manually"
 
         def poll_result() -> None:
             if not dialog.winfo_exists():
@@ -218,21 +160,19 @@ class AlicatDialogs(SetupDialog):
                     text=device.address,
                     values=(
                         device.configuration_status,
+                        device.detected_type,
                         device.configured_kind or "-",
-                        (
-                            f"{device.model or 'unknown'} / "
-                            f"{device.control_description}"
-                        ),
-                        (
-                            f"{device.inferred_maximum_flow_sccm:g} SCCM"
-                            if device.inferred_maximum_flow_sccm is not None
-                            else "confirm manually"
-                        ),
+                        f"{device.model or 'model not reported'}: "
+                        f"{device.control_description}",
+                        range_text(device),
                         device.configured_device_id or "-",
-                        device.raw_response,
                     ),
                 )
-            status.configure(text=f"Found {len(discovered)} device(s)")
+            unreadable = sum(1 for device in discovered if not device.usable)
+            status.configure(
+                text=f"Found {len(discovered)} device(s)"
+                + (f", {unreadable} unreadable" if unreadable else "")
+            )
 
         def scan() -> None:
             selected_port = port.get().strip()
@@ -285,16 +225,20 @@ class AlicatDialogs(SetupDialog):
                         parent=dialog,
                     )
                 return
+            if not selected.usable:
+                messagebox.showerror(
+                    "Configuration could not be read",
+                    selected.configuration_error
+                    or "This Alicat's control configuration could not be read.",
+                    parent=dialog,
+                )
+                return
             selected_port = port.get().strip()
             dialog.destroy()
             self._open_add_alicat(
-                is_meter=device_function.get() == "Meter (MFM)",
-                is_bpr=device_function.get() == "Back-pressure controller (BPR)",
                 initial_port=selected_port,
                 initial_address=address,
-                initial_maximum_flow=(
-                    selected.inferred_maximum_flow_sccm
-                ),
+                detected=selected,
             )
 
         buttons = ttk.Frame(frame)
@@ -303,92 +247,50 @@ class AlicatDialogs(SetupDialog):
         scan_button.grid(row=0, column=0, padx=(0, 8))
         continue_button = ttk.Button(
             buttons,
-            text="Continue with selected controller",
+            text="Continue with selected device",
             command=add_selected,
         )
         continue_button.grid(row=0, column=1, padx=(0, 8))
 
-        def update_selected_action(_: tk.Event | None = None) -> None:
+        def handle_result_selection(_: tk.Event | None = None) -> None:
             selection = results.selection()
             selected = (
                 discovered_by_address.get(selection[0]) if selection else None
             )
-
-        def handle_result_selection(event: tk.Event | None = None) -> None:
-            selection = results.selection()
-            selected = (
-                discovered_by_address.get(selection[0]) if selection else None
-            )
-            if selected is not None and selected.inferred_kind in {
-                "controller",
-                "meter",
-            }:
-                device_function.set(
-                    "Meter (MFM)"
-                    if selected.inferred_kind == "meter"
-                    else "Back-pressure controller (BPR)"
-                    if "absolute pressure; inverse" in selected.control_description
-                    else "Controller (MFC)"
-                )
-                update_device_function()
-            update_selected_action(event)
             continue_button.configure(
                 text=(
                     "Run check for configured device"
                     if selected is not None
                     and selected.configured_device_id is not None
-                    else (
-                        "Continue with selected meter"
-                        if device_function.get() == "Meter (MFM)"
-                        else "Continue with selected controller"
-                    )
+                    else "Continue with selected device"
                 )
             )
-
-        def update_device_function(_: tk.Event | None = None) -> None:
-            is_meter = device_function.get() == "Meter (MFM)"
-            device_type = "meter" if is_meter else "controller"
-            description.configure(
-                text=(
-                    f"Finding an Alicat mass-flow {device_type} using a "
-                    "read-only scan of addresses A-Z. Devices must have "
-                    "unique addresses and be in polling mode."
-                )
-            )
-            dialog.title(f"Find Alicat mass-flow {device_type}")
-            update_selected_action()
 
         results.bind("<<TreeviewSelect>>", handle_result_selection)
-        function_selector.bind("<<ComboboxSelected>>", update_device_function)
         ttk.Button(
             buttons,
             text="Enter manually",
             command=lambda: (
                 dialog.destroy(),
-                self._open_add_alicat(
-                    is_meter=device_function.get() == "Meter (MFM)",
-                is_bpr=device_function.get() == "Back-pressure controller (BPR)",
-                    initial_port=port.get().strip(),
-                ),
+                self._open_add_alicat(initial_port=port.get().strip()),
             ),
         ).grid(row=0, column=2, padx=(0, 8))
         ttk.Button(buttons, text="Close", command=dialog.destroy).grid(
             row=0, column=3
         )
-        update_device_function()
         dialog.after(100, scan)
 
     def _open_add_alicat(
         self,
         *,
-        is_meter: bool = False,
-        is_bpr: bool = False,
         initial_port: str = "",
         initial_address: str | None = None,
-        initial_maximum_flow: float | None = None,
+        detected=None,
     ) -> None:
+        """Name and save one Alicat; its role is read from the instrument."""
+
         dialog = tk.Toplevel(self._root)
-        dialog.title("Add Alicat BPR (configured manually)" if is_bpr else "Add Alicat mass-flow meter" if is_meter else "Add Alicat MFC")
+        dialog.title("Add Alicat device")
         dialog.transient(self._root)
         dialog.grab_set()
         dialog.resizable(False, False)
@@ -397,24 +299,34 @@ class AlicatDialogs(SetupDialog):
         form.grid(row=0, column=0, sticky="nsew")
         form.columnconfigure(1, weight=1)
 
+        detected_role = getattr(detected, "detected_role", None)
+        is_meter = getattr(detected, "is_controller", None) is False
+        default_id = (
+            "bpr_a" if detected_role == "bpr"
+            else "flow_meter_b" if is_meter
+            else "mfc_a"
+        )
+        default_label = (
+            "Outlet BPR" if detected_role == "bpr"
+            else "Flow meter B" if is_meter
+            else "MFC A"
+        )
+        default_maximum = ""
+        if detected is not None:
+            if detected_role == "mfc" and detected.maximum_setpoint:
+                default_maximum = f"{detected.maximum_setpoint:g}"
+            elif detected.inferred_maximum_flow_sccm:
+                default_maximum = f"{detected.inferred_maximum_flow_sccm:g}"
+
         fields = (
-            ("Device ID", "flow_meter_b" if is_meter else "mfc_a"),
-            ("Hardware label", "Flow meter B" if is_meter else "MFC A"),
-            ("Purpose (optional)", "Flow measurement" if is_meter else "Nitrogen"),
-            (
-                "Alicat address",
-                initial_address or ("B" if is_meter else "A"),
-            ),
-            (
-                "Maximum flow",
-                f"{initial_maximum_flow:g}"
-                if initial_maximum_flow is not None
-                else "2000",
-            ),
-            ("Mass-flow unit", "SCCM"),
+            ("Device ID", default_id),
+            ("Hardware label", default_label),
+            ("Purpose (optional)", "" if detected_role == "bpr" else "Nitrogen"),
+            ("Alicat address", initial_address or "A"),
+            ("Maximum flow (blank uses the instrument's range)", default_maximum),
             ("Measurement interval (seconds)", "1.0"),
         )
-        entries: dict[str, ttk.Entry | ttk.Combobox] = {}
+        entries: dict[str, ttk.Entry] = {}
         for row_index, (label, default) in enumerate(fields):
             ttk.Label(form, text=label).grid(
                 row=row_index,
@@ -423,17 +335,8 @@ class AlicatDialogs(SetupDialog):
                 padx=(0, 10),
                 pady=4,
             )
-            if label == "Mass-flow unit":
-                entry = ttk.Combobox(
-                    form,
-                    width=29,
-                    values=("SCCM", "SLPM"),
-                    state="readonly",
-                )
-                entry.set(default)
-            else:
-                entry = ttk.Entry(form, width=32)
-                entry.insert(0, default)
+            entry = ttk.Entry(form, width=32)
+            entry.insert(0, default)
             entry.grid(row=row_index, column=1, sticky="ew", pady=4)
             entries[label] = entry
 
@@ -459,15 +362,20 @@ class AlicatDialogs(SetupDialog):
             port_selector.set(known_ports[0])
         port_selector.grid(row=port_row, column=1, sticky="ew", pady=4)
 
-        note = ttk.Label(
+        detected_text = (
+            f"Detected: {detected.control_description}."
+            if detected is not None
+            else "The device type is read from the instrument when you save."
+        )
+        ttk.Label(
             form,
             text=(
-                "Saving is allowed only after one successful read-only "
-                "status poll. No flow or gas command will be sent."
+                detected_text
+                + " Saving reads the instrument's configuration and one status "
+                "frame. No setpoint, gas or configuration command is sent."
             ),
             wraplength=430,
-        )
-        note.grid(
+        ).grid(
             row=port_row + 1,
             column=0,
             columnspan=2,
@@ -484,45 +392,44 @@ class AlicatDialogs(SetupDialog):
         )
 
         def check_and_save() -> None:
+            maximum_text = entries[
+                "Maximum flow (blank uses the instrument's range)"
+            ].get().strip()
             try:
-                maximum_flow = float(
-                    entries["Maximum flow"].get().strip()
-                )
+                maximum_flow = float(maximum_text) if maximum_text else None
                 poll_interval_seconds = float(
                     entries["Measurement interval (seconds)"].get().strip()
                 )
             except ValueError:
                 messagebox.showerror(
                     "Invalid numeric value",
-                    "Maximum flow and measurement interval must be "
-                    "numbers.",
+                    "Maximum flow and measurement interval must be numbers.",
                     parent=dialog,
                 )
                 return
 
-            confirmed = messagebox.askyesno(
-                "Run read-only check",
-                "Open the selected COM port and poll the proposed Alicat "
-                "address once?\n\nNo setpoint or gas-selection command "
-                "will be sent.",
-                parent=dialog,
+            request = AddAlicatRequest(
+                device_id=entries["Device ID"].get(),
+                hardware_label=entries["Hardware label"].get(),
+                purpose_label=entries["Purpose (optional)"].get(),
+                port=port_selector.get(),
+                unit_address=entries["Alicat address"].get(),
+                maximum_flow=maximum_flow,
+                poll_interval_seconds=poll_interval_seconds,
             )
-            if not confirmed:
-                return
-
-            result = self._view_model.add_alicat_and_check(
-                AddAlicatRequest(
-                    device_id=entries["Device ID"].get(),
-                    hardware_label=entries["Hardware label"].get(),
-                    purpose_label=entries["Purpose (optional)"].get(),
-                    port=port_selector.get(),
-                    unit_address=entries["Alicat address"].get(),
-                    maximum_flow=maximum_flow,
-                    device_kind="bpr" if is_bpr else "meter" if is_meter else "controller",
-                    flow_unit=entries["Mass-flow unit"].get(),
-                    poll_interval_seconds=poll_interval_seconds,
+            result = self._view_model.add_alicat_and_check(request)
+            if result.requires_acknowledgement:
+                acknowledged = messagebox.askokcancel(
+                    "Back-pressure controller detected",
+                    result.requires_acknowledgement,
+                    parent=dialog,
+                    icon=messagebox.WARNING,
                 )
-            )
+                if not acknowledged:
+                    return
+                result = self._view_model.add_alicat_and_check(
+                    replace(request, downstream_valve_acknowledged=True)
+                )
             self._record_result(result)
             self.refresh()
             if result.succeeded:
@@ -546,7 +453,7 @@ class AlicatDialogs(SetupDialog):
         ).grid(row=0, column=0, padx=(0, 8))
         ttk.Button(
             buttons,
-            text="Read-only check and save",
+            text="Detect and save",
             command=check_and_save,
         ).grid(row=0, column=1)
         for field_entry in entries.values():
@@ -556,3 +463,4 @@ class AlicatDialogs(SetupDialog):
         port_selector.bind("<KP_Enter>", lambda _event: check_and_save())
         entries["Device ID"].focus_set()
         entries["Device ID"].selection_range(0, "end")
+

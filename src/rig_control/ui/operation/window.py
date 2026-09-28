@@ -528,6 +528,13 @@ class OperationWindow:
                 value: float | bool | str = text == "On"
                 if value:
                     title, prompt = (
+                        ("Confirm hotplate heating",
+                         f"Start heating on {row.device_name!r}?\n\n"
+                         "Confirm the vessel and target temperature are safe.")
+                        if row.channel == "heating_enabled" else
+                        ("Confirm hotplate stirring",
+                         f"Start stirring on {row.device_name!r}?")
+                        if row.channel == "stirring_enabled" else
                         ("Confirm output enable",
                          f"Enable output for {row.device_name!r}?\n\n"
                          "Confirm wiring and limits are safe.")

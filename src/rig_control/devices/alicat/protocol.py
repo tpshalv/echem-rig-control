@@ -1,25 +1,29 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from enum import StrEnum
 from math import isfinite
 
 from rig_control.devices.alicat.bus import AlicatBus
 from rig_control.models import Quality
-from rig_control.devices.alicat.verification import AlicatControlConfiguration, parse_control_configuration, addressed_tokens
+from rig_control.devices.alicat.protocol_fields import AlicatFrameField
+from rig_control.devices.dump_report import DumpQuery
+from rig_control.devices.alicat.verification import (
+    AlicatControlConfiguration,
+    AlicatControlMode,
+    ABSOLUTE_PRESSURE_VARIABLE,
+    addressed_tokens,
+    parse_control_configuration,
+    parse_control_mode,
+)
 
 
-class AlicatFrameField(StrEnum):
-    """Supported values in their instrument-configured frame order."""
-
-    ABSOLUTE_PRESSURE = "absolute_pressure"
-    GAS_TEMPERATURE = "gas_temperature"
-    VOLUMETRIC_FLOW = "volumetric_flow"
-    MASS_FLOW = "mass_flow"
-    SETPOINT = "setpoint"
-    TOTALIZED_FLOW = "totalized_flow"
-    GAS = "gas"
-    VALVE_DRIVE = "valve_drive_percent"
+__all__ = [
+    "AlicatFrameField",
+    "AlicatEngineeringUnits",
+    "AlicatInstrumentState",
+    "AlicatProtocolClient",
+    "AlicatAsciiProtocolClient",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,7 +162,21 @@ class AlicatProtocolClient(ABC):
         """Release communication resources owned by this client."""
 
     def read_control_configuration(self, unit_address: str) -> AlicatControlConfiguration:
-        raise NotImplementedError("This protocol cannot verify Alicat control configuration")
+        raise NotImplementedError("This protocol cannot read Alicat control configuration")
+
+    def read_control_mode(self, unit_address: str) -> AlicatControlMode:
+        """Read only the live loop variable, units and inverse flag.
+
+        Measurement polling uses this small check; the full identity and
+        data-frame queries belong to setup, not to every reading.
+        """
+
+        return self.read_control_configuration(unit_address).mode
+
+    def read_setup_report(self, unit_address: str) -> tuple[DumpQuery, ...]:
+        """Answer every documented setup query, for a settings dump."""
+
+        raise NotImplementedError("This protocol cannot report its settings")
 
     def set_pressure_setpoint(self, unit_address: str, value: float) -> None:
         raise NotImplementedError("This protocol does not support pressure setpoints")
@@ -179,6 +197,23 @@ class AlicatProtocolClient(ABC):
     @abstractmethod
     def set_flow_setpoint(self, unit_address: str, flow: float) -> None:
         """Send a mass-flow setpoint to one addressed MFC."""
+
+
+#: Everything setup reads from one Alicat, in the order a dump reports it.
+#: Each entry is a command suffix with no argument, which is what makes the
+#: whole sequence read-only. Sources: Alicat Serial Communications Primer,
+#: February 2023 rev. 2; Alicat inverse-pressure-control tutorial.
+SETUP_QUERIES: tuple[tuple[str, str], ...] = (
+    ("", "status frame (polling reply for this address)"),
+    ("VE", "firmware version"),
+    ("??M*", "manufacturer/identity table"),
+    ("??D*", "data-frame description (column order and units)"),
+    ("LR", "loop control variable, units and range"),
+    ("R20", "register 20 (bit 32768 = inverse control)"),
+    ("R122", "register 122 (control point on some firmware)"),
+    ("LS", "current setpoint and its units"),
+    ("FPF 2", "absolute-pressure full scale"),
+)
 
 
 _BAD_QUALITY_CODES = {
@@ -287,27 +322,82 @@ class AlicatAsciiProtocolClient(AlicatProtocolClient):
         self._bus.request(f"{address}S{float(flow):g}")
 
     def read_control_configuration(self, unit_address: str) -> AlicatControlConfiguration:
+        """Read identity, firmware, control mode and data frame once, for setup."""
+
         address = self._validate_address(unit_address)
         firmware = self._bus.request(f"{address}VE")
-        identity = self._bus.request(f"{address}??M*")
+        identity = self._optional_request(f"{address}??M*")
         loop = self._bus.request(f"{address}LR")
         register = self._bus.request(f"{address}R20")
         frame = self._bus.request(f"{address}??D*")
         observed = parse_control_configuration(address, firmware, identity, loop, register, frame)
-        if observed.loop_variable == 34 and observed.maximum_setpoint is None:
-            # Firmware 9v reports units but not LR bounds. Read the absolute
-            # pressure sensor range (statistic 2), never infer it from model size.
-            from rig_control.devices.pressure_controller import absolute_unit_factor
-            parts = addressed_tokens(address, self._bus.request(f"{address}FPF 2"))
-            if len(parts) != 3:
-                raise ValueError("Unrecognised absolute-pressure full-scale response")
-            maximum = float(parts[0])
-            int(parts[1])
-            if not isfinite(maximum) or maximum <= 0:
-                raise ValueError("Invalid absolute-pressure full scale")
-            maximum *= absolute_unit_factor(parts[2]) / absolute_unit_factor(observed.setpoint_unit)
-            observed = replace(observed, minimum_setpoint=0.0, maximum_setpoint=maximum)
+        if observed.loop_variable == ABSOLUTE_PRESSURE_VARIABLE and observed.maximum_setpoint is None:
+            bounds = self._read_pressure_full_scale(address, observed.setpoint_unit)
+            observed = replace(observed, minimum_setpoint=bounds[0], maximum_setpoint=bounds[1])
         return observed
+
+    def read_control_mode(self, unit_address: str) -> AlicatControlMode:
+        """Read the live control variable, units and inverse flag only."""
+
+        address = self._validate_address(unit_address)
+        mode = parse_control_mode(
+            address,
+            self._bus.request(f"{address}LR"),
+            self._bus.request(f"{address}R20"),
+        )
+        if mode.loop_variable == ABSOLUTE_PRESSURE_VARIABLE and mode.maximum_setpoint is None:
+            minimum, maximum = self._read_pressure_full_scale(address, mode.setpoint_unit)
+            mode = replace(mode, minimum_setpoint=minimum, maximum_setpoint=maximum)
+        return mode
+
+    def _read_pressure_full_scale(self, address: str, setpoint_unit: str) -> tuple[float, float]:
+        # Firmware 9v reports units but not LR bounds. Read the absolute
+        # pressure sensor range (statistic 2), never infer it from model size.
+        from rig_control.devices.pressure_controller import absolute_unit_factor
+
+        parts = addressed_tokens(address, self._bus.request(f"{address}FPF 2"))
+        if len(parts) != 3:
+            raise ValueError("Unrecognised absolute-pressure full-scale response")
+        maximum = float(parts[0])
+        int(parts[1])
+        if not isfinite(maximum) or maximum <= 0:
+            raise ValueError("Invalid absolute-pressure full scale")
+        maximum *= absolute_unit_factor(parts[2]) / absolute_unit_factor(setpoint_unit)
+        return 0.0, maximum
+
+    def read_setup_report(self, unit_address: str) -> tuple[DumpQuery, ...]:
+        """Answer every documented setup query, recording what came back.
+
+        A query that does not answer is recorded as a failure rather than
+        stopping the report: a partial dump is still evidence.
+        """
+
+        address = self._validate_address(unit_address)
+        report: list[DumpQuery] = []
+        for suffix, purpose in SETUP_QUERIES:
+            command = f"{address}{suffix}"
+            try:
+                report.append(DumpQuery(command, purpose, self._bus.request(command)))
+            except Exception as error:
+                report.append(
+                    DumpQuery(
+                        command,
+                        purpose,
+                        f"{type(error).__name__}: {error}",
+                        failed=True,
+                    )
+                )
+        return tuple(report)
+
+    def _optional_request(self, command: str) -> str:
+        """Query informational text that must never block mode detection."""
+
+        try:
+            return self._bus.request(command)
+        except (TimeoutError, ValueError, OSError, RuntimeError) as error:
+            # The bus wraps transport failures, so catch that too: identity
+            # text must never stand between the operator and mode detection.
+            return f"(identity unavailable: {type(error).__name__})"
 
     def hold_closed(self, unit_address: str) -> AlicatInstrumentState:
         address = self._validate_address(unit_address)

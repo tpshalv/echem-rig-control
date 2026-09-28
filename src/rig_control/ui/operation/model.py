@@ -1,4 +1,5 @@
 from rig_control.devices.pressure_controller import PressureController
+from rig_control.display_units import DisplayUnits
 from collections import deque
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -18,6 +19,7 @@ from rig_control.devices.mass_flow_controller import MassFlowController
 from rig_control.devices.power_supply import PowerSupply, PowerSupplyOperatingMode
 from rig_control.devices.esp32_controller import Esp32Controller
 from rig_control.devices.lumel_re72 import LumelRe72
+from rig_control.devices.ohaus_guardian_5000.driver import OhausGuardian5000
 from rig_control.devices.pump import Pump, PumpDirection
 from rig_control.devices.temperature_probe import TemperatureProbe
 from rig_control.models import DeviceStatus
@@ -209,10 +211,12 @@ class OperationViewModel:
         event_limit: int = 1_000,
         power_supply_safety: PowerSupplyManualSafety | None = None,
         pump_calibration_service: PumpCalibrationService | None = None,
+        display_units: DisplayUnits | None = None,
     ) -> None:
         self._validate_history_limit(history_limit)
         self._validate_event_limit(event_limit)
         self._device_manager = device_manager
+        self._display_units = display_units or DisplayUnits()
         self._polling_service = polling_service
         self._experiment_recorder = experiment_recorder
         self._pump_calibration_service = pump_calibration_service or PumpCalibrationService()
@@ -291,13 +295,16 @@ class OperationViewModel:
             channel_name = self._labelled_channel_name(reading.device_id, reading.channel)
             if isinstance(device, MassFlowController) and reading.channel == "setpoint":
                 maximum = device.limits.maximum_flow
+            value, unit = self._for_display(reading.channel, reading.value, reading.unit)
+            if maximum is not None:
+                maximum = self._for_display(reading.channel, maximum, reading.unit)[0]
             row = OperationChannelRow(
                 device_id=reading.device_id,
                 device_name=self._device_name(reading.device_id),
                 channel=reading.channel,
                 channel_name=channel_name,
-                value=reading.value,
-                unit=reading.unit,
+                value=value,
+                unit=unit,
                 quality=reading.quality,
                 timestamp=reading.timestamp,
                 system=self._system_for_device(reading.device_id),
@@ -329,32 +336,36 @@ class OperationViewModel:
                     )
             if hasattr(device, "verification_message"):
                 rows[(device_id, "control_verification")] = OperationChannelRow(
-                    device_id, device_name, "control_verification", "Alicat role verification",
+                    device_id, device_name, "control_verification", "Alicat control mode",
                     device.verification_message, "", "good" if device.control_ready else "bad", None, device_system)
             if isinstance(device, PressureController):
                 policy = device.pressure_policy
                 ready = device.status is DeviceStatus.READY and device.control_ready
                 actual = device.pressure_setpoint_pa
                 maximum = device.maximum_pressure_pa / 100_000
-                for channel, label, unit, offset in (
-                    ("pressure_setpoint_absolute", "BPR pressure setpoint (absolute)", "bara", 0.0),
-                    ("pressure_setpoint_gauge", "BPR pressure setpoint (gauge, fixed reference)", "barg", policy.atmospheric_reference_bara),
-                ):
-                    rows[(device_id, channel)] = OperationChannelRow(
-                        device_id, device_name, channel, label,
-                        None if actual is None else actual / 100_000 - offset, unit,
-                        "good" if ready else "bad", None, device_system, ready, "number", -offset, maximum - offset)
+                # Alicat pressure control is absolute only, so the operator
+                # enters and reads one absolute value in the instrument's own
+                # frame of reference.
+                setpoint_value, setpoint_unit = self._display_units.show_pressure(
+                    0.0 if actual is None else actual / 100_000, "bara"
+                )
+                rows[(device_id, "pressure_setpoint_absolute")] = OperationChannelRow(
+                    device_id, device_name, "pressure_setpoint_absolute",
+                    f"BPR pressure setpoint (absolute, {setpoint_unit})",
+                    None if actual is None else setpoint_value, setpoint_unit,
+                    "good" if ready else "bad", None, device_system, ready,
+                    "number", 0.0,
+                    self._display_units.show_pressure(maximum, "bara")[0])
                 rows[(device_id, "resume_pressure_control")] = OperationChannelRow(
                     device_id, device_name, "resume_pressure_control", "Resume BPR regulation",
                     "Resume (may discharge gas downstream)", "", "good" if ready else "bad", None, device_system,
                     ready and device.valve_hold is not False, "action")
+                ceiling, ceiling_unit = self._display_units.show_pressure(maximum, "bara")
                 rows[(device_id, "pressure_ceiling")] = OperationChannelRow(
                     device_id, device_name, "pressure_ceiling",
                     "HIGH PRESSURE OVERRIDE ACTIVE" if policy.overridden else "Maximum permitted pressure",
-                    maximum, "bara", "warning" if policy.overridden else "good", None, device_system)
-                rows[(device_id, "atmospheric_reference")] = OperationChannelRow(
-                    device_id, device_name, "atmospheric_reference", "Fixed atmospheric reference",
-                    policy.atmospheric_reference_bara, "bara", "good", None, device_system)
+                    ceiling, ceiling_unit,
+                    "warning" if policy.overridden else "good", None, device_system)
             if isinstance(device, PowerSupply):
                 voltage_name = (
                     "Voltage setpoint"
@@ -369,11 +380,17 @@ class OperationViewModel:
             if isinstance(device, MassFlowController):
                 key = (device_id, "setpoint")
                 if key not in rows:
+                    native = device.limits.flow_unit
+                    setpoint, flow_unit = self._display_units.show_flow(
+                        device.flow_setpoint, native
+                    )
                     rows[key] = OperationChannelRow(
                         device_id, device_name, "setpoint", "Flow setpoint",
-                        device.flow_setpoint, device.limits.flow_unit, "good", None,
+                        setpoint, flow_unit, "good", None,
                         device_system, getattr(device, "control_ready", True), "number", 0.0,
-                        device.limits.maximum_flow,
+                        self._display_units.show_flow(
+                            device.limits.maximum_flow, native
+                        )[0],
                     )
             if isinstance(device, PowerSupply):
                 mode = supply_mode
@@ -411,6 +428,8 @@ class OperationViewModel:
                     device_id, device_name, "running", "Running",
                     device.running, "", "good", None, device_system, True, "running",
                 )
+            if isinstance(device, OhausGuardian5000):
+                rows.update(self._hotplate_rows(device_id, device_name, device_system, device))
             if isinstance(device, Esp32Controller):
                 status = device.controller_status
                 rows[(device_id, "watchdog_tripped")] = OperationChannelRow(
@@ -436,17 +455,88 @@ class OperationViewModel:
             row.system.casefold(), row.device_name.casefold(), row.channel_name.casefold()
         )))
 
+    @staticmethod
+    def _hotplate_rows(
+        device_id: str, device_name: str, system: str, device: OhausGuardian5000,
+    ) -> dict[tuple[str, str], OperationChannelRow]:
+        spec = device.model_spec
+        if spec is None:
+            return {}
+        # The editor range is the lowest of the model rating and any rig or
+        # run ceiling; the driver re-checks all of them on every write.
+        ready = device.status is DeviceStatus.READY
+        quality = "good" if ready else "bad"
+        rows: dict[tuple[str, str], OperationChannelRow] = {}
+
+        def ceiling(rating: float, *limits: float | None) -> float:
+            return min([rating, *(limit for limit in limits if limit is not None)])
+
+        def add(channel: str, name: str, value, unit: str, editor: str = "number",
+                minimum: float | None = None, maximum: float | None = None) -> None:
+            rows[(device_id, channel)] = OperationChannelRow(
+                device_id, device_name, channel, name, value, unit, quality, None,
+                system, ready, editor, minimum, maximum,
+            )
+
+        if spec.heating:
+            add("target_temperature", "Target temperature", device.target_temperature,
+                "degC", minimum=0.0, maximum=ceiling(
+                    spec.maximum_temperature, device.limits.maximum_temperature,
+                    device.run_limits.maximum_temperature))
+            add("heating_enabled", "Heating", device.heating_enabled, "", "boolean")
+        if spec.stirring:
+            add("target_speed", "Target stir speed", device.target_speed, "rpm",
+                minimum=float(spec.minimum_speed), maximum=ceiling(
+                    spec.maximum_speed, device.limits.maximum_speed,
+                    device.run_limits.maximum_speed))
+            add("stirring_enabled", "Stirring", device.stirring_enabled, "", "boolean")
+        mode = device.operating_mode
+        rows[(device_id, "operating_mode_readback")] = OperationChannelRow(
+            device_id, device_name, "operating_mode_readback", "Hotplate mode",
+            None if mode is None else mode.name.replace("_", " ").lower(), "",
+            "bad" if mode is None or mode.name == "ERROR" else "good", None, system,
+        )
+        return rows
+
+    #: Channels this preference covers. Volumetric flow and the totaliser
+    #: are different quantities with their own units and are left alone.
+    _PRESSURE_CHANNELS = frozenset({"absolute_pressure", "pressure_setpoint_absolute"})
+    _FLOW_CHANNELS = frozenset({"mass_flow", "setpoint"})
+
+    def _for_display(self, channel: str, value, unit: str):
+        """Convert one reading into the unit this rig is set to show."""
+
+        if value is None or not isinstance(value, (int, float)) or isinstance(value, bool):
+            return value, unit
+        if channel in self._PRESSURE_CHANNELS:
+            return self._display_units.show_pressure(float(value), unit)
+        if channel in self._FLOW_CHANNELS:
+            return self._display_units.show_flow(float(value), unit)
+        return value, unit
+
     def apply_channel_value(
         self, device_id: str, channel: str, value: float | bool | str
     ) -> OperationActionResult:
         """Apply one editable channel through existing typed commands."""
 
-        if channel in {"pressure_setpoint_absolute", "pressure_setpoint_gauge"}:
-            result = self.manual_control.set_pressure_setpoint(device_id, float(value), "barg" if channel.endswith("gauge") else "bara")
+        if channel == "pressure_setpoint_absolute":
+            # The unit shown on the row is the unit the value is sent in, so a
+            # number can never be separated from what it means.
+            result = self.manual_control.set_pressure_setpoint(
+                device_id, float(value), self._display_units.entry_pressure_unit("bara")
+            )
         elif channel == "resume_pressure_control":
             result = self.manual_control.resume_pressure_control(device_id)
         elif channel == "setpoint":
-            result = self.manual_control.set_mfc_flow(device_id, float(value))
+            device = self._device_manager.get(device_id)
+            unit = ""
+            if isinstance(device, MassFlowController):
+                # A device that is not an MFC is refused by the command
+                # itself, which is where that check belongs.
+                native = device.limits.flow_unit
+                entered = self._display_units.entry_flow_unit(native)
+                unit = "" if entered == native else entered
+            result = self.manual_control.set_mfc_flow(device_id, float(value), unit)
         elif channel == "voltage_setpoint":
             result = self.manual_control.set_power_supply_voltage(device_id, float(value))
         elif channel == "current_limit":
@@ -471,6 +561,14 @@ class OperationViewModel:
             )
         elif channel == "running":
             result = self.manual_control.set_pump_running(device_id, bool(value))
+        elif channel == "target_temperature":
+            result = self.manual_control.set_hotplate_temperature(device_id, float(value))
+        elif channel == "target_speed":
+            result = self.manual_control.set_hotplate_speed(device_id, float(value))
+        elif channel == "heating_enabled":
+            result = self.manual_control.set_hotplate_heating(device_id, bool(value))
+        elif channel == "stirring_enabled":
+            result = self.manual_control.set_hotplate_stirring(device_id, bool(value))
         else:
             return OperationActionResult(False, f"Channel {channel!r} is read-only.")
         return OperationActionResult(
@@ -494,6 +592,13 @@ class OperationViewModel:
             return (("voltage", "Voltage", "V"), ("current", "Current draw", "A"))
         if isinstance(device, MassFlowController):
             return (("mass_flow", "Measured mass flow", device.limits.flow_unit),)
+        if isinstance(device, OhausGuardian5000):
+            capabilities = device.capabilities
+            return (
+                (("temperature", "Plate temperature", "degC"),) if "heating" in capabilities else ()
+            ) + (
+                (("stir_speed", "Stir speed", "rpm"),) if "stirring" in capabilities else ()
+            )
         if self._profile is None:
             return (("measurement", "Measurement", ""),)
         try:
@@ -535,6 +640,7 @@ class OperationViewModel:
             DeviceCapability.TEMPERATURE_SENSOR,
             DeviceCapability.HUMIDITY_SENSOR,
             DeviceCapability.TEMPERATURE_CONTROLLER,
+            DeviceCapability.HOTPLATE_STIRRER,
         }:
             return "Thermal"
         if capability in {
@@ -650,6 +756,10 @@ class OperationViewModel:
     def connect_all(self) -> tuple[OperationActionResult, ...]:
         results: list[OperationActionResult] = []
         for device_id in self._device_manager.device_ids:
+            if self._device_manager.get(device_id).status is not DeviceStatus.DISCONNECTED:
+                # Pressing Connect again must not re-open ports already in use.
+                results.append(OperationActionResult(True, f"{device_id!r} is already connected."))
+                continue
             try:
                 self._device_manager.connect(device_id)
             except Exception as error:

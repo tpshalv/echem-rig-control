@@ -1,8 +1,8 @@
 import json
-import os
 import shutil
 from pathlib import Path
 
+from rig_control.atomic_replace import replace_atomically
 from rig_control.app_settings import AppSettings, AppSettingValue
 
 
@@ -34,7 +34,7 @@ def write_app_settings(
             encoding="utf-8",
             newline="\n",
         )
-        os.replace(temporary, destination)
+        replace_atomically(temporary, destination)
     finally:
         if temporary.exists():
             temporary.unlink()

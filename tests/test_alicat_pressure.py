@@ -12,15 +12,23 @@ from rig_control.devices.alicat.bus import AlicatBus
 from rig_control.devices.alicat.configuration import AlicatMfcConfiguration, AlicatSerialConfiguration
 from rig_control.devices.alicat.pressure import AlicatBackPressureController
 from rig_control.devices.alicat.protocol import AlicatAsciiProtocolClient, AlicatEngineeringUnits, AlicatFrameField, AlicatInstrumentState, AlicatProtocolClient
-from rig_control.devices.alicat.verification import AlicatControlConfiguration, frame_signature, parse_control_configuration
+from rig_control.devices.alicat.verification import AlicatControlConfiguration, parse_control_configuration, verify_role
 from rig_control.devices.manager import DeviceManager
 from rig_control.devices.mass_flow_controller import MassFlowControllerLimits
 from rig_control.devices.pressure_controller import PressurePolicy, absolute_unit_factor
 from rig_control.models import DeviceStatus
 from rig_control.transports.simulated_serial_text import SimulatedSerialTextTransport
 
+from captures import load_capture
+
 
 FRAME = "A Pressure (PSIA)\nTemperature (degC)\nVolumetric flow (CCM)\nMass flow (SCCM)\nSetpoint (PSIA)\nGas"
+
+#: The data-frame table this instrument really reports, which states
+#: each column's precision as well as its unit.
+REAL_FRAME = load_capture(
+    "alicat-mc-2slpm-d-10v22-back-pressure.txt"
+)["C??D*"].replace("C ", "B ")
 
 
 def observed(**changes):
@@ -34,7 +42,7 @@ def configuration(**changes):
         MassFlowControllerLimits(2000, "SCCM"),
         tuple(AlicatFrameField(name) for name in ("absolute_pressure", "gas_temperature", "volumetric_flow", "mass_flow", "setpoint", "gas")),
         AlicatEngineeringUnits("SCCM", "CCM", "psia", "degC", "psia"),
-        is_bpr=True, expected_serial="12345", verified_frame_signature=frame_signature(FRAME),
+        is_bpr=True, expected_serial="12345",
         downstream_valve_confirmed=True, maximum_pressure_bara=6.0,
     ), **changes)
 
@@ -132,8 +140,7 @@ def test_high_mode_is_deliberate_and_still_bounded_by_instrument():
     assert protocol.writes == before
 
 
-@pytest.mark.parametrize("changes", [dict(loop_variable=37), dict(inverse=False), dict(serial_number="wrong"),
-                                    dict(frame_description="changed layout"), dict(setpoint_unit="barg")])
+@pytest.mark.parametrize("changes", [dict(loop_variable=37), dict(inverse=False), dict(setpoint_unit="barg")])
 def test_detected_configuration_change_blocks_every_operating_write(changes):
     controller, protocol = device()
     protocol.observed = observed(**changes)
@@ -143,8 +150,8 @@ def test_detected_configuration_change_blocks_every_operating_write(changes):
     assert not controller.control_ready
 
 
-def test_missing_identity_or_physical_confirmation_does_not_become_ready():
-    for changes in (dict(expected_serial=None), dict(downstream_valve_confirmed=False), dict(verified_frame_signature=None)):
+def test_missing_physical_confirmation_does_not_become_ready():
+    for changes in (dict(downstream_valve_confirmed=False),):
         controller, protocol = device(**changes)
         assert not controller.control_ready
         with pytest.raises(RuntimeError):
@@ -167,7 +174,8 @@ def test_telemetry_includes_pressure_flow_temperature_drive_and_hold():
     assert readings["mass_flow"].value == 100
     assert readings["gas_temperature"].value == 25
     assert readings["absolute_pressure"].unit == "bara"
-    assert readings["gauge_pressure"].value == pytest.approx(readings["absolute_pressure"].value - 1.01325)
+    # Alicat pressure is absolute only; no derived gauge channel is published.
+    assert "gauge_pressure" not in readings
     assert readings["pressure_setpoint_absolute"].unit == "bara"
     assert readings["valve_drive_percent"].value == 20
     assert readings["valve_hold"].value == 0
@@ -190,16 +198,12 @@ def test_global_stop_closes_outlet_and_requires_explicit_resume():
     assert protocol.writes[-1] == ("B", "resume")
 
 
-def test_stop_after_mode_change_still_closes_only_the_identified_outlet():
+def test_stop_after_mode_change_blocks_without_writing():
     controller, protocol = device()
     protocol.observed = observed(loop_variable=37)
-    controller.enter_safe_state()
-    assert protocol.hold
-    protocol.observed = observed(serial_number="replacement")
-    before = list(protocol.writes)
-    with pytest.raises(RuntimeError, match="identity"):
+    with pytest.raises(RuntimeError, match="Saved role does not match"):
         controller.enter_safe_state()
-    assert protocol.writes == before
+    assert protocol.writes == []
 
 
 def test_resume_rejects_existing_overlimit_setpoint_without_releasing_hold():
@@ -227,14 +231,29 @@ def test_central_api_rejects_flow_commands_to_bpr_and_enforces_recipe_ownership(
 
 def test_parse_documented_configuration_and_reject_legacy_or_bad_replies():
     args = ("A", "A 10v05 2023", "A Model: MC-2SLPM-D\nA Serial No: 12345",
-            "A 34 10 PSIA 0 100", "A R20 = 33044", FRAME)
+            "A 34 +0.0000 +160.000 10 PSIA", "A   020 = 42007", FRAME)
     result = parse_control_configuration(*args)
     assert result.inverse and result.loop_variable == 34
     assert result.serial_number == "12345"
-    with pytest.raises(ValueError, match="legacy"):
+    with pytest.raises(ValueError, match="older firmware"):
         parse_control_configuration(args[0], "A 8v24", *args[2:])
     with pytest.raises(ValueError):
-        parse_control_configuration(*args[:3], "B 34 10 PSIA 0 100", *args[4:])
+        parse_control_configuration(*args[:3], "B 34 +0.0000 +160.000 10 PSIA", *args[4:])
+
+
+def test_mode_detection_does_not_require_labelled_identity_fields():
+    result = parse_control_configuration(
+        "A",
+        "A 10v05 2023",
+        "A M00 ALICAT SCIENTIFIC\nA M01 www.alicat.com",
+        "A 34 +0.0000 +160.000 10 PSIA",
+        "A   020 = 42007",
+        FRAME,
+    )
+    assert result.serial_number is None
+    assert result.model is None
+    assert result.detected_role == "bpr"
+    verify_role(result, bpr=True, flow_unit="SCCM", downstream_confirmed=True)
 
 
 def test_ascii_queries_are_read_only_and_9v_uses_pressure_full_scale():
@@ -242,7 +261,7 @@ def test_ascii_queries_are_read_only_and_9v_uses_pressure_full_scale():
     config = configuration()
     protocol = AlicatAsciiProtocolClient(AlicatBus("bus", transport), config.frame_fields, config.engineering_units)
     replies = {"BVE": "B 9v00", "B??M*": "B Model: MC-2SLPM-D\nB Serial No: 12345",
-               "BLR": "B 34 10 PSIA", "BR20": "B 33044", "B??D*": FRAME,
+               "BLR": "B 34 10 PSIA", "BR20": "B   020 = 42007", "B??D*": FRAME,
                "BFPF 2": "B 100 10 PSIA"}
     for command, reply in replies.items():
         transport.queue_response(command, reply)
@@ -250,6 +269,39 @@ def test_ascii_queries_are_read_only_and_9v_uses_pressure_full_scale():
     result = protocol.read_control_configuration("B")
     assert result.maximum_setpoint == 100
     assert transport.requests == tuple(replies)
+
+
+def test_live_mode_check_asks_only_for_the_loop_variable_and_register():
+    transport = SimulatedSerialTextTransport()
+    config = configuration()
+    protocol = AlicatAsciiProtocolClient(AlicatBus("bus", transport), config.frame_fields, config.engineering_units)
+    transport.queue_response("BLR", "B 34 +0.0000 +100.000 10 PSIA")
+    transport.queue_response("BR20", "B   020 = 42007")
+    protocol.connect()
+
+    mode = protocol.read_control_mode("B")
+
+    assert (mode.loop_variable, mode.inverse, mode.detected_role) == (34, True, "bpr")
+    assert mode.maximum_setpoint == 100
+    # No identity, firmware or data-frame query is sent for a live check.
+    assert transport.requests == ("BLR", "BR20")
+
+
+def test_missing_manufacturer_reply_does_not_block_reading_the_configuration():
+    transport = SimulatedSerialTextTransport()
+    config = configuration()
+    protocol = AlicatAsciiProtocolClient(AlicatBus("bus", transport), config.frame_fields, config.engineering_units)
+    transport.queue_response("BVE", "B 10v05")
+    transport.queue_error("B??M*", TimeoutError("no manufacturer reply"))
+    transport.queue_response("BLR", "B 34 +0.0000 +100.000 10 PSIA")
+    transport.queue_response("BR20", "B   020 = 42007")
+    transport.queue_response("B??D*", FRAME)
+    protocol.connect()
+
+    result = protocol.read_control_configuration("B")
+
+    assert result.model is None and result.serial_number is None
+    assert result.detected_role == "bpr"
 
 
 def test_ascii_pressure_write_readback_and_close_resume_commands():
@@ -278,10 +330,13 @@ def test_operation_ui_has_pressure_editors_and_no_flow_editor():
     model = OperationViewModel(manager, PollingService(manager), ExperimentRecorder(), RigControlService(manager), profile_id="test")
     rows = {r.channel: r for r in model.channel_rows()}
     assert rows["pressure_setpoint_absolute"].writable
-    assert rows["pressure_setpoint_gauge"].unit == "barg"
+    assert rows["pressure_setpoint_absolute"].unit == "bara"
+    # The gauge entry and derived gauge reading have been removed.
+    assert "pressure_setpoint_gauge" not in rows
+    assert "atmospheric_reference" not in rows
     assert "OVERRIDE" in rows["pressure_ceiling"].channel_name
     assert "setpoint" not in rows
-    assert model.apply_channel_value("outlet", "pressure_setpoint_gauge", 0.5).succeeded
+    assert model.apply_channel_value("outlet", "pressure_setpoint_absolute", 1.5).succeeded
     assert not model.apply_channel_value("outlet", "setpoint", 50).succeeded
 
 
@@ -297,3 +352,170 @@ def test_settings_persist_pressure_policy_without_enabling_override_by_value_alo
     updated = replace(updated, values=dict(values, pressure_high_pressure_mode=True))
     write_app_settings(updated, path)
     assert load_app_settings(path).pressure_policy.maximum_pa == 500000
+
+
+@pytest.mark.parametrize("value,inverse", [
+    # From Alicat's "change your pressure controller to inverse control mode"
+    # tutorial: register 20 reads 276, and inverse control is enabled by
+    # adding 32768 to give 33044. Other bits differ between instruments, so
+    # only bit 32768 may be read.
+    (276, False),
+    (33044, True),
+    (9239, False),      # As read from the bench MC-2SLPM-D units.
+    (9239 + 32768, True),
+])
+def test_inverse_control_is_read_from_bit_32768_alone(value, inverse):
+    from rig_control.devices.alicat.verification import inverse_control_enabled
+
+    assert inverse_control_enabled("A", f"A   020 = {value}") is inverse
+
+
+def test_display_units_change_what_is_shown_and_what_a_typed_value_means():
+    """A preference must convert both directions, and never change control."""
+
+    from rig_control.polling import PollingService
+    from rig_control.experiment_recording import ExperimentRecorder
+    from rig_control.display_units import DisplayUnits
+    from rig_control.ui.operation.model import OperationViewModel
+
+    controller, protocol = device()
+    manager = DeviceManager()
+    manager.register(controller)
+    model = OperationViewModel(
+        manager, PollingService(manager), ExperimentRecorder(),
+        RigControlService(manager), profile_id="test",
+        display_units=DisplayUnits(pressure="psia"),
+    )
+
+    rows = {r.channel: r for r in model.channel_rows()}
+    setpoint = rows["pressure_setpoint_absolute"]
+    assert setpoint.unit == "psia"
+    assert "psia" in setpoint.channel_name
+    # The instrument's own ceiling, shown in the chosen unit.
+    assert rows["pressure_ceiling"].unit == "psia"
+    assert rows["pressure_ceiling"].value == pytest.approx(2.5 * 100_000 / 6894.757293168)
+
+    assert model.apply_channel_value("outlet", "pressure_setpoint_absolute", 29).succeeded
+
+    # 29 psia is about 2 bara: sent in psia, which is this instrument's own
+    # unit, and well under the 2.5 bara ceiling.
+    assert protocol.writes[-1][1] == "pressure"
+    assert protocol.writes[-1][2] == pytest.approx(29, abs=0.001)
+
+
+def test_the_pressure_ceiling_still_applies_in_the_displayed_unit():
+    from rig_control.polling import PollingService
+    from rig_control.experiment_recording import ExperimentRecorder
+    from rig_control.display_units import DisplayUnits
+    from rig_control.ui.operation.model import OperationViewModel
+
+    controller, protocol = device()
+    manager = DeviceManager()
+    manager.register(controller)
+    model = OperationViewModel(
+        manager, PollingService(manager), ExperimentRecorder(),
+        RigControlService(manager), profile_id="test",
+        display_units=DisplayUnits(pressure="psia"),
+    )
+
+    # 40 psia is about 2.76 bara, over the 2.5 bara ceiling.
+    result = model.apply_channel_value("outlet", "pressure_setpoint_absolute", 40)
+
+    assert not result.succeeded
+    assert not protocol.writes
+
+
+def test_a_setpoint_rounded_to_the_instrument_s_own_precision_is_accepted():
+    """The failure seen on the bench: 1 bara is 14.5038 psia, and this
+    instrument reports its setpoint to two decimal places."""
+
+    controller, protocol = device()
+
+    protocol.observed = observed(frame_description=REAL_FRAME)
+    controller.verify_control(full=True)
+
+    # Store the setpoint the way the instrument does: to hundredths of a psi.
+    original = type(protocol).set_pressure_setpoint
+
+    def quantised(self, address, value):
+        original(self, address, value)
+        self.setpoint = round(value, 2) + 0.005  # rounded, and then some
+
+    type(protocol).set_pressure_setpoint = quantised
+    try:
+        controller.set_pressure_setpoint(1.0, "bara")
+    finally:
+        type(protocol).set_pressure_setpoint = original
+
+    assert controller.pressure_setpoint_pa == pytest.approx(100_000, rel=1e-3)
+
+
+def test_the_tolerance_comes_from_the_frame_the_instrument_reports():
+    controller, protocol = device()
+
+    # The fixture's frame states no precision, so the configured value stands.
+    assert controller.setpoint_tolerance() == pytest.approx(0.001)
+
+    protocol.observed = observed(frame_description=REAL_FRAME)
+    controller.verify_control(full=True)
+
+    # Two decimal places in PSIA: the instrument cannot express finer.
+    assert controller.setpoint_tolerance() == pytest.approx(0.01)
+
+
+def test_a_setpoint_the_instrument_did_not_take_is_still_rejected():
+    controller, protocol = device()
+    protocol.accept = False
+
+    with pytest.raises(RuntimeError, match="not accepted"):
+        controller.set_pressure_setpoint(2.0)
+
+    # The message names both values and the tolerance they were compared at.
+    assert len(protocol.writes) == 1
+    assert controller.status is DeviceStatus.FAULTED
+
+
+def test_a_setpoint_at_the_ceiling_is_not_faulted_by_the_instrument_s_rounding():
+    """A request at exactly the ceiling may read back a fraction of one
+    reported digit above it. That must not fault an accepted setpoint."""
+
+    controller, protocol = device(PressurePolicy(True, 2.5))
+    protocol.observed = observed(frame_description=REAL_FRAME)
+    controller.verify_control(full=True)
+    original = type(protocol).set_pressure_setpoint
+
+    def rounds_up(self, address, value):
+        original(self, address, value)
+        self.setpoint = value + 0.01  # one reported digit, in psia
+
+    type(protocol).set_pressure_setpoint = rounds_up
+    try:
+        controller.set_pressure_setpoint(2.5, "bara")
+    finally:
+        type(protocol).set_pressure_setpoint = original
+
+    assert controller.status is not DeviceStatus.FAULTED
+    # Accepted, and above the ceiling by no more than the one reported digit
+    # of 0.01 psia that the instrument rounded by.
+    one_digit_pa = 0.01 * absolute_unit_factor("psia")
+    assert 250_000 < controller.pressure_setpoint_pa <= 250_000 + one_digit_pa
+
+
+def test_a_setpoint_clamped_far_above_the_ceiling_is_still_caught():
+    controller, protocol = device(PressurePolicy(True, 2.5))
+    protocol.observed = observed(frame_description=REAL_FRAME)
+    controller.verify_control(full=True)
+    original = type(protocol).set_pressure_setpoint
+
+    def clamps_to_full_scale(self, address, value):
+        original(self, address, value)
+        self.setpoint = 100.0  # the instrument's own range, not what was asked
+
+    type(protocol).set_pressure_setpoint = clamps_to_full_scale
+    try:
+        with pytest.raises(RuntimeError, match="not accepted"):
+            controller.set_pressure_setpoint(2.0, "bara")
+    finally:
+        type(protocol).set_pressure_setpoint = original
+
+    assert controller.status is DeviceStatus.FAULTED

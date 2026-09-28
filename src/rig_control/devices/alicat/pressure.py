@@ -4,6 +4,7 @@ from dataclasses import replace
 from math import isclose
 from decimal import Decimal, localcontext, ROUND_FLOOR
 
+from rig_control.devices.alicat.setup_report import AlicatSetupReport
 from rig_control.devices.alicat.configuration import AlicatMfcConfiguration
 from rig_control.devices.alicat.control_support import AlicatVerifiedControl
 from rig_control.devices.alicat.measurements import state_measurements
@@ -14,7 +15,9 @@ from rig_control.models import DeviceStatus, Measurement
 from rig_control.read_retry import retry_read
 
 
-class AlicatBackPressureController(AlicatVerifiedControl, PressureController):
+class AlicatBackPressureController(
+    AlicatSetupReport, AlicatVerifiedControl, PressureController
+):
     def __init__(self, configuration: AlicatMfcConfiguration, protocol: AlicatProtocolClient,
                  *, pressure_policy: PressurePolicy | None = None, event_sink=None) -> None:
         if not configuration.is_bpr:
@@ -51,7 +54,7 @@ class AlicatBackPressureController(AlicatVerifiedControl, PressureController):
     @property
     def maximum_pressure_pa(self):
         maximum = min(self._configuration.maximum_pressure_bara * 100_000, self.pressure_policy.maximum_pa)
-        observed = self.control_configuration
+        observed = self.control_mode
         if observed is not None and observed.loop_variable == 34 and observed.maximum_setpoint is not None:
             try:
                 maximum = min(maximum, observed.maximum_setpoint * absolute_unit_factor(observed.setpoint_unit))
@@ -76,17 +79,19 @@ class AlicatBackPressureController(AlicatVerifiedControl, PressureController):
         self._protocol.disconnect()
         self._status = DeviceStatus.DISCONNECTED
         self.control_ready = False
+        self.control_configuration = None
+        self.control_mode = None
         self._state = None
         self.pressure_setpoint_pa = None
         self.valve_hold = None
-        self.verification_message = "Disconnected; verification required"
+        self.verification_message = "Disconnected; the control mode is re-read on connection"
 
     def _require_verified(self, *, allow_faulted=False):
         readable = {DeviceStatus.READY, DeviceStatus.FAULTED} if allow_faulted else {DeviceStatus.READY}
         if self.status not in readable:
             raise RuntimeError("Alicat BPR is not connected and ready")
         self.verify_control()
-        observed = self.control_configuration
+        observed = self.control_mode
         # Bounds come from LR, or the read-only FPF sensor range on 9v firmware.
         if observed.maximum_setpoint is None or observed.minimum_setpoint is None:
             self.control_ready = False
@@ -118,10 +123,23 @@ class AlicatBackPressureController(AlicatVerifiedControl, PressureController):
         try:
             self._protocol.set_pressure_setpoint(self.unit_address, native)
             self.verify_control()
-            confirmed = self._read_pressure_setpoint(self.control_configuration)
-            if not isclose(confirmed, native, rel_tol=0, abs_tol=self._configuration.setpoint_tolerance):
-                raise RuntimeError(f"Pressure setpoint not accepted: requested {native:g}, read back {confirmed:g}")
-            self.pressure_policy.validate(self.pressure_setpoint_pa, self.maximum_pressure_pa)
+            confirmed = self._read_pressure_setpoint(self.control_mode)
+            tolerance = self.setpoint_tolerance()
+            if not isclose(confirmed, native, rel_tol=0, abs_tol=tolerance):
+                raise RuntimeError(
+                    f"Pressure setpoint not accepted: requested {native:g} "
+                    f"{observed.setpoint_unit}, read back {confirmed:g} "
+                    f"(tolerance {tolerance:g})"
+                )
+            # The instrument reports its setpoint to a fixed precision, so a
+            # request at the ceiling can come back a fraction of one digit
+            # above it. Allow exactly that much and no more: the request
+            # itself was already validated against the ceiling above, and a
+            # clamped or ignored setpoint differs by far more than one digit.
+            self.pressure_policy.validate(
+                self.pressure_setpoint_pa - tolerance * factor,
+                self.maximum_pressure_pa,
+            )
         except Exception:
             self.control_ready = False
             self._status = DeviceStatus.FAULTED
@@ -140,8 +158,6 @@ class AlicatBackPressureController(AlicatVerifiedControl, PressureController):
                     if item.channel == "absolute_pressure" else item for item in readings]
         readings.append(DeviceMeasurement("pressure_setpoint_absolute", Measurement(
             self.pressure_setpoint_pa / 100_000, "bara", state.timestamp, state.quality)))
-        readings.append(DeviceMeasurement("gauge_pressure", Measurement(
-            pressure_pa / 100_000 - self.pressure_policy.atmospheric_reference_bara, "barg", state.timestamp, state.quality)))
         readings.append(DeviceMeasurement("valve_hold", Measurement(
             float(self.valve_hold), "", state.timestamp, state.quality)))
         return tuple(readings)
@@ -149,11 +165,17 @@ class AlicatBackPressureController(AlicatVerifiedControl, PressureController):
     def enter_safe_state(self):
         if self.status is DeviceStatus.DISCONNECTED:
             return
-        # A close command remains appropriate after a mode mismatch, but never
-        # send it to an unidentified/replaced instrument on the same address.
-        observed = self._protocol.read_control_configuration(self.unit_address)
-        if not self._configuration.expected_serial or observed.serial_number != self._configuration.expected_serial:
-            raise RuntimeError("BPR shutdown blocked: serial identity mismatch")
+        # Confirm the live role before closing the valve. The role check uses
+        # the instrument's control variable and inverse-control register; a
+        # serial-number match is optional and must not prevent a safe close.
+        observed = self._protocol.read_control_mode(self.unit_address)
+        from rig_control.devices.alicat.verification import verify_role
+        try:
+            verify_role(observed, bpr=True,
+                        flow_unit=self._configuration.limits.flow_unit,
+                        downstream_confirmed=self._configuration.downstream_valve_confirmed)
+        except ValueError as error:
+            raise RuntimeError(f"BPR shutdown blocked: {error}") from error
         self._state = self._protocol.hold_closed(self.unit_address)
         self.valve_hold = True
 

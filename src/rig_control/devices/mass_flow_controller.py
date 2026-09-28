@@ -10,6 +10,29 @@ from rig_control.devices.measurement_source import (
 from rig_control.models import Measurement
 
 
+def mass_flow_unit_factor(unit: str) -> float:
+    """Return how many SCCM one of this unit is.
+
+    Only units this software can convert exactly are listed. Anything else
+    raises, so a flow is never sent to an instrument under a unit that was
+    assumed rather than known.
+    """
+
+    factors = {"sccm": 1.0, "slpm": 1000.0}
+    try:
+        return factors[unit.strip().casefold()]
+    except (AttributeError, KeyError) as error:
+        raise ValueError(f"Unsupported mass-flow unit {unit!r}") from error
+
+
+def convert_mass_flow(value: float, from_unit: str, to_unit: str) -> float:
+    """Convert a mass-flow rate between two known units."""
+
+    if from_unit.strip().casefold() == to_unit.strip().casefold():
+        return float(value)
+    return float(value) * mass_flow_unit_factor(from_unit) / mass_flow_unit_factor(to_unit)
+
+
 @dataclass(frozen=True, slots=True)
 class MassFlowControllerLimits:
     """Configured operating limits for one mass flow controller."""
@@ -51,8 +74,14 @@ class MassFlowController(Device, MeasurementSource):
         """Return the requested flow setpoint."""
 
     @abstractmethod
-    def set_flow_setpoint(self, flow: float) -> None:
-        """Set the requested mass-flow setpoint."""
+    def set_flow_setpoint(self, flow: float, unit: str = "") -> None:
+        """Set the requested mass-flow setpoint.
+
+        The unit travels with the value: an empty unit means the device's own
+        configured unit, and any other unit is converted before use. A unit
+        that cannot be converted is refused rather than assumed, so a value
+        entered as SCCM can never be acted on as SLPM.
+        """
 
     @abstractmethod
     def measure_flow(self) -> Measurement:

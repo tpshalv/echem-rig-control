@@ -115,6 +115,35 @@ def test_crlf_and_software_flow_control_for_guardian() -> None:
         transport.request("MODEL")
 
 
+class QueuedLinesPort(FakeSerialPort):
+    def __init__(self, lines: list[bytes]) -> None:
+        super().__init__()
+        self.lines = lines
+
+    def readline(self) -> bytes:
+        return self.lines.pop(0) if self.lines else b""
+
+
+def test_a_padding_blank_line_is_not_taken_as_the_next_reply() -> None:
+    # Captured from a Guardian G52: SERIAL's reply carries an extra CRLF.
+    port = QueuedLinesPort([b"SERIAL A 0110109779810031\r\n", b"\r\n",
+                            b"VERSION A V1.01\r\n"])
+    transport = PySerialTextTransport("COM9", 9600, 2, line_ending="\r\n",
+                                      serial_factory=RecordingFactory(port))
+    transport.open()
+    assert transport.request("SERIAL") == "SERIAL A 0110109779810031"
+    assert transport.request("VERSION") == "VERSION A V1.01"
+
+
+def test_only_blank_lines_is_reported_as_timeout() -> None:
+    port = QueuedLinesPort([b"\r\n"])
+    transport = PySerialTextTransport("COM9", 9600, 2, line_ending="\r\n",
+                                      serial_factory=RecordingFactory(port))
+    transport.open()
+    with pytest.raises(TimeoutError):
+        transport.request("VERSION")
+
+
 def test_request_requires_open_port() -> None:
     transport, _, _ = make_transport()
 
@@ -129,3 +158,83 @@ def test_invalid_request_is_rejected(message: str) -> None:
 
     with pytest.raises(ValueError):
         transport.request(message)
+
+
+class CarriageReturnPort:
+    """A device that ends every reply with a carriage return, as Alicats do.
+
+    read_until() returns at the requested terminator; readline() would block
+    until the read timeout because there is no line feed to find.
+    """
+
+    def __init__(self, replies: list[bytes]) -> None:
+        self.replies = replies
+        self.is_open = True
+        self.written: list[bytes] = []
+        self.terminators: list[bytes] = []
+        self.readline_calls = 0
+
+    def write(self, data: bytes) -> int:
+        self.written.append(data)
+        return len(data)
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.is_open = False
+
+    def read_until(self, expected: bytes) -> bytes:
+        self.terminators.append(expected)
+        if not self.replies:
+            return b""
+        reply = self.replies.pop(0)
+        head, separator, _ = reply.partition(expected)
+        return head + separator if separator else reply
+
+    def readline(self) -> bytes:
+        # Standing in for a blocking wait on a line feed that never arrives.
+        self.readline_calls += 1
+        return b""
+
+
+def test_a_carriage_return_reply_is_read_without_waiting_for_a_line_feed():
+    port = CarriageReturnPort([b"A +014.81 +021.13 +0.0000 SLPM\r"])
+    transport = PySerialTextTransport(
+        "COM5", 19200, 1.0, serial_factory=lambda **_: port
+    )
+    transport.open()
+
+    reply = transport.request("A")
+
+    assert reply == "A +014.81 +021.13 +0.0000 SLPM"
+    # The terminator asked for is the one this device was configured with,
+    # and readline() -- which would have waited out the timeout -- is unused.
+    assert port.terminators == [b"\r"]
+    assert port.readline_calls == 0
+
+
+def test_a_crlf_device_still_reads_whole_lines():
+    port = CarriageReturnPort([b"12.5 g\r\n"])
+    transport = PySerialTextTransport(
+        "COM5", 19200, 1.0, serial_factory=lambda **_: port, line_ending="\r\n"
+    )
+    transport.open()
+
+    assert transport.request("IP") == "12.5 g"
+    assert port.terminators == [b"\r\n"]
+
+
+def test_a_port_without_read_until_still_works():
+    class OlderPort(CarriageReturnPort):
+        read_until = None
+
+    port = OlderPort([])
+    transport = PySerialTextTransport(
+        "COM5", 19200, 1.0, serial_factory=lambda **_: port
+    )
+    transport.open()
+
+    with pytest.raises(TimeoutError):
+        transport.request("A")
+    assert port.readline_calls == 1

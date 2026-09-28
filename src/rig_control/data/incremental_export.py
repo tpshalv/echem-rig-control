@@ -16,6 +16,7 @@ from pathlib import Path
 import os
 import sqlite3
 
+from rig_control.atomic_replace import replace_atomically
 from rig_control.data.export import LAST_VALUE_CHANNELS, _channel_labels
 
 
@@ -147,7 +148,7 @@ class IncrementalCsvExporter:
                     writer.writerows(self.rows(connection, signals, through=through))
                     stream.flush()
                     os.fsync(stream.fileno())
-                temporary.replace(self.path)
+                replace_atomically(temporary, self.path)
             elif through is not None and (previous is None or through > previous):
                 with self.path.open("a", encoding="utf-8", newline="") as stream:
                     csv.writer(stream).writerows(

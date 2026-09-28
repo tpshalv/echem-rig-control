@@ -24,13 +24,44 @@ status parser, polling and recording path, but presents pressure controls
 instead of a flow setpoint control.
 
 The application is deliberately **read-only with respect to Alicat control
-configuration**.  It reads firmware, identity, loop/range, inverse-control
-register and data-frame description, then compares them with the explicitly
-commissioned device role, serial number and frame signature.  An outlet BPR
-also requires an explicit record that its valve is downstream.  A mismatch
-or an uncommissioned controller remains readable for diagnosis but blocks
-setpoint and resume commands.  The application never sends a command that
-selects mass-flow versus pressure control or enables inverse control.
+configuration**.  The live loop-control variable and register 20 inverse bit
+are authoritative for distinguishing an MFC from a BPR: mass-flow/forward is
+MFC, while pressure/inverse is BPR.  Model and serial number are retained as
+useful information but are not prerequisites for role detection, and a
+failed or unusual manufacturer query never prevents it.  The application
+never sends a command that selects mass-flow versus pressure control or
+enables inverse control.
+
+The role is therefore **detected, not chosen**.  Adding a device scans the
+selected port, reads each responding instrument's configuration, and assigns
+the role automatically; the data-frame layout and units come from the
+instrument's own readbacks, with the setpoint unit from LR taken as
+authoritative and the saved frame confirmed against a live setpoint readback
+before anything is stored.  There is no separate verification or
+commissioning screen.  A controller whose LR/R20 query fails is never
+assumed to be a meter or an MFC: only an instrument whose own data frame has
+no setpoint column is recorded as a meter, and anything else is reported as
+an unreadable configuration that the operator can retry.
+
+Adding a detected BPR shows one hardware warning: the software cannot detect
+whether the physical valve position and plumbing are correct.  The operator's
+acknowledgement is stored with that installation, so ordinary reconnects do
+not ask again.  Devices saved before this was stored can record it once from
+Device Setup.
+
+Every connection and readiness check re-reads the live control mode.  If a
+saved role no longer matches the instrument, the mismatch is reported and
+setpoint, resume and hold commands are blocked; the role is never silently
+reassigned.  Ordinary measurement polling re-reads only the loop variable and
+register 20, not the full identity and data-frame sequence, which belongs to
+setup.
+
+The current pressure-control adapter accepts an absolute-pressure control
+loop (loop variable 34) only.  Alicat pressure here is absolute, so the
+operation UI offers one absolute setpoint and no derived gauge reading or
+gauge entry for this device.  A native gauge or differential control loop,
+or a separate gauge sensor, would need its own unit mapping before being
+enabled.
 
 Pressure setpoints require an explicit absolute or gauge unit.  They are
 converted to absolute pressure before validation.  The ordinary software
@@ -40,8 +71,7 @@ controller's verified range and commissioned installed-device ceiling still
 apply.  The UI and recorded context clearly state when this override is in
 effect.  This is an operating guard only, not a pressure-protection system.
 
-Polling records absolute pressure, derived gauge pressure using the saved
-atmospheric reference, pressure setpoint, mass and volumetric flow,
+Polling records absolute pressure, pressure setpoint, mass and volumetric flow,
 temperature, totalizer where configured, valve drive where present, and
 valve-hold state.
 
@@ -66,9 +96,19 @@ present.
 
 ## Verification boundary
 
-The serial query and parser behaviour are covered by protocol-contract tests,
-including the firmware-9 full-scale fallback.  Before live operation, the
-commissioning screen must be used with each actual MC, and the returned
-firmware, loop/range, inverse flag, identity, data frame and hold/release
-behaviour must be confirmed against that unit's Alicat documentation and
-installed plumbing.
+The serial query and parser behaviour are covered by protocol-contract
+tests, including the firmware-9 full-scale fallback, and the complete add
+path is covered end to end: detected MFC, detected BPR with its single
+acknowledgement, detected meter, unreadable configuration, missing identity
+labels and saved-role mismatch.  These are contract tests against documented
+reply shapes, not captures from commissioned hardware.
+
+Two things remain to be confirmed against a real instrument: the exact text
+of the `??D*` data-frame table, which is parsed tolerantly and falls back to
+the documented default order, and the hold/release behaviour.  When
+pressure/inverse mode is detected, the UI warns that it cannot verify the
+physical valve position or plumbing; the operator acknowledges the
+downstream installation once.  A future hardware change must add a properly rated
+pressure-relief device or rupture disc protecting the lowest-rated pressurised
+component; this remains an open hardware action and is not represented as
+present by the software.

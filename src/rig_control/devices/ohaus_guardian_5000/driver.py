@@ -6,7 +6,7 @@ from rig_control.devices.ohaus_guardian_5000.configuration import (
     MODEL_SPECS, GuardianLimits, ModelSpec, finite_number, normalize_model,
 )
 from rig_control.devices.ohaus_guardian_5000.protocol import (
-    GuardianIdentity, GuardianProtocol, GuardianProtocolError, OperatingMode,
+    ERROR_MEANINGS, GuardianIdentity, GuardianProtocol, GuardianProtocolError, OperatingMode,
     parse_temperatures, parse_timer,
 )
 from rig_control.models import DeviceStatus, Measurement
@@ -224,13 +224,25 @@ class OhausGuardian5000(Device, MeasurementSource):
         with self._lock:
             self._set_target("TARGET_SPEED", rpm, "stirring")
 
+    def _instrument_error(self) -> RuntimeError:
+        # MODE 99 says only that a fault exists; PARAM 0 says which one, so the
+        # code reaches the event log and the run's report. A failed readback
+        # must not hide the fault itself.
+        try:
+            code = self._protocol.error_code()
+            meaning = ERROR_MEANINGS.get(code)
+            detail = f"error code {code}" + (f": {meaning}" if meaning else "")
+        except Exception as error:
+            detail = f"error code unavailable: {type(error).__name__}: {error}"
+        return RuntimeError(f"Guardian reports an instrument error ({detail})")
+
     def _switch(self, capability: str, enabled: bool) -> None:
         with self._lock:
             self._require_connected(capability)
             if enabled:
                 self.refresh_state()  # Check front-panel changes against all limits.
                 if self._mode is OperatingMode.ERROR:
-                    raise RuntimeError("Guardian reports an instrument error")
+                    raise self._instrument_error()
             command = ("START_" if enabled else "STOP_") + ("HEAT" if capability == "heating" else "STIR")
             try:
                 self._protocol.write(command)
@@ -274,7 +286,7 @@ class OhausGuardian5000(Device, MeasurementSource):
             try:
                 self.refresh_state()
                 if self._mode is OperatingMode.ERROR:
-                    raise RuntimeError("Guardian reports an instrument error")
+                    raise self._instrument_error()
                 readings = []
                 if spec.heating:
                     plate, probe = parse_temperatures(self._protocol.query("MEASURED_TEMPERATURE"))

@@ -14,7 +14,8 @@ Section 6, EN-19/20 defines the protocol; EN-25/26 defines the model ratings.
 
 Model discovery uses `MODEL`, not the profile's expected model. Case,
 surrounding whitespace, K1 kit suffixes and 120V/230V region descriptions are
-normalised; unknown models are rejected before any control writes. G51 models
+normalised. A new e-G52HSRDA was observed to answer `MODEL` with
+`e-G52HSRTM`, which is mapped to the HSRDA ratings. Other unknown models are rejected before any control writes. G51 models
 are not supported. Hardware specifications are immutable and independent of
 optional rig ceilings (`GuardianLimits`) and separately assigned run ceilings
 (`set_run_limits`). Neither ceiling can override the detected hardware rating.
@@ -55,8 +56,10 @@ One role owns one serial connection, including single-function models. The
 driver provides `Device`, `MeasurementSource` and `SafeStateCapable`; existing
 polling and recording collect `temperature` (plate), optional
 `probe_temperature`, and `stir_speed`. Channels are emitted only for supported
-functions. Controls are driver methods; no new device-setup wizard or GUI
-controls are introduced. Run ceilings must be set by the calling workflow;
+functions. The Operation screen (Thermal) shows those readings plus target
+temperature, target stir speed, heating and stirring on/off, and the mode
+readback; edits go through `SetHotplate*` control commands, so the driver's
+model, rig and run ceilings still apply. Run ceilings must be set by the calling workflow;
 they are not inferred from unrelated PSU run limits.
 
 Implemented commands: `MODEL`, `SERIAL`, `VERSION`, `MODE`,
@@ -71,7 +74,11 @@ Start commands recheck targets against all limits. Set commands require an
 acknowledgement and matching readback; stop commands require MODE confirmation.
 Safe state and disconnect attempt both supported stop commands even when the
 first fails. Failure to confirm a stop is reported, never treated as success.
-MODE 99 leaves heating/stirring state unknown and prevents starts. Serial loss
+MODE 99 leaves heating/stirring state unknown and prevents starts; the
+resulting polling or start failure carries the `PARAM 0` error code and its
+OHAUS meaning (`ERROR_MEANINGS` in `protocol.py`; there is no E6), or why it
+could not be read), so the code reaches the event log and the run's
+`events.journal.jsonl`. Serial loss
 cannot guarantee a physical shutdown; the documented protocol has no watchdog.
 
 ## Physical verification still required
@@ -80,7 +87,9 @@ The official manual gives command names, acknowledgement syntax and parameter
 descriptions, but no complete query-reply transcripts. Tests use explicit
 fixtures, not captured hardware traffic. Verify these on the e-G52HSRDA:
 
-- Queries return one CRLF line, either a bare value or a command-prefixed value;
+- Queries return one CRLF line: a bare value, `<command> <value>`, or
+  `<command> A <value>` (the form observed on hardware for every query;
+  `SERIAL` also appends a blank CRLF line, which the transport skips);
   writes return `<command> A` and rejection is `L`. Separate acknowledgement
   lines, units, or other layouts are rejected rather than guessed.
 - `MEASURED_TEMPERATURE` returns plate first and optional probe second, separated
@@ -88,7 +97,8 @@ fixtures, not captured hardware traffic. Verify these on the e-G52HSRDA:
   does not specify their ordering or delimiters. Verify ordering against the
   display before relying on plate/probe labels in recorded data.
 - `PARAM 0` is parsed as the documented eight comma-separated fields with an
-  optional trailing comma. The last field is assumed to be `0` for no error,
+  optional trailing comma. Confirmed on hardware (idle, no fault): the reply is
+  bare, without the `PARAM A` prefix, e.g. `00:00:00,1,0,30.0,23.0,300,0,0,`. The last field is assumed to be `0` for no error,
   `E1`-`E5`, `E7`-`E10`, or `AC Err`. Probe-mode dump layout and error encoding
   need confirmation; this optional readback is not required for normal polling.
 - Temperature targets use documented 0.5 degC increments. Nonnegative targets

@@ -17,6 +17,22 @@ class GuardianProtocolError(ValueError):
     pass
 
 
+# OHAUS error table. There is no E6. 'N/A' (no power, missing or blown fuse)
+# cannot be reported over serial, so it is not listed.
+ERROR_MEANINGS = {
+    "E1": "Plate RTD disconnected",
+    "E2": "Plate RTD error",
+    "E3": "Stir error",
+    "E4": "Probe RTD disconnected",
+    "E5": "Probe RTD error",
+    "E7": "User probe error: external probe connected while heating is on",
+    "E8": "Plate over temperature",
+    "E9": "Heating not working",
+    "E10": "Triac fault",
+    "AC Err": "Mains frequency out of range (40-55 Hz for 50 Hz rating, 55-70 Hz for 60 Hz)",
+}
+
+
 class OperatingMode(IntEnum):
     IDLE = 0
     HEATING_PLATE = 1
@@ -86,6 +102,9 @@ class GuardianProtocol:
             raise GuardianProtocolError(f"Instrument rejected {command}")
         if response.startswith(command + " "):
             response = response[len(command) + 1:].strip()
+        # Hardware (e-G52, MODEL query) replies '<command> A <value>'.
+        if response.startswith("A "):
+            response = response[2:].strip()
         if not response or response == "A":
             raise GuardianProtocolError(f"Missing value for {command}")
         return response
@@ -114,6 +133,6 @@ class GuardianProtocol:
             raise GuardianProtocolError("Expected eight comma-separated PARAM fields")
         parse_timer(fields[0].strip())
         code = fields[-1].strip()
-        if not re.fullmatch(r"0|E(?:[1-5]|[7-9]|10)|AC Err", code):
+        if code != "0" and code not in ERROR_MEANINGS:
             raise GuardianProtocolError(f"Unrecognised error code: {code!r}")
         return code

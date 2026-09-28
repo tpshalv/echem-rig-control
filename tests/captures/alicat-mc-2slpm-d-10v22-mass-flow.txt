@@ -1,0 +1,14 @@
+# Alicat MC-2SLPM-D, serial 539144, firmware 10v22.0-R24, address A.
+# Captured 2026-09-25 from the bench bus on COM5 at 19200 baud.
+# Configuration: mass-flow control, forward regulation (as delivered).
+# Expected detection: MFC, 0-2 SLPM.
+
+A          -> 'A +014.81 +021.13 +0.0000 +0.0000 +0.0000 +0000.000    CO2'   (status frame (polling reply for this address))
+AVE        -> 'A   10v22.0-R24 Apr 29 2025,10:58:06'   (firmware version)
+A??M*      -> 'A  M00 ALICAT SCIENTIFIC\rA  M01 www.alicat.com\rA  M02 Ph   520-290-6060\rA  M03 info@alicat.com\rA  M04 Model Number MC-2SLPM-D\rA  M05 Serial Number 539144\rA  M06 Date Manufactured 06/23/2025\rA  M07 Date Calibrated   06/23/2025\rA  M08 Calibrated By     TM\rA  M09 Software Revision 10v22.0-R24'   (manufacturer/identity table)
+A??D*      -> 'A D00 ID_ NAME______________________ TYPE_______ WIDTH NOTES___________________\rA D01 700 Unit ID                    string          1                         \rA D02 002 Abs Press                  s decimal     7/2 010 02 PSIA             \rA D03 003 Flow Temp                  s decimal     7/2 002 02 `C               \rA D04 004 Volu Flow                  s decimal     7/4 007 02 LPM              \rA D05 005 Mass Flow                  s decimal     7/4 007 02 SLPM             \rA D06 037 Mass Flow Setpt            s decimal     7/4 007 02 SLPM             \rA D07 009 Mass Total 1               s decimal     9/3 004 02 SL               \rA D08 703 Gas                        string          6                         \rA D09 701 *Error                     string          3 ADC                     \rA D10 702 *Status                    string          3 HLD                     '   (data-frame description (column order and units))
+ALR        -> 'A 37 +0.0000 +2.0000 7 SLPM'   (loop control variable, units and range)
+AR20       -> 'A   020 = 9239'   (register 20 (bit 32768 = inverse control))
+AR122      -> 'A   122 = 37'   (register 122 (control point on some firmware))
+ALS        -> 'A +0.0000 +0.0000 7 SLPM'   (current setpoint and its units)
+AFPF 2     -> 'A +160.00 10 PSIA'   (absolute-pressure full scale)

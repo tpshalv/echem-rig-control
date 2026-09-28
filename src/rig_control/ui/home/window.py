@@ -4,6 +4,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+from rig_control.build_stamp import build_stamp
 from rig_control.app_paths import default_selection_path
 from rig_control.app_selection import load_app_selection
 from rig_control.ui.common.theme import SECTION_FONT, TITLE_FONT, apply_blueprint_theme
@@ -38,7 +39,10 @@ class HomeWindow:
         self._operation_close: Callable[[], None] | None = None
         self._operation_force_close: Callable[[], None] | None = None
         self._diagnostics_close: Callable[[], None] | None = None
-        root.title("Echem Rig Control")
+        stamp = build_stamp()
+        root.title(
+            "Echem Rig Control" + (f"  -  build {stamp}" if stamp else "")
+        )
         root.geometry("1100x620")
         root.minsize(900, 520)
         root.columnconfigure(0, weight=1)
@@ -174,6 +178,7 @@ class HomeWindow:
             profile_id=session.profile.profile_id,
             profile=session.profile,
             history_limit=session.settings.trend_history_readings,
+            display_units=session.settings.display_units,
             power_supply_safety=PowerSupplyManualSafety(
                 high_current_mode=session.settings.power_supply_high_current_mode,
                 wiring_current_ceiling_amps=(

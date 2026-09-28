@@ -211,6 +211,10 @@ class DiagnosticWindow:
             column=0,
             sticky="nsew",
         )
+        self._device_table.bind(
+            "<<TreeviewSelect>>",
+            lambda _event: self._update_dump_availability(),
+        )
 
         buttons = ttk.Frame(main)
         buttons.grid(
@@ -241,11 +245,27 @@ class DiagnosticWindow:
         )
         self._test_button.grid(row=0, column=2, padx=(0, 8))
 
+        self._dump_button = ttk.Button(
+            buttons,
+            text="Dump settings",
+            command=self._dump_selected_settings,
+        )
+        self._dump_button.grid(row=0, column=3, padx=(0, 8))
+
         ttk.Button(
             buttons,
             text="Refresh",
             command=self.refresh,
-        ).grid(row=0, column=3)
+        ).grid(row=0, column=4)
+
+        self._dump_hint = ttk.Label(
+            main,
+            text="",
+            foreground=MUTED_TEXT,
+            wraplength=720,
+            justify="left",
+        )
+        self._dump_hint.grid(row=2, column=0, sticky="w", pady=(44, 0))
 
         health = ttk.LabelFrame(main, text="Runtime health", padding=8)
         health.grid(row=3, column=0, sticky="ew", pady=(0, 10))
@@ -336,6 +356,7 @@ class DiagnosticWindow:
             and self._device_table.exists(selected)
         ):
             self._device_table.selection_set(selected)
+        self._update_dump_availability()
 
     def _connect_selected(self) -> None:
         device_id = self._require_selection()
@@ -357,6 +378,29 @@ class DiagnosticWindow:
             lambda: self._view_model.disconnect_device(device_id)
         )
 
+    def _dump_selected_settings(self) -> None:
+        device_id = self._require_selection()
+        if device_id is None:
+            return
+        self._start_device_action(
+            lambda: self._view_model.dump_device_settings(device_id)
+        )
+
+    def _update_dump_availability(self) -> None:
+        """Offer a dump only where one can actually be taken."""
+
+        device_id = self._selected_device_id()
+        if device_id is None:
+            self._dump_button.configure(state="disabled")
+            self._dump_hint.configure(text="")
+            return
+        reason = self._view_model.dump_unavailable_reason(device_id)
+        self._dump_button.configure(state="disabled" if reason else "normal")
+        self._dump_hint.configure(
+            text=reason
+            or "A settings dump records this device's configuration read-only."
+        )
+
     def _test_selected_communication(self) -> None:
         device_id = self._require_selection()
         if device_id is None:
@@ -375,6 +419,7 @@ class DiagnosticWindow:
         self._connect_button.configure(state="disabled")
         self._disconnect_button.configure(state="disabled")
         self._test_button.configure(state="disabled")
+        self._dump_button.configure(state="disabled")
 
         def run() -> None:
             self._action_results.put(action())
@@ -392,7 +437,7 @@ class DiagnosticWindow:
             self._disconnect_button.configure(state="normal")
             self._test_button.configure(state="normal")
             self._display_result(result)
-            self.refresh()
+            self.refresh()  # Re-enables the dump button only where it applies.
         self._refresh_runtime_health()
         self._schedule_update()
 

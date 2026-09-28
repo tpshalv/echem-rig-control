@@ -1,5 +1,6 @@
 from math import isfinite, isclose
 
+from rig_control.devices.alicat.setup_report import AlicatSetupReport
 from rig_control.devices.alicat.control_support import AlicatVerifiedControl
 from rig_control.devices.alicat.measurements import state_measurements
 
@@ -11,13 +12,16 @@ from rig_control.devices.alicat.protocol import (
 from rig_control.devices.mass_flow_controller import (
     MassFlowController,
     MassFlowControllerLimits,
+    convert_mass_flow,
 )
 from rig_control.devices.measurement_source import DeviceMeasurement
 from rig_control.models import DeviceStatus, Measurement
 from rig_control.read_retry import retry_read
 
 
-class AlicatMassFlowController(AlicatVerifiedControl, MassFlowController):
+class AlicatMassFlowController(
+    AlicatSetupReport, AlicatVerifiedControl, MassFlowController
+):
     """Rig-facing adapter for one addressed Alicat MFC."""
 
     def __init__(
@@ -95,12 +99,14 @@ class AlicatMassFlowController(AlicatVerifiedControl, MassFlowController):
         self._protocol.disconnect()
         self._state = None
         self.control_ready = False
-        self.verification_message = "Disconnected; verification required"
+        self.control_configuration = None
+        self.control_mode = None
+        self.verification_message = "Disconnected; the control mode is re-read on connection"
         self._status = DeviceStatus.DISCONNECTED
 
-    def set_flow_setpoint(self, flow: float) -> None:
+    def set_flow_setpoint(self, flow: float, unit: str = "") -> None:
         self._require_ready()
-        numeric_flow = self._validate_flow(flow)
+        numeric_flow = self._validate_flow(flow, unit)
         self.verify_control()
 
         try:
@@ -113,8 +119,15 @@ class AlicatMassFlowController(AlicatVerifiedControl, MassFlowController):
             self.verify_control()
             self._refresh_state("verify set flow")
             confirmed, unit = self._protocol.read_setpoint(self.unit_address)
-            if unit.casefold() != self.limits.flow_unit.casefold() or not isclose(confirmed, numeric_flow, rel_tol=0, abs_tol=self._configuration.setpoint_tolerance):
-                raise RuntimeError("Alicat flow setpoint was not confirmed")
+            tolerance = self.setpoint_tolerance()
+            if unit.casefold() != self.limits.flow_unit.casefold() or not isclose(
+                confirmed, numeric_flow, rel_tol=0, abs_tol=tolerance
+            ):
+                raise RuntimeError(
+                    f"Alicat flow setpoint was not confirmed: requested "
+                    f"{numeric_flow:g} {self.limits.flow_unit}, read back "
+                    f"{confirmed:g} {unit} (tolerance {tolerance:g})"
+                )
         except Exception as error:
             self._status = DeviceStatus.FAULTED
             if isinstance(error, RuntimeError) and str(error).startswith(
@@ -190,13 +203,19 @@ class AlicatMassFlowController(AlicatVerifiedControl, MassFlowController):
                 f"{self.unit_address!r} is not ready"
             )
 
-    def _validate_flow(self, flow: float) -> float:
+    def _validate_flow(self, flow: float, unit: str = "") -> float:
         if isinstance(flow, bool) or not isinstance(flow, (int, float)):
             raise TypeError("Flow must be an int or float")
 
         numeric_flow = float(flow)
         if not isfinite(numeric_flow):
             raise ValueError("Flow must be finite")
+        if unit:
+            # Convert into this instrument's own unit before anything is
+            # compared against its limits or sent to it.
+            numeric_flow = convert_mass_flow(
+                numeric_flow, unit, self.limits.flow_unit
+            )
         if numeric_flow < 0:
             raise ValueError("Flow cannot be negative")
         if numeric_flow > self.limits.maximum_flow:

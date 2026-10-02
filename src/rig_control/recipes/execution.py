@@ -85,6 +85,13 @@ class RecipeRunner:
     def result(self) -> RecipeRunResult | None:
         with self._lock: return self._result
 
+    def has_safe_state(self, device_id: str) -> bool | None:
+        """Whether a device in this session can enter a safe state; None if it is not in the session."""
+        try:
+            return isinstance(self._devices.get(device_id), SafeStateCapable)
+        except Exception:
+            return None
+
     def validate(self, recipe: Recipe) -> None:
         """Construct every command before taking ownership; drivers enforce limits."""
         for step in iter_steps(recipe.steps):

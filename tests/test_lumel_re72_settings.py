@@ -181,3 +181,17 @@ def test_readback_verification_treats_equivalent_numeric_text_as_equal() -> None
     assert Re72SettingsService._values_match("12", "12.0")
     assert Re72SettingsService._values_match("0.50", "0.5")
     assert not Re72SettingsService._values_match("PID", "On/off")
+
+
+def test_safe_state_targets_0_degc_through_the_normal_setpoint_write() -> None:
+    from rig_control.devices.safe_state import SafeStateCapable
+    bus = FakeBus()                         # two decimal places, target 27.50 degC
+    device = LumelRe72("re72_1", bus, 1)  # type: ignore[arg-type]
+    assert isinstance(device, SafeStateCapable)
+
+    device.enter_safe_state()
+
+    assert bus.writes == [(1, 4084, 0)]     # Setpoint 1, the register every temperature command uses
+    assert device.read_settings()["target_setpoint"] == 0.0
+    # Only the target changes: PID, alarms and setpoint source are untouched.
+    assert [address for _slave, address, _value in bus.writes] == [4084]

@@ -169,3 +169,23 @@ def test_end_state_default_summary_and_warnings():
         "Left as it is: Keithley", "CO2 MFC: Flow setpoint 20", "Everything else: off (safe state)"]
     warnings = end_state_warnings(risky, roles)
     assert "can pressurise" in warnings[0] and "output stays on" in warnings[1]
+
+
+def test_end_state_hides_read_only_devices_and_flags_ones_with_no_safe_state():
+    from rig_control.recipes import EndState
+    from rig_control.ui.operation.recipe_settings import (
+        ValueDisplay, end_state_roles, end_state_summary, end_state_warnings,
+    )
+    roles = [SimpleNamespace(device_id="dht", friendly_name="DHT11", capability=DeviceCapability.TEMPERATURE_SENSOR),
+             SimpleNamespace(device_id="re72", friendly_name="RE72 heater", capability=DeviceCapability.TEMPERATURE_CONTROLLER),
+             SimpleNamespace(device_id="hp", friendly_name="Guardian", capability=DeviceCapability.HOTPLATE_STIRRER),
+             SimpleNamespace(device_id="esp", friendly_name="ESP32", capability=DeviceCapability.REMOTE_CONTROLLER)]
+    assert [r.device_id for r in end_state_roles(roles)] == ["re72", "hp", "esp"]   # the sensor is not listed
+    # The RE72 now has a safe state (0 degC target), so everything really is off.
+    assert end_state_summary(EndState(), roles, ValueDisplay()) == ["Everything off (safe state)"]
+    assert end_state_warnings(EndState(), roles) == []
+    # A device the session reports has no safe state keeps its settings, and the summary says so.
+    no_safe = lambda role: role.device_id != "re72"
+    assert end_state_summary(EndState(), roles, ValueDisplay(), no_safe) == [
+        "Left as it is: RE72 heater (no safe state)", "Everything else: off (safe state)"]
+    assert "keeps its last settings" in end_state_warnings(EndState(), roles, no_safe)[0]

@@ -30,7 +30,7 @@ from rig_control.rig_profile import RigProfile
 from rig_control.ui.common.theme import ERROR_TEXT, INFO_TEXT, MUTED_TEXT, SECTION_FONT, SUCCESS_TEXT
 from rig_control.ui.operation.recipe_settings import (
     SETTINGS, default_value, group_by_device, group_mode, short_label, format_clock, format_duration, format_value, parse_duration,
-    ValueDisplay, default_end_state, describe_ramp, end_state_summary, end_state_warnings, parse_pass_names, spec_for, unit_for,
+    ValueDisplay, capability_has_safe_state, default_end_state, describe_ramp, end_state_summary, end_state_warnings, parse_pass_names, spec_for, unit_for,
 )
 from rig_control.ui.operation.recipe_end_dialog import EndStateDialog
 from rig_control.ui.operation.recipe_step_dialog import StepEditorDialog
@@ -299,7 +299,7 @@ class RecipeBuilderWindow:
                 self._tree.insert("", "end", iid=iid, values=values, tags=tags)
                 self._step_text_width = max(self._step_text_width, self._measure.measure(guide + text))
         end_text = "■ End state (finish or Stop):  " + ";  ".join(
-            end_state_summary(self._end_state, self._all_roles, self._units))
+            end_state_summary(self._end_state, self._all_roles, self._units, self._has_safe_state))
         self._tree.insert("", "end", iid="end", values=("", "End state", "", end_text), tags=("end",))
         self._step_text_width = max(self._step_text_width, self._measure.measure(end_text))
         self._fit_step_column()
@@ -456,22 +456,27 @@ class RecipeBuilderWindow:
             row=r + 3, column=0, columnspan=3, sticky="w")
         ttk.Button(q, text="Edit all…", command=self._edit_selected).grid(row=r + 4, column=0, sticky="w", pady=(8, 0))
 
+    def _has_safe_state(self, role) -> bool:
+        """Ask the session's device when it is there; otherwise go by its type."""
+        ask = getattr(self._runner, "has_safe_state", None)
+        answer = ask(role.device_id) if ask is not None else None
+        return capability_has_safe_state(role) if answer is None else answer
+
     def _show_end_state(self) -> None:
         q = self._quick
         self._quick.configure(text="End state")
         ttk.Label(q, wraplength=_PANEL_WRAP, justify="left", text=(
             "Applied when the run finishes, when you press Stop (remaining steps are skipped) "
             "or if the recipe fails. Control then returns to manual.")).grid(row=0, column=0, columnspan=3, sticky="w")
-        lines = end_state_summary(self._end_state, self._all_roles, self._units)
+        lines = end_state_summary(self._end_state, self._all_roles, self._units, self._has_safe_state)
         ttk.Label(q, text="\n".join(lines), font=("Segoe UI", 10, "bold"), foreground=INFO_TEXT, wraplength=_PANEL_WRAP,
                   justify="left").grid(row=1, column=0, columnspan=3, sticky="w", pady=(8, 0))
-        warnings = end_state_warnings(self._end_state, self._all_roles)
+        warnings = end_state_warnings(self._end_state, self._all_roles, self._has_safe_state)
         if warnings:
             ttk.Label(q, text="\n".join("⚠ " + w for w in warnings), foreground=ERROR_TEXT, wraplength=_PANEL_WRAP,
                       justify="left").grid(row=2, column=0, columnspan=3, sticky="w", pady=(8, 0))
         ttk.Separator(q).grid(row=3, column=0, columnspan=3, sticky="ew", pady=8)
-        ttk.Label(q, text="Always the last row: it can't be moved or deleted. The global safe state "
-                          "for emergencies still turns everything off.", foreground=MUTED_TEXT,
+        ttk.Label(q, text="Always the last row: it can't be moved or deleted.", foreground=MUTED_TEXT,
                   wraplength=_PANEL_WRAP, justify="left").grid(row=4, column=0, columnspan=3, sticky="w")
         ttk.Button(q, text="Edit end state…", command=self._edit_end_state).grid(row=5, column=0, sticky="w", pady=(8, 0))
 
@@ -481,7 +486,8 @@ class RecipeBuilderWindow:
                 self._end_state = end
                 self._refresh()
             self._show_quick(); self._tree.focus_set()
-        EndStateDialog(self._root, self._end_state, roles=self._all_roles, units=self._units, on_done=done)
+        EndStateDialog(self._root, self._end_state, roles=self._all_roles, units=self._units, on_done=done,
+                       has_safe_state=self._has_safe_state)
 
     def _fields(self, row: OutlineRow) -> list[_Field]:
         if isinstance(row, LoopEnd):
@@ -803,8 +809,9 @@ class RecipeBuilderWindow:
     def _start_recipe(self) -> None:
         if not self._output.get().strip():
             messagebox.showerror("Start recipe", "Choose an output folder first.", parent=self._root); return
-        summary = "\n".join("   • " + line for line in end_state_summary(self._end_state, self._all_roles, self._units))
-        warnings = end_state_warnings(self._end_state, self._all_roles)
+        summary = "\n".join("   • " + line for line in end_state_summary(
+            self._end_state, self._all_roles, self._units, self._has_safe_state))
+        warnings = end_state_warnings(self._end_state, self._all_roles, self._has_safe_state)
         message = ("When the run finishes, or if you press Stop:\n\n" + summary
                    + ("\n\n" + "\n".join("⚠ " + w for w in warnings) if warnings else "")
                    + "\n\nStart the recipe?")

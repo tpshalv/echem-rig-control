@@ -547,3 +547,9 @@ def test_end_state_entries_are_checked():
     runner, _supply, _mfc = make_runner()
     with pytest.raises(RecipeValidationError, match="exceeds configured maximum"):
         runner.validate(Recipe("r", end_state=EndState((EndDevice("mfc", EndAction.SET, (Assignment("mfc", "flow", 500),)),))))
+
+
+def test_runner_reports_which_session_devices_have_a_safe_state():
+    runner, _supply, _mfc = make_runner()
+    assert runner.has_safe_state("supply") is True
+    assert runner.has_safe_state("not-in-session") is None

@@ -205,6 +205,18 @@ class LumelRe72(Device, MeasurementSource):
             raise ValueError("RE72 target setpoint is outside the register range")
         self._bus.write_register(self._slave, 4084, raw & 0xFFFF)
 
+    def enter_safe_state(self) -> None:
+        """Heater off: target setpoint 0 degC, through the same write as any temperature command.
+
+        This RE72 is used as a heater (reverse/heating action), so a 0 degC
+        target drives the heater output to 0 % in both PID and on/off control.
+        Nothing else changes: PID tuning, alarms and the setpoint source are
+        left as configured.  The target is a request the process simply never
+        reaches; with no heater output, a "heating but not warming" check
+        would see nothing to flag.
+        """
+        self.set_target_setpoint(0.0)
+
     def read_settings(self) -> dict[str, float | int]:
         """Read the settings exposed by the Settings window."""
         decimal_places = (

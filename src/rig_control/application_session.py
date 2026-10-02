@@ -13,6 +13,7 @@ from rig_control.models import Event
 from rig_control.polling import PollingService
 from rig_control.rig_profile import RigProfile
 from rig_control.runtime_diagnostics import RuntimeDiagnostics
+from rig_control.recipes.execution import RecipeRunner
 
 
 class ApplicationSession:
@@ -54,6 +55,12 @@ class ApplicationSession:
                     settings.live_export_interval_seconds
                 ),
             )
+        )
+        self.recipe_runner = RecipeRunner(
+            self.control_service,
+            self.device_manager,
+            recorder=self.experiment_recorder,
+            event_sink=lambda event: self.record_control_event(event),
         )
         self.polling_service = PollingService(
             self.device_manager,
@@ -109,6 +116,11 @@ class ApplicationSession:
 
     def stop_feature_services(self) -> tuple[str, ...]:
         failures: list[str] = []
+        if self.recipe_runner.is_running:
+            self.recipe_runner.stop()
+            result = self.recipe_runner.join(10.0)
+            if result is None:
+                failures.append("Recipe did not stop within 10 seconds")
         if self.experiment_recorder.is_recording:
             try:
                 self.experiment_recorder.stop()

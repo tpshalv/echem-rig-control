@@ -27,6 +27,7 @@ from rig_control.models import DeviceStatus
 from rig_control.rig_profile import DeviceCapability, RigProfile
 from rig_control.ui.manual_control.model import ManualControlViewModel
 from rig_control.ui.manual_control.types import PowerSupplyManualSafety
+from rig_control.recipes.execution import RecipeRunner
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,6 +214,7 @@ class OperationViewModel:
         power_supply_safety: PowerSupplyManualSafety | None = None,
         pump_calibration_service: PumpCalibrationService | None = None,
         display_units: DisplayUnits | None = None,
+        recipe_runner: RecipeRunner | None = None,
     ) -> None:
         self._validate_history_limit(history_limit)
         self._validate_event_limit(event_limit)
@@ -228,6 +230,7 @@ class OperationViewModel:
         )
         self._profile_id = profile_id
         self._profile = profile
+        self.recipe_runner = recipe_runner
         self._measurements: dict[
             tuple[str, str], LiveMeasurementRow
         ] = {}
@@ -237,6 +240,16 @@ class OperationViewModel:
         ] = {}
         self._warnings: dict[str, str] = {}
         self._events: deque[Event] = deque(maxlen=event_limit)
+
+    @property
+    def profile(self) -> RigProfile | None:
+        """Active profile, used by the recipe editor for friendly device labels."""
+        return self._profile
+
+    @property
+    def display_units(self) -> DisplayUnits:
+        """Units the screens show and accept, e.g. mA for recipe currents."""
+        return self._display_units
 
     @property
     def is_monitoring(self) -> bool:
@@ -965,6 +978,10 @@ class OperationViewModel:
         """
 
         failures: list[str] = []
+        if self.recipe_runner is not None and self.recipe_runner.is_running:
+            self.recipe_runner.stop()
+            if self.recipe_runner.join(10.0) is None:
+                failures.append("Recipe did not stop within 10 seconds.")
         if self.is_recording:
             try:
                 self._experiment_recorder.stop()

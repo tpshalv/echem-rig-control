@@ -116,3 +116,14 @@ def test_invalid_keithley_integration_is_rejected(value):
 @pytest.mark.parametrize("text,value", [("0.002", 0.002), ("0.5", 0.5), ("12", 12.0)])
 def test_keithley_integration_text_and_boundaries(text, value):
     assert parse_setting_text("keithley_2280s_nplc", text) == value
+
+
+def test_recipe_currents_show_in_milliamps_by_default() -> None:
+    settings = default_app_settings()
+    assert settings.display_units.current == "mA"
+    amps = AppSettings(settings.settings_id, settings.friendly_name,
+                       {**settings.values, "display_current_unit": "a"})
+    assert amps.display_units.current == "A"
+    with pytest.raises(ValueError, match="display current unit"):
+        AppSettings(settings.settings_id, settings.friendly_name,
+                    {**settings.values, "display_current_unit": "uA"})

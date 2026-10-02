@@ -20,6 +20,7 @@ from rig_control.ui.operation.dashboard_window import (
     DashboardSignal,
     LiveDashboardWindow,
 )
+from rig_control.ui.operation.recipe_window import RecipeBuilderWindow
 
 
 def format_operation_boolean(channel: str, value: bool) -> str:
@@ -59,6 +60,7 @@ class OperationWindow:
         self._warning_display_rebuilds = 0
         self._trend_windows: dict[tuple[str, str], TrendWindow] = {}
         self._dashboard_window: LiveDashboardWindow | None = None
+        self._recipe_window: tk.Toplevel | None = None
         self._channel_trees: dict[str | None, ttk.Treeview] = {}
         self._tree_item_keys: dict[tuple[str | None, str], tuple[str, str]] = {}
         self._channel_rows: dict[tuple[str, str], OperationChannelRow] = {}
@@ -142,6 +144,11 @@ class OperationWindow:
             text="Live dashboard",
             command=self._open_live_dashboard,
         ).grid(row=1, column=3, sticky="e", pady=(6, 0))
+        ttk.Button(
+            controls,
+            text="Recipe builder",
+            command=self._open_recipe_builder,
+        ).grid(row=1, column=4, sticky="e", padx=(8, 0), pady=(6, 0))
         self._action_status = ttk.Label(controls, text="Ready")
         self._action_status.grid(
             row=1, column=0, columnspan=3, sticky="w", pady=(6, 0)
@@ -244,6 +251,33 @@ class OperationWindow:
             ttk.Label(main, text=text, style="Blueprint.TLabel").place(
                 relx=x if x == 1 else 0, rely=y if y == 1 else 0,
                 x=4 if x == 2 else -4, y=4 if y == 2 else -4, anchor=anchor)
+
+    def _open_recipe_builder(self) -> None:
+        """Open one non-modal editor; execution itself stays off the Tk thread."""
+        if self._view_model.recipe_runner is None or self._view_model.profile is None:
+            messagebox.showerror(
+                "Recipe builder",
+                "Recipe building requires the active rig profile and control service.",
+                parent=self._root,
+            )
+            return
+        if self._recipe_window is not None and self._recipe_window.winfo_exists():
+            self._recipe_window.lift()
+            return
+        self._recipe_window = tk.Toplevel(self._root)
+        RecipeBuilderWindow(
+            self._recipe_window,
+            self._view_model.recipe_runner,
+            self._view_model.profile,
+            default_output_directory=self._entries["output"].get(),
+            current_unit=self._view_model.display_units.current,
+        )
+
+        def close() -> None:
+            if self._recipe_window is not None:
+                self._recipe_window.destroy()
+                self._recipe_window = None
+        self._recipe_window.protocol("WM_DELETE_WINDOW", close)
 
     def _create_channel_tree(self, parent: ttk.Frame, system: str | None) -> ttk.Treeview:
         tree = ttk.Treeview(

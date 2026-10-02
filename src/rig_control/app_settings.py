@@ -10,6 +10,7 @@ from rig_control.app_paths import experiments_directory, logs_directory
 NATIVE = "native"
 PRESSURE_UNITS = (NATIVE, "bara", "psia", "kpaa")
 FLOW_UNITS = (NATIVE, "SCCM", "SLPM")
+CURRENT_UNITS = ("mA", "A")
 
 
 type AppSettingValue = str | int | float | bool
@@ -82,6 +83,10 @@ def _display_flow_unit(value: object) -> AppSettingValue:
     return _one_of(value, FLOW_UNITS, "display flow unit")
 
 
+def _display_current_unit(value: object) -> AppSettingValue:
+    return _one_of(value, CURRENT_UNITS, "display current unit")
+
+
 def _one_of(value: object, allowed: tuple[str, ...], name: str) -> AppSettingValue:
     if not isinstance(value, str):
         raise TypeError("must be text")
@@ -122,6 +127,18 @@ SETTING_DEFINITIONS = (
         default=NATIVE,
         validator=_display_flow_unit,
         choices=FLOW_UNITS,
+    ),
+    SettingDefinition(
+        key="display_current_unit",
+        label="Show recipe currents in",
+        description=(
+            "Display and entry in the recipe builder only. Recipes are still "
+            "saved, sent and recorded in amperes, so changing this never "
+            "changes what a recipe does."
+        ),
+        default="mA",
+        validator=_display_current_unit,
+        choices=CURRENT_UNITS,
     ),
     SettingDefinition(
         key="trend_history_readings",
@@ -278,6 +295,7 @@ class AppSettings:
         return DisplayUnits(
             pressure=str(self.values["display_pressure_unit"]),
             flow=str(self.values["display_flow_unit"]),
+            current=str(self.values["display_current_unit"]),
         )
 
     @property

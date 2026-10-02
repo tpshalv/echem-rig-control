@@ -16,7 +16,7 @@ from rig_control.devices.alicat.verification import AlicatControlConfiguration, 
 from rig_control.devices.manager import DeviceManager
 from rig_control.devices.mass_flow_controller import MassFlowControllerLimits
 from rig_control.devices.pressure_controller import PressurePolicy, absolute_unit_factor
-from rig_control.models import DeviceStatus
+from rig_control.models import DeviceStatus, EventSeverity
 from rig_control.transports.simulated_serial_text import SimulatedSerialTextTransport
 
 from captures import load_capture
@@ -26,9 +26,15 @@ FRAME = "A Pressure (PSIA)\nTemperature (degC)\nVolumetric flow (CCM)\nMass flow
 
 #: The data-frame table this instrument really reports, which states
 #: each column's precision as well as its unit.
-REAL_FRAME = load_capture(
-    "alicat-mc-2slpm-d-10v22-back-pressure.txt"
-)["C??D*"].replace("C ", "B ")
+#: This fixture's device has no totaliser column, so that line is dropped.
+#: What matters here is the precision the real table states per column.
+REAL_FRAME = "\r".join(
+    line.replace("C ", "B ")
+    for line in load_capture("alicat-mc-2slpm-d-10v22-back-pressure.txt")[
+        "C??D*"
+    ].split("\r")
+    if "Mass Total" not in line
+)
 
 
 def observed(**changes):
@@ -55,6 +61,7 @@ class FakePressureProtocol(AlicatProtocolClient):
         self.hold = False
         self.accept = True
         self.read_error = None
+        self.status = ()
 
     def read_control_configuration(self, address):
         if self.read_error:
@@ -62,8 +69,9 @@ class FakePressureProtocol(AlicatProtocolClient):
         return self.observed
 
     def read_state(self, address):
+        codes = ("HLD",) if self.hold else self.status
         return AlicatInstrumentState(100, "SCCM", 80, "CCM", 20, "psia", 25, "degC", self.setpoint, "psia",
-                                     status_codes=("HLD",) if self.hold else (), valve_drive_percent=0 if self.hold else 20)
+                                     status_codes=codes, valve_drive_percent=0 if self.hold else 20)
 
     def set_flow_setpoint(self, address, flow):
         raise AssertionError("BPR must never send a flow command")
@@ -519,3 +527,39 @@ def test_a_setpoint_clamped_far_above_the_ceiling_is_still_caught():
         type(protocol).set_pressure_setpoint = original
 
     assert controller.status is DeviceStatus.FAULTED
+
+
+def test_instrument_status_codes_are_recorded_when_they_change():
+    """OPL or HLD explain a shut valve that the numbers alone do not."""
+
+    import json
+
+    events = []
+    protocol = FakePressureProtocol()
+    controller = AlicatBackPressureController(
+        configuration(), protocol, event_sink=lambda event, _: events.append(event)
+    )
+    controller.connect()
+
+    controller.read_measurements()
+    first = [
+        json.loads(event.message)
+        for event in events
+        if "alicat_status_codes" in event.message
+    ]
+    assert first[-1]["codes"] == []
+
+    # The instrument trips its overpressure limit and closes its valves.
+    protocol.status = ("OPL",)
+    controller.read_measurements()
+    controller.read_measurements()  # Unchanged: must not repeat the event.
+
+    reported = [
+        json.loads(event.message)
+        for event in events
+        if "alicat_status_codes" in event.message
+    ]
+    assert reported[-1]["codes"] == ["OPL"]
+    assert "OPL" in reported[-1]["detail"]
+    assert len(reported) == 2, "one event per change, not one per reading"
+    assert events[-1].severity is EventSeverity.WARNING

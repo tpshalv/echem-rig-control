@@ -153,7 +153,7 @@ class AlicatMassFlowController(
         self._require_ready()
         self.verify_control()
         state = self._refresh_state("read state", retry=True)
-        return state_measurements(state)
+        return state_measurements(state) + self.valve_drive_measurements(state)
 
     def enter_safe_state(self) -> None:
         if self.status is DeviceStatus.DISCONNECTED:
@@ -194,6 +194,7 @@ class AlicatMassFlowController(
             raise self._operation_error(operation, error) from error
 
         self._state = state
+        self.note_status_codes(state)
         return state
 
     def _require_ready(self) -> None:

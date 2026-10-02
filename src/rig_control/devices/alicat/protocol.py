@@ -178,6 +178,11 @@ class AlicatProtocolClient(ABC):
 
         raise NotImplementedError("This protocol cannot report its settings")
 
+    def read_valve_drive(self, unit_address: str) -> tuple[float, ...]:
+        """Return each valve's drive as a percentage of available power."""
+
+        raise NotImplementedError("This protocol cannot read valve drive")
+
     def set_pressure_setpoint(self, unit_address: str, value: float) -> None:
         raise NotImplementedError("This protocol does not support pressure setpoints")
 
@@ -213,6 +218,17 @@ SETUP_QUERIES: tuple[tuple[str, str], ...] = (
     ("R122", "register 122 (control point on some firmware)"),
     ("LS", "current setpoint and its units"),
     ("FPF 2", "absolute-pressure full scale"),
+    ("VD", "valve drive percentages (8v18+)"),
+    ("LCA", "loop control algorithm: 1 PD/PDF, 2 PD2I (10v05+)"),
+    ("LCG", "PD2I gains (10v05+)"),
+    ("LCGD", "PD/PDF gains (10v05+)"),
+    ("LCVO", "valve offsets: initial and closed (10v05+)"),
+    ("LCDB", "deadband limit (10v05+)"),
+    ("LCDM", "deadband mode: 1 hold, 2 close (10v05+)"),
+    ("LCZA", "zero pressure control (10v05+)"),
+    ("LSS", "setpoint source: A analog, S or U serial/display (10v05+)"),
+    ("SR", "max ramp rate (7v11+)"),
+    ("LSRC", "ramping options (10v05+)"),
 )
 
 
@@ -388,6 +404,27 @@ class AlicatAsciiProtocolClient(AlicatProtocolClient):
                     )
                 )
         return tuple(report)
+
+    def read_valve_drive(self, unit_address: str) -> tuple[float, ...]:
+        """Read the valve drive state with the documented VD query.
+
+        Serial Primer p. 25: the reply is the unit ID followed by one
+        percentage per valve, upstream first on a dual-valve controller. This
+        is how much of the available power is driven to the valve, not how
+        far open it is, so it rises as a valve is asked to open further.
+
+        Reading this needs no change to the instrument's data frame, which is
+        why it is preferred over adding a valve-drive column.
+        """
+
+        address = self._validate_address(unit_address)
+        parts = addressed_tokens(address, self._bus.request(f"{address}VD"))
+        if not parts:
+            raise ValueError("Empty valve-drive reply")
+        drives = tuple(float(token) for token in parts)
+        if any(not isfinite(value) for value in drives):
+            raise ValueError("Non-finite valve drive")
+        return drives
 
     def _optional_request(self, command: str) -> str:
         """Query informational text that must never block mode detection."""

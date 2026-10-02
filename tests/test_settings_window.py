@@ -64,6 +64,19 @@ def test_settings_separates_application_files_from_instrument_actions(root):
     window._on_category_selected(None)
     assert window._save_button.winfo_manager() == "grid"
 
+    window._sidebar.selection_set("Power supply")
+    window._on_category_selected(None)
+    assert not window._sidebar.exists("Power supply safety")
+    field = window._entries["keithley_2280s_nplc"]
+    assert field.get() == "0.5"
+    field.delete(0, "end")
+    field.insert(0, "0.25")
+    model.apply_setting_text.return_value = SimpleNamespace(succeeded=True, summary="Applied")
+    model.save_settings.return_value = SimpleNamespace(succeeded=True, summary="Saved")
+    window._save()
+    assert model.apply_setting_text.call_args.args[0]["keithley_2280s_nplc"] == "0.25"
+    model.save_settings.assert_called_once()
+
 
 def test_device_setup_constructs_and_opens_extracted_add_dialogs(root):
     model = DeviceSetupViewModel(

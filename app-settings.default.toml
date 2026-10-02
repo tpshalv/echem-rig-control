@@ -4,6 +4,7 @@ friendly_name = "Default application settings"
 
 [values]
 publish_interval_seconds = 1.0
+keithley_2280s_nplc = 0.5
 trend_history_readings = 500
 default_output_directory = "experiments"
 technical_log_path = "logs/rig-control.log"

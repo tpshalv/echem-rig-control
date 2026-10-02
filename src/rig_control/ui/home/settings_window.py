@@ -35,8 +35,9 @@ class SettingsWindow:
         ("Graphical", ("trend_history_readings",)),
         ("Advanced pressure limits", (_HIGH_PRESSURE_KEY, _PRESSURE_CEILING_KEY, "pressure_atmospheric_reference_bara")),
         (
-            "Power supply safety",
+            "Power supply",
             (
+                "keithley_2280s_nplc",
                 _HIGH_CURRENT_MODE_KEY,
                 _CEILING_KEY,
                 "power_supply_default_current_amps",

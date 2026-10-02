@@ -23,10 +23,11 @@ def test_defaults_are_safe_and_explicit() -> None:
     assert settings.default_output_directory == str(experiments_directory())
     assert settings.export_bin_seconds == 1.0
     assert settings.live_export_interval_seconds == 60.0
-    assert settings.power_supply_default_current_amps == 20.0
-    assert settings.power_supply_default_voltage_volts == 10.0
+    assert settings.power_supply_default_current_amps == 0.0
+    assert settings.power_supply_default_voltage_volts == 0.0
     assert settings.power_supply_high_current_mode is False
     assert settings.power_supply_wiring_current_ceiling_amps == 45.0
+    assert settings.keithley_2280s_nplc == 0.5
 
 
 def test_boolean_setting_text_is_parsed_as_boolean_not_int() -> None:
@@ -69,6 +70,7 @@ def test_settings_round_trip_and_backup(tmp_path: Path) -> None:
             "default_output_directory": "recordings",
             "export_bin_seconds": 0.5,
             "live_export_interval_seconds": 120.0,
+            "keithley_2280s_nplc": 0.25,
         },
     )
     path = tmp_path / "app-settings.toml"
@@ -77,6 +79,7 @@ def test_settings_round_trip_and_backup(tmp_path: Path) -> None:
     backup = write_app_settings(settings, path)
 
     assert load_app_settings(path) == settings
+    assert load_app_settings(path).keithley_2280s_nplc == 0.25
     assert backup == tmp_path / "app-settings.toml.bak"
 
 
@@ -88,3 +91,39 @@ def test_live_export_refresh_can_be_disabled() -> None:
     )
 
     assert settings.live_export_interval_seconds == 0.0
+
+
+def test_zero_power_supply_defaults_are_allowed() -> None:
+    settings = AppSettings(
+        "safe",
+        "Safe",
+        {
+            "power_supply_default_current_amps": 0,
+            "power_supply_default_voltage_volts": 0,
+        },
+    )
+
+    assert settings.power_supply_default_current_amps == 0.0
+    assert settings.power_supply_default_voltage_volts == 0.0
+
+
+@pytest.mark.parametrize("value", [0, -1, 0.001, 12.01, float("inf"), float("nan"), True, "0.5"])
+def test_invalid_keithley_integration_is_rejected(value):
+    with pytest.raises((TypeError, ValueError), match="keithley_2280s_nplc"):
+        AppSettings("bad", "Bad", {"keithley_2280s_nplc": value})
+
+
+@pytest.mark.parametrize("text,value", [("0.002", 0.002), ("0.5", 0.5), ("12", 12.0)])
+def test_keithley_integration_text_and_boundaries(text, value):
+    assert parse_setting_text("keithley_2280s_nplc", text) == value
+
+
+def test_recipe_currents_show_in_milliamps_by_default() -> None:
+    settings = default_app_settings()
+    assert settings.display_units.current == "mA"
+    amps = AppSettings(settings.settings_id, settings.friendly_name,
+                       {**settings.values, "display_current_unit": "a"})
+    assert amps.display_units.current == "A"
+    with pytest.raises(ValueError, match="display current unit"):
+        AppSettings(settings.settings_id, settings.friendly_name,
+                    {**settings.values, "display_current_unit": "uA"})

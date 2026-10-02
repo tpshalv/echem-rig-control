@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from rig_control.atomic_replace import replace_atomically
+from rig_control.power_supply_telemetry import state_label
 
 
 LAST_VALUE_CHANNELS = {
@@ -13,6 +14,10 @@ LAST_VALUE_CHANNELS = {
     "target_setpoint",
     "alarm_state",
     "error_status",
+    "voltage_setpoint",
+    "current_limit",
+    "output_enabled",
+    "regulation_mode",
 }
 
 
@@ -132,7 +137,7 @@ def build_wide_rows(
                 continue
             if signal[1] in LAST_VALUE_CHANNELS:
                 selected = max(records, key=lambda item: str(item["timestamp"]))
-                row.append(float(selected["value"]))
+                row.append(state_label(float(selected["value"]), signals[signal]))
             else:
                 values = [float(record["value"]) for record in records]
                 row.append(sum(values) / len(values))
@@ -247,7 +252,7 @@ def _write_xlsx(
             overview.append(cells(overview, [key, value]))
     overview.append(cells(overview, ["Time interval (seconds)", bin_seconds]))
     overview.append(cells(overview, ["Binning method",
-        "Nearest time bin; readings averaged, setpoints use latest; missing signals blank."]))
+        "Nearest time bin; readings averaged, setpoints/states use latest; missing signals blank."]))
     overview.append(cells(overview, ["Original readings",
         "Full readings and timestamps remain in measurements.journal.jsonl."]))
     overview.append(cells(overview, ["Exported at (UTC)", datetime.now(timezone.utc).replace(tzinfo=None)]))

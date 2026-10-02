@@ -6,6 +6,7 @@ import json
 from rig_control.devices.alicat.protocol_fields import AlicatFrameField
 from rig_control.devices.alicat.verification import (
     column_resolution,
+    frame_mismatch,
     parse_frame_layout,
     verify_role,
 )
@@ -14,6 +15,7 @@ from rig_control.models import Event, EventSeverity
 
 class AlicatVerifiedControl:
     def _initialize_verification(self, event_sink=None) -> None:
+        self._last_status_codes = None
         self.control_configuration = None
         self.control_mode = None
         self.control_ready = False
@@ -49,6 +51,16 @@ class AlicatVerifiedControl:
                         maximum_setpoint=cached.maximum_setpoint,
                     )
             self.control_mode = observed
+            # Checked on every pass, not only a full re-read: a frame that no
+            # longer matches stays wrong, so a later light check must not
+            # quietly re-enable control.
+            difference = frame_mismatch(
+                self.unit_address,
+                self.control_configuration.frame_description,
+                self._configuration.frame_fields,
+            )
+            if difference:
+                raise ValueError(difference)
             verify_role(
                 observed,
                 bpr=self._configuration.is_bpr,
@@ -71,6 +83,43 @@ class AlicatVerifiedControl:
                                         "configuration": asdict(self.control_configuration) if self.control_configuration else None},
                                        default=str),
                 ), None)
+
+    def note_status_codes(self, state) -> None:
+        """Record the status codes this instrument reports, when they change.
+
+        Codes such as OPL (overpressure limit) and HLD (valve hold) explain
+        behaviour that the numbers alone do not: an instrument whose valves
+        are held shut by a tripped limit reads like one that simply will not
+        open. They previously only influenced measurement quality, so they
+        never reached the recording where a run is reconstructed afterwards.
+        """
+
+        codes = tuple(state.status_codes)
+        if codes == getattr(self, "_last_status_codes", None):
+            return
+        self._last_status_codes = codes
+        if self._verification_event_sink is None:
+            return
+        self._verification_event_sink(
+            Event(
+                source=self.device_id,
+                severity=(
+                    EventSeverity.WARNING if codes else EventSeverity.INFO
+                ),
+                message=json.dumps(
+                    {
+                        "kind": "alicat_status_codes",
+                        "codes": list(codes),
+                        "detail": (
+                            "Instrument reports " + ", ".join(codes)
+                            if codes
+                            else "Instrument reports no status codes"
+                        ),
+                    }
+                ),
+            ),
+            None,
+        )
 
     def setpoint_tolerance(self) -> float:
         """How close a readback must be before a setpoint counts as accepted.

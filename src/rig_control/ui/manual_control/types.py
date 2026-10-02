@@ -32,6 +32,6 @@ def default_power_supply_manual_safety() -> PowerSupplyManualSafety:
     return PowerSupplyManualSafety(
         high_current_mode=False,
         wiring_current_ceiling_amps=DEFAULT_WIRING_CURRENT_CEILING_AMPS,
-        default_current_amps=20.0,
-        default_voltage_volts=10.0,
+        default_current_amps=0.0,
+        default_voltage_volts=0.0,
     )

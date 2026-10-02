@@ -21,6 +21,7 @@ from rig_control.ui.manual_control.types import PowerSupplyManualSafety
 
 def make_model(
     power_supply_safety: PowerSupplyManualSafety | None = None,
+    power_supply_limits: PowerSupplyLimits | None = None,
 ) -> tuple[
     ManualControlViewModel,
     RigControlService,
@@ -31,7 +32,7 @@ def make_model(
 
     supply = SimulatedPowerSupply(
         "main_supply",
-        PowerSupplyLimits(30.0, 108.0, 1080.0),
+        power_supply_limits or PowerSupplyLimits(30.0, 108.0, 1080.0),
     )
     mfc = SimulatedMassFlowController(
         "dry_gas_mfc",
@@ -208,7 +209,7 @@ def test_switching_to_constant_voltage_uses_safe_initial_target() -> None:
 
     assert result.succeeded is True
     assert supply.voltage_setpoint == 0.0
-    assert supply.current_limit == 20.0
+    assert supply.current_limit == 0.0
     assert supply.output_enabled is False
     assert (
         model.power_supply_mode("main_supply")
@@ -239,7 +240,7 @@ def test_switching_modes_restores_separate_targets() -> None:
     )
 
     assert supply.current_limit == 15.0
-    assert supply.voltage_setpoint == 10.0
+    assert supply.voltage_setpoint == 0.0
 
     model.set_power_supply_operating_mode(
         "main_supply",
@@ -247,7 +248,28 @@ def test_switching_modes_restores_separate_targets() -> None:
     )
 
     assert supply.voltage_setpoint == 2.0
-    assert supply.current_limit == 20.0
+    assert supply.current_limit == 0.0
+
+
+def test_constant_voltage_clamps_a_configured_default_to_supply_limit() -> None:
+    model, _, supply, _ = make_model(
+        PowerSupplyManualSafety(
+            high_current_mode=False,
+            wiring_current_ceiling_amps=45.0,
+            default_current_amps=20.0,
+            default_voltage_volts=10.0,
+        ),
+        PowerSupplyLimits(20.0, 6.0, 120.0),
+    )
+
+    result = model.set_power_supply_operating_mode(
+        "main_supply",
+        PowerSupplyOperatingMode.CONSTANT_VOLTAGE,
+    )
+
+    assert result.succeeded is True
+    assert supply.current_limit == 6.0
+    assert supply.output_enabled is False
 
 def test_manual_mode_cannot_change_while_output_is_enabled() -> None:
     model, _, supply, _ = make_model()
@@ -305,7 +327,7 @@ def test_manual_defaults_use_safe_starting_values_in_constant_current() -> None:
     # starting default, not the instrument's own true maximum - this was
     # the original reported bug (108 A applied the same mistake to current
     # in constant voltage mode).
-    assert supply.voltage_setpoint == 10.0
+    assert supply.voltage_setpoint == 0.0
     assert supply.output_enabled is False
 
 
@@ -320,10 +342,10 @@ def test_manual_defaults_use_safe_starting_values_in_constant_voltage() -> None:
 
     assert all(result.succeeded for result in results)
     # Current is the protective compliance limit in this mode: the low
-    # starting default (20 A), not the full 45 A wiring ceiling and
+    # starting default (0 A), not the full 45 A wiring ceiling and
     # nowhere near the instrument's 108 A maximum - this was the original
     # reported bug.
-    assert supply.current_limit == 20.0
+    assert supply.current_limit == 0.0
     # Voltage is the setpoint in this mode - left untouched.
     assert supply.voltage_setpoint == 0.0
     assert supply.output_enabled is False
@@ -354,7 +376,7 @@ def test_constant_voltage_output_rejects_zero_current_limit() -> None:
         PowerSupplyOperatingMode.CONSTANT_VOLTAGE,
     )
 
-    # Deliberately override the normal 20 A default compliance limit.
+    # The normal default compliance limit is already zero.
     model.set_power_supply_current(
         "main_supply",
         0.0,

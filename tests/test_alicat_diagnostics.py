@@ -640,3 +640,296 @@ def test_saved_bpr_still_enforces_the_software_pressure_ceiling(tmp_path) -> Non
     assert readings["mass_flow"].unit == "SLPM"
     assert readings["gas_temperature"].value == temperature
     assert "gauge_pressure" not in readings
+
+
+#: The same instrument after adding a valve-drive column from its front panel.
+VALVE_DRIVE_LINE = (
+    "{a} D07 Y19 Valve Drive                s decimal     7/2 000 02 %                "
+)
+
+
+def with_valve_drive(replies: dict[str, str], address: str) -> dict[str, str]:
+    """Insert a valve-drive column, as adding one on the instrument would."""
+
+    frame = replies[f"{address}??D*"]
+    lines = frame.split("\r")
+    index = next(i for i, line in enumerate(lines) if "Mass Total" in line)
+    lines.insert(index + 1, VALVE_DRIVE_LINE.format(a=address))
+    updated = dict(replies)
+    updated[f"{address}??D*"] = "\r".join(lines)
+    # The status frame gains the matching value, between totaliser and gas.
+    fields = replies[address].split()
+    fields.insert(-1, "+045.00")
+    updated[address] = " ".join(fields)
+    return updated
+
+
+def test_valve_drive_is_read_when_the_instrument_reports_it() -> None:
+    from rig_control.devices.alicat.protocol_fields import AlicatFrameField
+
+    class ValveDriveTransport(BenchTransport):
+        def __init__(self) -> None:
+            super().__init__()
+            self.replies = with_valve_drive(self.replies, "C")
+
+    found = [
+        device
+        for device in diagnostic.scan_alicat_bus("COM5", transport=ValveDriveTransport())
+        if device.address == "C"
+    ][0]
+
+    assert found.detected_role == "bpr"
+    assert AlicatFrameField.VALVE_DRIVE in found.frame_fields
+    assert found.unit_for(AlicatFrameField.VALVE_DRIVE) == "%"
+    # It sits where the instrument puts it, between totaliser and gas.
+    assert found.frame_fields[-3:] == (
+        AlicatFrameField.TOTALIZED_FLOW,
+        AlicatFrameField.VALVE_DRIVE,
+        AlicatFrameField.GAS,
+    )
+
+
+def test_a_changed_data_frame_is_detected_rather_than_silently_misread(tmp_path) -> None:
+    """Adding a column shifts every value after it onto the wrong name.
+
+    Without this check the valve-drive number is read as the gas name and
+    nothing looks wrong, so the change has to be caught explicitly.
+    """
+
+    from dataclasses import replace
+
+    transport = BenchTransport()
+    model, request = add_bench_bpr(tmp_path, transport)
+    added = model.add_alicat_and_check(
+        replace(request, downstream_valve_acknowledged=True)
+    )
+    assert added.succeeded is True, added.technical_details
+    assert model.check_device("outlet_bpr").succeeded is True
+
+    # The operator adds valve drive on the instrument's front panel.
+    transport.replies = with_valve_drive(transport.replies, "C")
+
+    result = model.check_device("outlet_bpr")
+
+    assert result.succeeded is False
+    assert "data frame has changed" in result.technical_details
+    assert "valve_drive_percent" in result.technical_details
+    assert "add it again" in result.technical_details
+
+
+def test_a_changed_data_frame_blocks_control_at_the_device(tmp_path) -> None:
+    from dataclasses import replace
+
+    from rig_control.devices.alicat.bus import AlicatBus
+    from rig_control.devices.alicat.configuration import configuration_from_profile
+    from rig_control.devices.alicat.pressure import AlicatBackPressureController
+    from rig_control.devices.alicat.protocol import AlicatAsciiProtocolClient
+
+    transport = BenchTransport()
+    model, request = add_bench_bpr(tmp_path, transport)
+    model.add_alicat_and_check(replace(request, downstream_valve_acknowledged=True))
+    transport.replies = with_valve_drive(transport.replies, "C")
+
+    configuration = configuration_from_profile(model.profile, "outlet_bpr")
+    controller = AlicatBackPressureController(
+        configuration,
+        AlicatAsciiProtocolClient(
+            AlicatBus("bench", transport),
+            configuration.frame_fields,
+            configuration.engineering_units,
+        ),
+    )
+    controller.connect()
+
+    # Readable for diagnosis, but no setpoint may be sent against a layout
+    # that no longer describes this instrument.
+    assert controller.control_ready is False
+    assert "data frame has changed" in controller.verification_message
+    with pytest.raises(RuntimeError, match="data frame has changed"):
+        controller.set_pressure_setpoint(1.5)
+
+
+def test_re_adding_the_device_picks_up_the_new_column(tmp_path) -> None:
+    """The documented way to adopt a changed frame: remove and add again."""
+
+    from dataclasses import replace
+
+    transport = BenchTransport()
+    model, request = add_bench_bpr(tmp_path, transport)
+    model.add_alicat_and_check(replace(request, downstream_valve_acknowledged=True))
+    transport.replies = with_valve_drive(transport.replies, "C")
+
+    assert model.remove_device("outlet_bpr").succeeded is True
+    result = model.add_alicat_and_check(
+        replace(request, downstream_valve_acknowledged=True)
+    )
+
+    assert result.succeeded is True, result.technical_details
+    settings = model.profile.get_role("outlet_bpr").settings
+    assert settings["frame_fields"] == (
+        "absolute_pressure,gas_temperature,volumetric_flow,mass_flow,"
+        "setpoint,totalized_flow,valve_drive_percent,gas"
+    )
+    assert model.check_device("outlet_bpr").succeeded is True
+
+
+def test_valve_drive_reaches_polling_once_the_frame_includes_it(tmp_path) -> None:
+    from dataclasses import replace
+
+    from rig_control.devices.alicat.bus import AlicatBus
+    from rig_control.devices.alicat.configuration import configuration_from_profile
+    from rig_control.devices.alicat.pressure import AlicatBackPressureController
+    from rig_control.devices.alicat.protocol import AlicatAsciiProtocolClient
+
+    transport = BenchTransport()
+    transport.replies = with_valve_drive(transport.replies, "C")
+    model, request = add_bench_bpr(tmp_path, transport)
+    added = model.add_alicat_and_check(
+        replace(request, downstream_valve_acknowledged=True)
+    )
+    assert added.succeeded is True, added.technical_details
+
+    configuration = configuration_from_profile(model.profile, "outlet_bpr")
+    controller = AlicatBackPressureController(
+        configuration,
+        AlicatAsciiProtocolClient(
+            AlicatBus("bench", transport),
+            configuration.frame_fields,
+            configuration.engineering_units,
+        ),
+    )
+    controller.connect()
+    readings = {item.channel: item.measurement for item in controller.read_measurements()}
+
+    assert readings["valve_drive_percent"].value == 45.0
+    assert readings["valve_drive_percent"].unit == "%"
+    # The gas name is still the gas name, not the number beside it.
+    assert controller.current_state.gas == "CO2"
+
+
+def test_valve_drive_is_read_with_the_documented_query_not_the_data_frame(tmp_path) -> None:
+    """Serial Primer p. 25: VD reports valve drive without a frame change."""
+
+    from dataclasses import replace
+
+    from rig_control.devices.alicat.bus import AlicatBus
+    from rig_control.devices.alicat.configuration import configuration_from_profile
+    from rig_control.devices.alicat.pressure import AlicatBackPressureController
+    from rig_control.devices.alicat.protocol import AlicatAsciiProtocolClient
+
+    class ValveDriveTransport(BenchTransport):
+        def __init__(self) -> None:
+            super().__init__()
+            self.replies["CVD"] = "C +045.00"
+
+    transport = ValveDriveTransport()
+    model, request = add_bench_bpr(tmp_path, transport)
+    added = model.add_alicat_and_check(
+        replace(request, downstream_valve_acknowledged=True)
+    )
+    assert added.succeeded is True, added.technical_details
+    # The saved frame has no valve-drive column.
+    assert "valve_drive" not in model.profile.get_role("outlet_bpr").settings[
+        "frame_fields"
+    ]
+
+    configuration = configuration_from_profile(model.profile, "outlet_bpr")
+    controller = AlicatBackPressureController(
+        configuration,
+        AlicatAsciiProtocolClient(
+            AlicatBus("bench", transport),
+            configuration.frame_fields,
+            configuration.engineering_units,
+        ),
+    )
+    controller.connect()
+    readings = {item.channel: item.measurement for item in controller.read_measurements()}
+
+    assert readings["valve_drive_percent"].value == 45.0
+    assert readings["valve_drive_percent"].unit == "%"
+
+
+def test_a_controller_that_cannot_answer_vd_simply_has_no_valve_drive(tmp_path) -> None:
+    """Firmware older than 8v18 has no VD query; that must not fail a poll."""
+
+    from dataclasses import replace
+
+    from rig_control.devices.alicat.bus import AlicatBus
+    from rig_control.devices.alicat.configuration import configuration_from_profile
+    from rig_control.devices.alicat.pressure import AlicatBackPressureController
+    from rig_control.devices.alicat.protocol import AlicatAsciiProtocolClient
+
+    transport = BenchTransport()  # No CVD reply.
+    model, request = add_bench_bpr(tmp_path, transport)
+    model.add_alicat_and_check(replace(request, downstream_valve_acknowledged=True))
+
+    configuration = configuration_from_profile(model.profile, "outlet_bpr")
+    controller = AlicatBackPressureController(
+        configuration,
+        AlicatAsciiProtocolClient(
+            AlicatBus("bench", transport),
+            configuration.frame_fields,
+            configuration.engineering_units,
+        ),
+    )
+    controller.connect()
+
+    readings = {item.channel: item.measurement for item in controller.read_measurements()}
+    assert "valve_drive_percent" not in readings
+    assert readings["absolute_pressure"].unit == "bara"
+
+    # Asked once, then left alone rather than retried on every poll.
+    before = transport.requests.count("CVD")
+    controller.read_measurements()
+    assert transport.requests.count("CVD") == before
+
+
+def test_both_documented_loop_reply_orders_are_understood() -> None:
+    """The primer documents one field order; the bench instrument uses another."""
+
+    from rig_control.devices.alicat.verification import parse_control_mode
+
+    register = "C   020 = 41239"
+    documented = parse_control_mode("C", "C 34 10 PSIA 0 160", register)
+    observed = parse_control_mode("C", "C 34 +000.00 +160.00 10 PSIA", register)
+
+    assert documented == observed
+    assert observed.detected_role == "bpr"
+    assert (observed.minimum_setpoint, observed.maximum_setpoint) == (0.0, 160.0)
+
+
+def test_extra_valve_drive_values_are_numbered_not_named_upstream(tmp_path) -> None:
+    """A single-valve MC answers VD with four values, so position cannot be
+    read as upstream/downstream."""
+
+    from dataclasses import replace
+
+    from rig_control.devices.alicat.bus import AlicatBus
+    from rig_control.devices.alicat.configuration import configuration_from_profile
+    from rig_control.devices.alicat.pressure import AlicatBackPressureController
+    from rig_control.devices.alicat.protocol import AlicatAsciiProtocolClient
+
+    class FourValueTransport(BenchTransport):
+        def __init__(self) -> None:
+            super().__init__()
+            self.replies["CVD"] = "C 045.00 000.00 000.00 000.00"
+
+    transport = FourValueTransport()
+    model, request = add_bench_bpr(tmp_path, transport)
+    model.add_alicat_and_check(replace(request, downstream_valve_acknowledged=True))
+
+    configuration = configuration_from_profile(model.profile, "outlet_bpr")
+    controller = AlicatBackPressureController(
+        configuration,
+        AlicatAsciiProtocolClient(
+            AlicatBus("bench", transport),
+            configuration.frame_fields,
+            configuration.engineering_units,
+        ),
+    )
+    controller.connect()
+    readings = {item.channel: item.measurement for item in controller.read_measurements()}
+
+    assert readings["valve_drive_percent"].value == 45.0
+    assert readings["valve_drive_4_percent"].value == 0.0
+    assert "valve_drive_upstream_percent" not in readings

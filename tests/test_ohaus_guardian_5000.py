@@ -22,6 +22,8 @@ class Instrument(SerialTextTransport):
     def __init__(self, model="e-G52HSRDA", mode=0):
         self.model, self.mode = model, mode
         self.temperature, self.speed = 100.0, 500.0
+        self.probe_connected = mode in {2, 5}
+        self.active_temperature = self.temperature if mode in {1, 2, 4, 5} else None
         self.messages = []
         self.failures = {}
         self._is_open = False
@@ -52,10 +54,18 @@ class Instrument(SerialTextTransport):
                 return f"{command} A"
             return str(getattr(self, name))
         modes = {
-            "START_HEAT": {0: 1, 3: 4}, "STOP_HEAT": {1: 0, 2: 0, 4: 3, 5: 3},
+            "START_HEAT": {0: 2 if self.probe_connected else 1,
+                           3: 5 if self.probe_connected else 4},
+            "STOP_HEAT": {1: 0, 2: 0, 4: 3, 5: 3},
             "START_STIR": {0: 3, 1: 4, 2: 5}, "STOP_STIR": {3: 0, 4: 1, 5: 2},
         }
         if command in modes:
+            # Reproduce the observed firmware behaviour: target writes update
+            # readback, but an already-running heater retains its active target.
+            if command == "START_HEAT" and self.mode in {0, 3}:
+                self.active_temperature = self.temperature
+            elif command == "STOP_HEAT":
+                self.active_temperature = None
             self.mode = modes[command].get(self.mode, self.mode)
             return f"{command} A"
         if command in {"TIMER_RESET", "TIMER"} and (argument or command == "TIMER_RESET"):
@@ -161,6 +171,140 @@ def test_boundary_setpoints_and_readback():
     assert device.target_speed == 1800
     assert "TARGET_TEMPERATURE 360" in transport.messages
     assert "TARGET_SPEED 50" in transport.messages
+
+
+@pytest.mark.parametrize("model,mode", [
+    ("e-G52HSRDA", 1), ("e-G52HSRDA", 2),
+    ("e-G52HSRDA", 4), ("e-G52HSRDA", 5), ("e-G52HP07C", 1),
+])
+def test_temperature_change_restarts_running_heat_and_applies_target(model, mode):
+    device, transport = connected(model, mode)
+    transport.messages.clear()
+
+    device.set_target_temperature(120.5)
+
+    assert transport.active_temperature == 120.5
+    assert device.target_temperature == 120.5
+    assert device.operating_mode == mode
+    assert device.status is DeviceStatus.READY
+    writes = [m for m in transport.messages if m.startswith(("START_", "STOP_", "TIMER")) or " " in m]
+    assert writes == [
+        "STOP_HEAT", "TARGET_TEMPERATURE 120.5", "START_HEAT",
+    ]
+    stop = transport.messages.index("STOP_HEAT")
+    assert transport.messages[stop + 1] == "MODE"
+    target = transport.messages.index("TARGET_TEMPERATURE 120.5")
+    assert transport.messages[target + 1] == "TARGET_TEMPERATURE"
+    assert transport.messages[-2:] == ["START_HEAT", "MODE"]
+
+
+@pytest.mark.parametrize("mode", [0, 3])
+def test_temperature_change_does_not_enable_idle_heat(mode):
+    device, transport = connected(mode=mode)
+    transport.messages.clear()
+    device.set_target_temperature(120)
+    assert transport.temperature == 120
+    assert transport.active_temperature is None
+    assert device.operating_mode == mode
+    assert "STOP_HEAT" not in transport.messages
+    assert "START_HEAT" not in transport.messages
+
+
+@pytest.mark.parametrize("mode", [0, 1, 2, 3, 4, 5])
+def test_unchanged_temperature_only_refreshes_state(mode):
+    device, transport = connected(mode=mode)
+    transport.temperature = 120  # Front-panel change since last cached read.
+    transport.messages.clear()
+    device.set_target_temperature(120)
+    assert device.target_temperature == 120
+    assert transport.messages == ["MODE", "TARGET_TEMPERATURE", "TARGET_SPEED"]
+
+
+@pytest.mark.parametrize("cached_mode,actual_mode", [(0, 4), (4, 0)])
+def test_temperature_change_observes_front_panel_heating_state(cached_mode, actual_mode):
+    device, transport = connected(mode=cached_mode)
+    transport.mode = actual_mode
+    transport.messages.clear()
+    device.set_target_temperature(120)
+    assert device.operating_mode == actual_mode
+    assert ("START_HEAT" in transport.messages) is (actual_mode == 4)
+    assert ("STOP_HEAT" in transport.messages) is (actual_mode == 4)
+
+
+@pytest.mark.parametrize("failure", [TimeoutError("no reply"), "L", "STOP_HEAT A"])
+def test_temperature_change_aborts_if_stop_is_not_confirmed(failure):
+    device, transport = connected(mode=4)
+    transport.messages.clear()
+    transport.failures["STOP_HEAT"] = failure
+    with pytest.raises((TimeoutError, GuardianProtocolError)):
+        device.set_target_temperature(120)
+    assert "TARGET_TEMPERATURE 120" not in transport.messages
+    assert "START_HEAT" not in transport.messages
+    assert device.status is DeviceStatus.FAULTED
+    assert device.heating_enabled is None
+
+
+@pytest.mark.parametrize("failure_stage", ["write", "readback", "mismatch"])
+def test_temperature_change_leaves_heat_off_when_target_verification_fails(monkeypatch, failure_stage):
+    device, transport = connected(mode=4)
+    request = transport.request
+
+    def fail_target(message):
+        reply = request(message)
+        if message == "TARGET_TEMPERATURE 120":
+            if failure_stage == "write":
+                raise TimeoutError("lost target acknowledgement")
+            transport.failures["TARGET_TEMPERATURE"] = (
+                TimeoutError("lost target readback") if failure_stage == "readback" else "119.5"
+            )
+        return reply
+
+    monkeypatch.setattr(transport, "request", fail_target)
+    transport.messages.clear()
+    with pytest.raises((TimeoutError, GuardianProtocolError)):
+        device.set_target_temperature(120)
+    assert transport.mode == 3  # Stirring continues, heating stays off.
+    assert device.heating_enabled is False
+    assert device.target_temperature is None
+    assert device.status is DeviceStatus.FAULTED
+    assert "START_HEAT" not in transport.messages
+
+
+@pytest.mark.parametrize("failure", [TimeoutError("no reply"), "START_HEAT A"])
+def test_temperature_change_reports_unconfirmed_restart_without_retry(failure):
+    device, transport = connected(mode=4)
+    transport.failures["START_HEAT"] = failure
+    transport.messages.clear()
+    with pytest.raises((TimeoutError, GuardianProtocolError)):
+        device.set_target_temperature(120)
+    assert device.target_temperature == 120
+    assert device.heating_enabled is None
+    assert device.status is DeviceStatus.FAULTED
+    assert transport.messages.count("START_HEAT") == 1
+
+
+@pytest.mark.parametrize("failure", [TimeoutError("no mode"), "99"])
+def test_temperature_change_requires_valid_initial_state(failure):
+    device, transport = connected(mode=4)
+    transport.failures["MODE"] = failure
+    transport.messages.clear()
+    with pytest.raises((TimeoutError, RuntimeError)):
+        device.set_target_temperature(120)
+    assert device.status is DeviceStatus.FAULTED
+    assert "STOP_HEAT" not in transport.messages
+    assert "TARGET_TEMPERATURE 120" not in transport.messages
+    assert "START_HEAT" not in transport.messages
+
+
+@pytest.mark.parametrize("temperature", [151, 360.5, 100.1, float("nan")])
+def test_invalid_temperature_does_not_interrupt_heating(temperature):
+    device, transport = connected(mode=4, limits=GuardianLimits(200))
+    device.set_run_limits(GuardianLimits(150))
+    transport.messages.clear()
+    with pytest.raises(ValueError):
+        device.set_target_temperature(temperature)
+    assert transport.messages == []
+    assert transport.mode == 4
 
 
 def test_rig_and_run_limits_do_not_replace_model_limits():

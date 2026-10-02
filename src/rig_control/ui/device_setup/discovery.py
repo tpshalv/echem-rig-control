@@ -1,4 +1,4 @@
-from rig_control.devices.alicat.verification import verify_role
+from rig_control.devices.alicat.verification import frame_mismatch, verify_role
 from collections.abc import Callable
 
 from rig_control.devices.tasi_ta612c.configuration import (
@@ -294,6 +294,13 @@ class DeviceDiscovery:
             verify_role(observed, bpr=configuration.is_bpr,
                         flow_unit=configuration.limits.flow_unit,
                         downstream_confirmed=configuration.downstream_valve_confirmed)
+            difference = frame_mismatch(
+                configuration.unit_address,
+                observed.frame_description,
+                configuration.frame_fields,
+            )
+            if difference:
+                raise ValueError(difference)
             detected = f" Detected {observed.description}."
         return ReadinessCheckResult(
             True,

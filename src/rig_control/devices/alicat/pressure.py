@@ -150,6 +150,7 @@ class AlicatBackPressureController(
         state = retry_read(lambda: self._protocol.read_state(self.unit_address), attempts=3, initial_delay_seconds=0.05)
         self._read_pressure_setpoint(observed)
         self._state = state
+        self.note_status_codes(state)
         self.valve_hold = "HLD" in state.status_codes
         readings = list(state_measurements(state, include_setpoint=False))
         # The commissioned frame explicitly describes absolute pressure units.
@@ -158,6 +159,7 @@ class AlicatBackPressureController(
                     if item.channel == "absolute_pressure" else item for item in readings]
         readings.append(DeviceMeasurement("pressure_setpoint_absolute", Measurement(
             self.pressure_setpoint_pa / 100_000, "bara", state.timestamp, state.quality)))
+        readings.extend(self.valve_drive_measurements(state))
         readings.append(DeviceMeasurement("valve_hold", Measurement(
             float(self.valve_hold), "", state.timestamp, state.quality)))
         return tuple(readings)

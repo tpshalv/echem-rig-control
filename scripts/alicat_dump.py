@@ -36,6 +36,30 @@ QUERIES: tuple[tuple[str, str], ...] = SETUP_QUERIES + (
 )
 
 DEFAULT_BAUD_RATE = 19200
+
+#: Statistic IDs to sweep with FPF, which reports one statistic's full scale
+#: and unit. The IDs are the ones the ??D* table lists per column: 002 is
+#: absolute pressure, 005 mass flow, and so on. Sweeping them says which
+#: measurements this instrument knows about, including any not currently in
+#: its data frame. FPF with a single argument is a query: asking for
+#: statistic 2 returns 160 PSIA, not a setting of 2.
+STATISTIC_IDS = range(0, 64)
+
+#: Registers to read. R<n> is not documented in the Serial Primer, so this
+#: sweep stays behind --explore and is not part of a normal dump. The
+#: documented queries above cover everything the primer describes, including
+#: valve drive (VD), so there is rarely a reason to run it.
+REGISTER_IDS = range(0, 128)
+
+#: A reply to one of these arrives in tens of milliseconds, so a sweep waits
+#: far less than a normal query before moving on. Otherwise the queries that
+#: legitimately do not answer would make the sweep take minutes.
+SWEEP_TIMEOUT_SECONDS = 0.3
+
+#: Read before and after a sweep and compared. These are the settings that
+#: decide how this instrument controls, so if a sweep disturbed anything that
+#: matters, the comparison says so instead of us assuming it did not.
+SETTINGS_TO_COMPARE = ("LR", "R20", "R122", "LS", "??D*", "FPF 2")
 #: Tried in turn when nothing answers, so a double-clicked run does not have
 #: to be repeated with a different setting. Polling an address is read-only
 #: whatever the baud rate.
@@ -132,6 +156,122 @@ def responding_addresses(
     return tuple(found)
 
 
+def read_settings(
+    transport: PySerialTextTransport,
+    address: str,
+) -> dict[str, str]:
+    """Capture the settings that decide how this instrument controls."""
+
+    captured: dict[str, str] = {}
+    for suffix in SETTINGS_TO_COMPARE:
+        try:
+            captured[suffix] = transport.request(f"{address}{suffix}")
+        except Exception as error:
+            captured[suffix] = f"({type(error).__name__})"
+    return captured
+
+
+def sweep(
+    transport: PySerialTextTransport,
+    address: str,
+    template: str,
+    identifiers,
+) -> dict[int, str]:
+    answers: dict[int, str] = {}
+    for identifier in identifiers:
+        try:
+            answers[identifier] = transport.request(template.format(a=address, n=identifier))
+        except Exception:
+            continue
+    return answers
+
+
+def explore_address(
+    port: str,
+    address: str,
+    baud_rate: int,
+    timeout_seconds: float,
+    report: Report,
+) -> None:
+    """Sweep the statistics and registers this instrument answers for.
+
+    Read-only. Queries that do not answer are counted rather than listed, so
+    the useful lines are not buried.
+    """
+
+    transport = PySerialTextTransport(
+        port=port,
+        baud_rate=baud_rate,
+        timeout_seconds=min(timeout_seconds, SWEEP_TIMEOUT_SECONDS),
+    )
+    try:
+        transport.open()
+        before = read_settings(transport, address)
+
+        report.line()
+        report.line(f"=== Address {address}: statistics this instrument reports ===")
+        report.line(
+            "(FPF <id> reports one statistic's full scale and unit. The ids "
+            "are the ones the ??D* table lists per column.)"
+        )
+        statistics = sweep(transport, address, "{a}FPF {n}", STATISTIC_IDS)
+        for identifier, reply in statistics.items():
+            report.line(f"  statistic {identifier:>3} -> {reply!r}")
+        report.line(
+            f"  {len(statistics)} of {len(STATISTIC_IDS)} statistic ids answered."
+        )
+
+        report.line()
+        report.line(f"=== Address {address}: registers ===")
+        first = sweep(transport, address, "{a}R{n}", REGISTER_IDS)
+        for identifier, reply in first.items():
+            report.line(f"  register {identifier:>3} -> {reply!r}")
+        report.line(f"  {len(first)} of {len(REGISTER_IDS)} registers answered.")
+
+        # Read again straight away. A register that differs between two
+        # back-to-back passes is a live value rather than a setting, which is
+        # exactly what a valve position would look like.
+        second = sweep(transport, address, "{a}R{n}", REGISTER_IDS)
+        moving = [
+            identifier
+            for identifier, reply in first.items()
+            if second.get(identifier) != reply
+        ]
+        report.line()
+        report.line(f"=== Address {address}: registers that changed between passes ===")
+        if moving:
+            for identifier in moving:
+                report.line(
+                    f"  register {identifier:>3}: {first[identifier]!r} "
+                    f"then {second.get(identifier)!r}"
+                )
+            report.line(
+                "  These hold live values, not settings. With the valve still "
+                "and no flow, one tracking valve position should stand out."
+            )
+        else:
+            report.line("  none")
+
+        after = read_settings(transport, address)
+        changed = [key for key in SETTINGS_TO_COMPARE if before[key] != after[key]]
+        report.line()
+        report.line(f"=== Address {address}: did the sweep change any setting? ===")
+        if changed:
+            for key in changed:
+                report.line(f"  !! {key}: was {before[key]!r}, now {after[key]!r}")
+            report.line(
+                "  !! Something changed. Stop and report this before using "
+                "the instrument."
+            )
+        else:
+            report.line(
+                "  No. Control loop, register 20, register 122, setpoint, data "
+                "frame and full scale all read the same after the sweep as before."
+            )
+    finally:
+        transport.close()
+
+
 def dump_address(
     port: str,
     address: str,
@@ -210,6 +350,8 @@ def run(parsed: argparse.Namespace, report: Report) -> int:
             report.line(f"Skipping {address!r}: an address is one letter A-Z")
             continue
         dump_address(port, address, baud_rate, parsed.timeout, report)
+        if parsed.explore:
+            explore_address(port, address, baud_rate, parsed.timeout, report)
     return 0
 
 
@@ -224,8 +366,19 @@ def main(arguments: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--baud-rate", type=int, default=DEFAULT_BAUD_RATE)
     parser.add_argument("--timeout", type=float, default=1.0)
+    parser.add_argument(
+        "--explore",
+        action="store_true",
+        help="Also sweep every statistic and register, read-only. Slower.",
+    )
     parsed = parser.parse_args(arguments)
     interactive = parsed.port is None
+
+    if interactive and not parsed.explore:
+        parsed.explore = ask(
+            "Also sweep all statistics and registers? Slower, still read-only "
+            "[y/N]: "
+        ).lower().startswith("y")
 
     report = Report()
     report.line("Alicat read-only query dump")

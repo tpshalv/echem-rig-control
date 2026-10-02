@@ -173,16 +173,50 @@ output enable, including the worst-case power `voltage_setpoint * current_limit`
 Like the 2260B, cached state assumes exclusive software control of the supply.
 
 The [2280 reference manual, 077085503](https://download.tek.com/manual/077085503_2280_Ref_Mar_20191.pdf)
-confirms the shared source and voltage/current measurement commands. The 2280S
-uses `OUTP:STAT`, configures `FORM:ELEM "READ"` for numeric replies, and disables
-output delays for prompt shutdown. Measurements require output enabled; the
+confirms the shared source commands. On connection the 2280S selects
+`SENS:FUNC "CONC"`, `FORM:ELEM "READ,SOUR,MODE"`, immediate arm/trigger sources, and
+`INIT:CONT ON`. Each powered poll uses one `FETC?` for both channels, parsing current,
+voltage and actual regulation mode (CC/CV/OFF; manual pp. 7-13 to 7-15), without
+switching measurement functions or retriggering. Each poll first observes
+`OUTP:STAT?` (p. 7-59), including independent instrument output-off events.
+Manual p. 3-13 distinguishes concurrent measured values from the opposite
+channel's setting in single-function mode;
+[Application Note 3281, p. 4](https://download.tek.com/document/2280S%20Low%20Current%20AppNote.pdf)
+identifies `READ,SOUR` as current and voltage measurement data. Missing,
+extra, or non-finite fields fail the poll after read retries; there is no
+fallback to separate `MEAS` queries. Fetch may repeat a reading if acquisition
+has not advanced. The two-value format was verified on hardware; the added MODE
+element is covered by simulated transport tests and awaits hardware verification.
+Power-supply polling records `voltage_setpoint`, `current_limit`, and
+`output_enabled` alongside readings; 2280S additionally records `regulation_mode`.
+Setpoints are cached settings read on connect (source queries, p. 7-77) and updated
+after successful app writes, assuming exclusive control. Actual regulation mode
+is distinct from the manual UI's requested operating mode. Output-off polls retain
+settings and state, skip FETCH, and leave V/I absent rather than fabricating zero.
+Live V/I rows become stale, and setpoint histories are available in the dashboard's
+Electrical selector as dashed overlays on solid measured traces.
+Raw journals preserve numeric state codes with explicit code-to-label units;
+CSV/Excel render ON/OFF and CC/CV/OFF as text. Exports use the latest setpoint or
+state per bin while averaging measured readings. Older runs cannot recover these
+channels if they were never recorded.
+Settings > Power supply contains the existing safety/default controls and
+`keithley_2280s_nplc` (default 0.5; validated range 0.002-12 PLC, supported
+at both 50 and 60 Hz). Apply rebuilds the session and Save persists the value
+in the application settings file. Each 2280S receives `SENS:CONC:NPLC` once
+on connection; polling never changes it. This adjusts integration time only,
+leaving Auto Zero, filtering, polling intervals and screen refresh separate.
+Direct driver construction without an NPLC option preserves the instrument's
+integration setting. Other supply models do not receive this command.
+The driver uses `OUTP:STAT` and disables output delays for prompt shutdown.
+Measurements require output enabled; the
 driver reports an error when it is off. The manual permits 6.1 A programming,
 but this driver deliberately enforces the rated 6 A. No `MEAS:POW:DC?` command
 is exposed because the manual does not list a power measurement function.
 
 For a 2280S connection, `socket_scpi` is the self-contained Ethernet path.
 The raw socket port is normally 5025 on firmware 1.06 and later and 5050 on
-older firmware. A `visa_scpi` profile can use the pure-Python `@py` backend
+older firmware. The device-setup UI defaults the 2280S to 5050 and tells the
+user to retry 5025 if identification is refused. A `visa_scpi` profile can use the pure-Python `@py` backend
 for existing serial/VISA installations, or explicitly select
 `visa_backend = "@ni"` for a USBTMC connection. The latter requires a
 separate NI-VISA installation on that computer; NI-VISA is not a general

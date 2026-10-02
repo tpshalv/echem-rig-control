@@ -25,6 +25,8 @@ from rig_control.devices.pressure_controller import absolute_unit_factor
 NATIVE = "native"
 PRESSURE_UNITS = (NATIVE, "bara", "psia", "kpaa")
 FLOW_UNITS = (NATIVE, "SCCM", "SLPM")
+#: Currents are always stored and commanded in A; mA is display and entry only.
+CURRENT_UNITS = ("mA", "A")
 
 
 def _converted(
@@ -52,9 +54,10 @@ class DisplayUnits:
 
     pressure: str = NATIVE
     flow: str = NATIVE
+    current: str = "mA"
 
     def __post_init__(self) -> None:
-        for name, allowed in (("pressure", PRESSURE_UNITS), ("flow", FLOW_UNITS)):
+        for name, allowed in (("pressure", PRESSURE_UNITS), ("flow", FLOW_UNITS), ("current", CURRENT_UNITS)):
             value = getattr(self, name)
             if not isinstance(value, str) or value.strip().casefold() not in {
                 item.casefold() for item in allowed

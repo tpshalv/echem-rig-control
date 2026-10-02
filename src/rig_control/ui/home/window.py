@@ -187,6 +187,7 @@ class HomeWindow:
                 default_current_amps=session.settings.power_supply_default_current_amps,
                 default_voltage_volts=session.settings.power_supply_default_voltage_volts,
             ),
+            recipe_runner=session.recipe_runner,
         )
         window = OperationWindow(
             child,

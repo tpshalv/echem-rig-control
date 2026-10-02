@@ -500,7 +500,7 @@ def test_unified_channels_separate_measurements_from_limits_and_setpoints() -> N
     assert rows[("supply", "voltage")].writable is False
     assert rows[("supply", "voltage")].value == 4.9
     assert rows[("supply", "voltage_setpoint")].writable is True
-    assert rows[("supply", "voltage_setpoint")].value == 10.0
+    assert rows[("supply", "voltage_setpoint")].value == 0.0
     assert rows[("supply", "current")].writable is False
     assert rows[("supply", "current_limit")].writable is True
     assert rows[("mfc", "mass_flow")].writable is False
@@ -624,12 +624,8 @@ def test_channel_labels_swap_with_power_supply_operating_mode() -> None:
     assert default_rows[("supply", "voltage")].channel_name == "Voltage"
     assert default_rows[("supply", "voltage_setpoint")].channel_name == "Voltage limit"
     assert default_rows[("supply", "current_limit")].channel_name == "Current setpoint"
-    # connect_all() applies manual power-supply defaults itself - this was
-    # previously never called anywhere, so these values never fed through.
-    # Voltage is the protective limit in constant current mode, so it gets
-    # the low starting default; current is the setpoint here and is left
-    # untouched.
-    assert default_rows[("supply", "voltage_setpoint")].value == 10.0
+    # The conservative manual defaults leave both source settings at zero.
+    assert default_rows[("supply", "voltage_setpoint")].value == 0.0
     assert default_rows[("supply", "current_limit")].value == 0.0
 
     result = model.manual_control.set_power_supply_operating_mode(

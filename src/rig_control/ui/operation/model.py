@@ -14,6 +14,7 @@ from rig_control.experiment_recording import ExperimentRecorder
 from rig_control.instrument_settings.pump_calibration import PumpCalibrationService
 from rig_control.models import Event, Measurement, Quality
 from rig_control.polling import PollingService
+from rig_control.power_supply_telemetry import state_label
 from rig_control.control.service import RigControlService
 from rig_control.devices.mass_flow_controller import MassFlowController
 from rig_control.devices.power_supply import PowerSupply, PowerSupplyOperatingMode
@@ -26,6 +27,7 @@ from rig_control.models import DeviceStatus
 from rig_control.rig_profile import DeviceCapability, RigProfile
 from rig_control.ui.manual_control.model import ManualControlViewModel
 from rig_control.ui.manual_control.types import PowerSupplyManualSafety
+from rig_control.recipes.execution import RecipeRunner
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,6 +214,7 @@ class OperationViewModel:
         power_supply_safety: PowerSupplyManualSafety | None = None,
         pump_calibration_service: PumpCalibrationService | None = None,
         display_units: DisplayUnits | None = None,
+        recipe_runner: RecipeRunner | None = None,
     ) -> None:
         self._validate_history_limit(history_limit)
         self._validate_event_limit(event_limit)
@@ -227,6 +230,7 @@ class OperationViewModel:
         )
         self._profile_id = profile_id
         self._profile = profile
+        self.recipe_runner = recipe_runner
         self._measurements: dict[
             tuple[str, str], LiveMeasurementRow
         ] = {}
@@ -236,6 +240,16 @@ class OperationViewModel:
         ] = {}
         self._warnings: dict[str, str] = {}
         self._events: deque[Event] = deque(maxlen=event_limit)
+
+    @property
+    def profile(self) -> RigProfile | None:
+        """Active profile, used by the recipe editor for friendly device labels."""
+        return self._profile
+
+    @property
+    def display_units(self) -> DisplayUnits:
+        """Units the screens show and accept, e.g. mA for recipe currents."""
+        return self._display_units
 
     @property
     def is_monitoring(self) -> bool:
@@ -296,6 +310,8 @@ class OperationViewModel:
             if isinstance(device, MassFlowController) and reading.channel == "setpoint":
                 maximum = device.limits.maximum_flow
             value, unit = self._for_display(reading.channel, reading.value, reading.unit)
+            if reading.channel == "regulation_mode":
+                value, unit = state_label(reading.value, reading.unit), ""
             if maximum is not None:
                 maximum = self._for_display(reading.channel, maximum, reading.unit)[0]
             row = OperationChannelRow(
@@ -410,7 +426,7 @@ class OperationViewModel:
                     True, "boolean",
                 )
                 rows[(device_id, "operating_mode")] = OperationChannelRow(
-                    device_id, device_name, "operating_mode", "Operating mode",
+                    device_id, device_name, "operating_mode", "Requested operating mode",
                     mode.value, "", "good", None, device_system, True, "mode",
                 )
             if isinstance(device, Pump):
@@ -677,6 +693,7 @@ class OperationViewModel:
             "setpoint": "Flow setpoint",
             "current": "Current draw",
             "voltage": "Voltage",
+            "regulation_mode": "Actual regulation mode",
         }
         return names.get(channel, channel.replace("_", " ").capitalize())
 
@@ -928,6 +945,16 @@ class OperationViewModel:
                 history.append(row)
                 successful_ids.add(record.device_id)
 
+            # An output-off snapshot has no new V/I reading. Retain the last
+            # reading visibly as stale, without inventing zero measurements.
+            for record in batch.measurements:
+                if record.channel == "output_enabled" and not record.measurement.value:
+                    for channel in ("voltage", "current"):
+                        key = (record.device_id, channel)
+                        if key in self._measurements:
+                            self._measurements[key] = replace(
+                                self._measurements[key], quality=Quality.STALE.value)
+
             for device_id in successful_ids:
                 self._warnings.pop(device_id, None)
             for failure in batch.failures:
@@ -951,6 +978,10 @@ class OperationViewModel:
         """
 
         failures: list[str] = []
+        if self.recipe_runner is not None and self.recipe_runner.is_running:
+            self.recipe_runner.stop()
+            if self.recipe_runner.join(10.0) is None:
+                failures.append("Recipe did not stop within 10 seconds.")
         if self.is_recording:
             try:
                 self._experiment_recorder.stop()

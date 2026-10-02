@@ -106,6 +106,7 @@ def create_device_manager(
     esp32_transport_factory: Esp32TransportFactory | None = None,
     event_sink: EventSink | None = None,
     pressure_policy: PressurePolicy | None = None,
+    keithley_2280s_nplc: float | None = None,
 ) -> DeviceManager:
     """Construct all enabled devices described by a rig profile."""
 
@@ -133,6 +134,7 @@ def create_device_manager(
                 selected_esp32_transport_factory,
                 event_sink,
                 pressure_policy,
+                keithley_2280s_nplc,
             )
         )
 
@@ -148,6 +150,7 @@ def _create_device(
     esp32_transport_factory: Esp32TransportFactory,
     event_sink: EventSink | None,
     pressure_policy: PressurePolicy | None = None,
+    keithley_2280s_nplc: float | None = None,
 ) -> Device:
     if role.backend is DeviceBackend.REAL:
         if role.driver == "tasi_ta612c":
@@ -195,7 +198,9 @@ def _create_device(
                 "ametek_asterion",
             }
         ):
-            return _create_real_scpi_power_supply(profile, role)
+            return _create_real_scpi_power_supply(
+                profile, role, keithley_2280s_nplc=keithley_2280s_nplc,
+            )
 
         if (
             role.capability in {
@@ -319,6 +324,8 @@ def _create_device(
 def _create_real_scpi_power_supply(
     profile: RigProfile,
     role: DeviceRole,
+    *,
+    keithley_2280s_nplc: float | None = None,
 ) -> Keithley2260B | Keithley2280S | AmetekAsterion:
     """Construct a disconnected SCPI power supply from profile settings."""
 
@@ -355,10 +362,15 @@ def _create_real_scpi_power_supply(
                 port=connection.port,
                 timeout_seconds=connection.timeout_seconds,
             )
+        measurement_options = (
+            {"measurement_nplc": keithley_2280s_nplc}
+            if driver_type is Keithley2280S else {}
+        )
         return driver_type(
             device_id=configuration.device_id,
             limits=configuration.limits,
             transport=transport,
+            **measurement_options,
         )
     except (KeyError, TypeError, ValueError) as error:
         raise DeviceFactoryError(

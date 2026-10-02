@@ -35,7 +35,11 @@ SCPI_POWER_SUPPLY_DRIVERS = {
         "connection_prefix": "keithley",
         "manufacturer": "Keithley Instruments",
         "model": "2280S-32-6",
-        "default_port": 5025,
+        "default_port": 5050,
+        "ethernet_port_hint": (
+            "Keithley 2280S LAN defaults to 5050. If identification is "
+            "refused, try 5025; the SCPI port depends on firmware."
+        ),
         "default_voltage": 32.0,
         "default_current": 6.0,
         "default_power": 192.0,

@@ -38,6 +38,7 @@ class ApplicationSession:
             profile,
             event_sink=self.record_control_event,
             pressure_policy=settings.pressure_policy,
+            keithley_2280s_nplc=settings.keithley_2280s_nplc,
         )
         self.control_service = RigControlService(
             self.device_manager, event_sink=self.record_control_event,

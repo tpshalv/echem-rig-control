@@ -89,6 +89,9 @@ def test_poll_once_returns_named_measurements_from_all_devices() -> None:
     )
     supply.connect()
     supply.set_simulated_measurement(voltage=4.2, current=1.5)
+    supply.set_voltage(5.0)
+    supply.set_current_limit(2.0)
+    supply.set_output_enabled(True)
     manager.register(sensor)
     manager.register(supply)
 
@@ -102,6 +105,9 @@ def test_poll_once_returns_named_measurements_from_all_devices() -> None:
         ("temperature", "measurement"): 12.5,
         ("supply", "voltage"): 4.2,
         ("supply", "current"): 1.5,
+        ("supply", "voltage_setpoint"): 5.0,
+        ("supply", "current_limit"): 2.0,
+        ("supply", "output_enabled"): 1.0,
     }
     assert batch.failures == ()
     assert batch.events == ()

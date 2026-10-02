@@ -36,7 +36,10 @@ def test_connect_reads_actual_state_and_configures_numeric_measurements(model):
     assert transport.queries == [
         "*IDN?", "SOUR:VOLT:LEV:IMM:AMPL?", "SOUR:CURR:LEV:IMM:AMPL?", "OUTP:STAT?",
     ]
-    assert transport.writes == ['FORM:ELEM "READ"', "OUTP:DEL:STAT OFF"]
+    assert transport.writes == [
+        'SENS:FUNC "CONC"', 'FORM:ELEM "READ,SOUR,MODE"',
+        "ARM:SOUR IMM", "TRIG:SOUR IMM", "INIT:CONT ON", "OUTP:DEL:STAT OFF",
+    ]
     assert supply.hardware_limits is HARDWARE_LIMITS
     assert (HARDWARE_LIMITS.maximum_voltage, HARDWARE_LIMITS.maximum_current,
             HARDWARE_LIMITS.maximum_power) == (32, 6, 192)
@@ -122,19 +125,55 @@ def test_enable_revalidates_cached_operating_point_but_disable_is_always_allowed
     assert transport.writes[-1] == "OUTP:STAT OFF"
 
 
-@pytest.mark.parametrize("method,query,unit", [
-    ("measure_voltage", Protocol.MEASURE_VOLTAGE_QUERY, "V"),
-    ("measure_current", Protocol.MEASURE_CURRENT_QUERY, "A"),
+@pytest.mark.parametrize("method,value,unit", [
+    ("measure_voltage", 0.505, "V"),
+    ("measure_current", 0.05, "A"),
 ])
-def test_measurements_keep_units_and_retry_bad_responses(method, query, unit):
+def test_measurements_keep_units_and_retry_bad_responses(method, value, unit):
     supply, transport = make_supply(output="ON")
     supply.connect()
-    transport.queue_response(query, "bad")
-    transport.queue_response(query, "1.25")
+    transport.queue_response("FETC?", "bad")
+    transport.queue_response("FETC?", "0.05,0.505,CC")
     result = getattr(supply, method)()
-    assert result.value == 1.25
+    assert result.value == value
     assert result.unit == unit
-    assert transport.queries.count(query) == 2
+    assert transport.queries[-2:] == ["FETC?", "FETC?"]
+
+
+def test_poll_fetches_both_actual_values_once_without_reconfiguring_or_triggering():
+    supply, transport = make_supply(voltage="1", current="0.05", output="ON")
+    supply.connect()
+    writes = transport.writes.copy()
+    transport.queries.clear()
+    for response, voltage, current in (
+        ("+5.000000E-02,+5.050000E-01,CC", 0.505, 0.05),
+        ("+4.900000E-02,+4.950000E-01,CC", 0.495, 0.049),
+    ):
+        transport.queue_response("FETC?", response)
+        readings = supply.read_measurements()
+        assert [(r.channel, r.measurement.value, r.measurement.unit) for r in readings] == [
+            ("voltage", voltage, "V"), ("current", current, "A"),
+            ("regulation_mode", 1.0, "0=OFF,1=CC,2=CV"),
+        ]
+        assert readings[0].measurement.timestamp == readings[1].measurement.timestamp
+    assert transport.queries == ["FETC?", "FETC?"]
+    assert transport.writes == writes
+    assert supply.voltage_setpoint == 1
+    assert supply.current_limit == 0.05
+    assert supply.output_enabled
+
+
+def test_single_field_response_fails_without_falling_back_to_meas_queries():
+    supply, transport = make_supply(output="ON")
+    supply.connect()
+    writes = transport.writes.copy()
+    transport.queries.clear()
+    for _ in range(3):
+        transport.queue_response("FETC?", "+6.477145E-05")
+    with pytest.raises(ValueError, match="expected three"):
+        supply.read_measurements()
+    assert transport.queries == ["FETC?"] * 3
+    assert transport.writes == writes
 
 
 @pytest.mark.parametrize("output", ["OFF", "0", "2", "DISABLE"])
@@ -142,7 +181,7 @@ def test_measurements_fail_without_querying_when_output_is_off(output):
     supply, transport = make_supply(output=output)
     supply.connect()
     queries = transport.queries.copy()
-    for method in (supply.measure_voltage, supply.measure_current):
+    for method in (supply.measure_voltage, supply.measure_current, supply.read_measurements):
         with pytest.raises(RuntimeError, match="require output enabled"):
             method()
     assert transport.queries == queries
@@ -199,7 +238,35 @@ def test_disconnected_operations_are_rejected():
     supply, transport = make_supply()
     for action in (lambda: supply.set_voltage(1), lambda: supply.set_current_limit(1),
                    lambda: supply.set_output_enabled(True), supply.measure_voltage,
-                   supply.measure_current):
+                   supply.measure_current, supply.read_measurements):
         with pytest.raises(RuntimeError, match="not ready"):
             action()
     assert transport.writes == []
+
+
+def test_telemetry_records_setpoints_actual_mode_and_output_trip_without_writes():
+    from rig_control.devices.manager import DeviceManager
+    from rig_control.polling import PollingService
+
+    supply, transport = make_supply(voltage="1", current="0.05", output="ON")
+    supply.connect()
+    manager = DeviceManager()
+    manager.register(supply)
+    poller = PollingService(manager)
+    writes = transport.writes.copy()
+    transport.queries.clear()
+    transport.queue_response("OUTP:STAT?", "1")
+    transport.queue_response("FETC?", "0.05,0.505,CC")
+    records = poller._read_device("supply")
+    values = {r.channel: r.measurement.value for r in records}
+    assert values == dict(voltage=0.505, current=0.05, voltage_setpoint=1,
+                          current_limit=0.05, output_enabled=1, regulation_mode=1)
+    assert len({r.measurement.timestamp for r in records}) == 1
+    # Hardware turns off independently; no FETCH of an old powered reading.
+    transport.queue_response("OUTP:STAT?", "0")
+    records = poller._read_device("supply")
+    assert {r.channel: r.measurement.value for r in records} == dict(
+        voltage_setpoint=1, current_limit=0.05, output_enabled=0, regulation_mode=0)
+    assert transport.queries == ["OUTP:STAT?", "FETC?", "OUTP:STAT?"]
+    assert transport.writes == writes
+    assert not supply.output_enabled

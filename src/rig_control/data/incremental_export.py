@@ -18,6 +18,7 @@ import sqlite3
 
 from rig_control.atomic_replace import replace_atomically
 from rig_control.data.export import LAST_VALUE_CHANNELS, _channel_labels
+from rig_control.power_supply_telemetry import state_label
 
 
 class IncrementalCsvExporter:
@@ -191,7 +192,9 @@ class IncrementalCsvExporter:
                 for _, device, channel, total, count, latest in records
             }
             yield [datetime.fromtimestamp(bucket * self.bin_seconds, timezone.utc).isoformat(),
-                   *(values.get((device, channel), "") for device, channel, _ in signals)]
+                   *(state_label(values[(device, channel)], unit)
+                     if (device, channel) in values else ""
+                     for device, channel, unit in signals)]
 
     @contextmanager
     def snapshot(self):

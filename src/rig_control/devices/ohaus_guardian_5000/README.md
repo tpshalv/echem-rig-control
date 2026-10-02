@@ -81,6 +81,30 @@ could not be read), so the code reaches the event log and the run's
 `events.journal.jsonl`. Serial loss
 cannot guarantee a physical shutdown; the documented protocol has no watchdog.
 
+### Applying temperature changes while heating
+
+On the tested G52 (RTA enabled), serial temperature changes updated the display
+and target readback but did not reliably affect the running controller until
+heating was stopped and started again. `set_target_temperature()` therefore
+validates the request and refreshes actual state, then, for a changed target
+with heating enabled, confirms `STOP_HEAT`, writes and verifies the target,
+and confirms `START_HEAT`. The complete sequence holds the driver lock. It
+uses no intentional delay, software ramp, or command retries; elapsed time
+depends on instrument replies and still needs measurement on hardware.
+
+An unchanged target only refreshes state. A target change with heating off
+leaves it off. Stirring is not switched. Stop or target verification failure
+aborts without a restart; after a confirmed stop, failed target verification
+leaves heating off. An unconfirmed restart is reported as a fault with heating
+state unknown. All hardware, rig and run limits still apply.
+
+The instrument's normal stop/start timer effects still apply (the manual says
+`STOP_HEAT` resets the timer when stirring is inactive). This workaround does
+not configure or reset the timer explicitly; use count-up mode for runs that
+should not end on a hardware countdown. The successful manual test used about
+10 seconds between stop/start; the reply-driven sequence without that pause
+still requires physical verification. Temperature measurements are unchanged.
+
 ## Physical verification still required
 
 The official manual gives command names, acknowledgement syntax and parameter

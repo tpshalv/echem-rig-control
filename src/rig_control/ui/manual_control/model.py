@@ -151,6 +151,19 @@ class ManualControlViewModel:
             )
         )
 
+    def _default_current_limit(self, device: PowerSupply) -> float:
+        """Return a conservative CV compliance limit for one supply.
+
+        The application safety policy is an additional limit, never a reason
+        to exceed the capability advertised by an individual instrument.
+        """
+
+        return min(
+            self._power_supply_safety.default_current_amps,
+            self.effective_current_ceiling(),
+            device.limits.maximum_current,
+        )
+
     def initialize_manual_power_supply_defaults(
         self,
     ) -> tuple[ManualActionResult, ...]:
@@ -203,10 +216,7 @@ class ManualControlViewModel:
                 results.append(
                     self.set_power_supply_current(
                         device_id,
-                        min(
-                            self._power_supply_safety.default_current_amps,
-                            self.effective_current_ceiling(),
-                        ),
+                        self._default_current_limit(device),
                     )
                 )
 
@@ -339,10 +349,7 @@ class ManualControlViewModel:
             if not target_result.succeeded:
                 return target_result
 
-            current_limit = min(
-                self._power_supply_safety.default_current_amps,
-                self.effective_current_ceiling(),
-            )
+            current_limit = self._default_current_limit(device)
             limit_result = self._execute_current_limit(
                 device_id,
                 current_limit,

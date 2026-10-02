@@ -14,6 +14,7 @@ from rig_control.experiment_recording import ExperimentRecorder
 from rig_control.instrument_settings.pump_calibration import PumpCalibrationService
 from rig_control.models import Event, Measurement, Quality
 from rig_control.polling import PollingService
+from rig_control.power_supply_telemetry import state_label
 from rig_control.control.service import RigControlService
 from rig_control.devices.mass_flow_controller import MassFlowController
 from rig_control.devices.power_supply import PowerSupply, PowerSupplyOperatingMode
@@ -296,6 +297,8 @@ class OperationViewModel:
             if isinstance(device, MassFlowController) and reading.channel == "setpoint":
                 maximum = device.limits.maximum_flow
             value, unit = self._for_display(reading.channel, reading.value, reading.unit)
+            if reading.channel == "regulation_mode":
+                value, unit = state_label(reading.value, reading.unit), ""
             if maximum is not None:
                 maximum = self._for_display(reading.channel, maximum, reading.unit)[0]
             row = OperationChannelRow(
@@ -410,7 +413,7 @@ class OperationViewModel:
                     True, "boolean",
                 )
                 rows[(device_id, "operating_mode")] = OperationChannelRow(
-                    device_id, device_name, "operating_mode", "Operating mode",
+                    device_id, device_name, "operating_mode", "Requested operating mode",
                     mode.value, "", "good", None, device_system, True, "mode",
                 )
             if isinstance(device, Pump):
@@ -677,6 +680,7 @@ class OperationViewModel:
             "setpoint": "Flow setpoint",
             "current": "Current draw",
             "voltage": "Voltage",
+            "regulation_mode": "Actual regulation mode",
         }
         return names.get(channel, channel.replace("_", " ").capitalize())
 
@@ -927,6 +931,16 @@ class OperationViewModel:
                 )
                 history.append(row)
                 successful_ids.add(record.device_id)
+
+            # An output-off snapshot has no new V/I reading. Retain the last
+            # reading visibly as stale, without inventing zero measurements.
+            for record in batch.measurements:
+                if record.channel == "output_enabled" and not record.measurement.value:
+                    for channel in ("voltage", "current"):
+                        key = (record.device_id, channel)
+                        if key in self._measurements:
+                            self._measurements[key] = replace(
+                                self._measurements[key], quality=Quality.STALE.value)
 
             for device_id in successful_ids:
                 self._warnings.pop(device_id, None)

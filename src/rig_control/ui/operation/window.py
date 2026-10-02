@@ -370,6 +370,8 @@ class OperationWindow:
         signals = []
         rows = {row.key: row for row in self._view_model.channel_rows()}
         for reading in self._view_model.measurement_rows():
+            if reading.channel in {"output_enabled", "regulation_mode"}:
+                continue  # These states are shown in the table and exports.
             row = rows.get((reading.device_id, reading.channel))
             label = (
                 f"{row.device_name} — {row.channel_name}"

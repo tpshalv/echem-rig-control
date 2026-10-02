@@ -117,10 +117,12 @@ def addressed_tokens(address: str, response: str) -> list[str]:
 def parse_control_mode(address: str, loop: str, register: str) -> AlicatControlMode:
     """Decode the LR loop reply and register 20 into a live control mode.
 
-    A 10v22 reply looks like ``A 37 +0.0000 +2.0000 7 SLPM``: the control
-    variable, then the setpoint range, then the engineering-unit code and its
-    label. The range is read by position between the variable and the unit,
-    so a reply that omits it is still understood.
+    The Serial Primer (Feb 2023 rev. 2, p. 15) documents the 10v05+ reply as
+    variable, unit code, unit label, minimum, maximum. A 10v22 instrument on
+    the bench answers variable, minimum, maximum, unit code, unit label. Both
+    orders are read here by finding the unit label — the one field that is
+    not a number — and working outwards from it, rather than trusting either
+    order to be the only one.
 
     Every failure quotes the instrument's own reply. Firmware differs in what
     it answers here, and an error that hides the text cannot be acted on.
@@ -134,28 +136,37 @@ def parse_control_mode(address: str, loop: str, register: str) -> AlicatControlM
         )
     try:
         variable = int(parts[0])
-        int(parts[-2])  # Engineering-unit code, even though the label is used.
     except ValueError as error:
         raise ValueError(
-            f"the loop query reply is not <variable> [range] <unit code> "
-            f"<unit>: {loop!r} ({error})"
+            f"the loop query reply does not start with a control variable: "
+            f"{loop!r} ({error})"
         ) from error
-    unit = parts[-1]
-    bounds = parts[1:-2]
+
+    labels = [index for index, token in enumerate(parts[1:], start=1)
+              if not _is_number(token)]
+    if len(labels) != 1:
+        raise ValueError(
+            f"the loop query reply does not contain exactly one unit label: {loop!r}"
+        )
+    label_index = labels[0]
+    unit = parts[label_index]
+    if label_index < 2:
+        raise ValueError(f"the loop query reply has no unit code: {loop!r}")
+    int(parts[label_index - 1])  # The engineering-unit code precedes its label.
+
+    bounds = [
+        token for index, token in enumerate(parts[1:], start=1)
+        if index not in (label_index, label_index - 1)
+    ]
     if not bounds:
         minimum, maximum = None, None
     elif len(bounds) == 2:
-        try:
-            minimum, maximum = float(bounds[0]), float(bounds[1])
-        except ValueError as error:
-            raise ValueError(
-                f"the loop query reported a non-numeric range: {loop!r}"
-            ) from error
+        minimum, maximum = float(bounds[0]), float(bounds[1])
         if not isfinite(minimum) or not isfinite(maximum) or minimum >= maximum:
             raise ValueError(f"the loop query reported an invalid range: {loop!r}")
     else:
         raise ValueError(
-            f"the loop query reply has {len(bounds)} unexpected fields between "
+            f"the loop query reply has {len(bounds)} unexpected fields around "
             f"the control variable and its unit: {loop!r}"
         )
     return AlicatControlMode(
@@ -165,6 +176,14 @@ def parse_control_mode(address: str, loop: str, register: str) -> AlicatControlM
         minimum,
         maximum,
     )
+
+
+def _is_number(token: str) -> bool:
+    try:
+        float(token)
+    except ValueError:
+        return False
+    return True
 
 
 def inverse_control_enabled(address: str, register: str) -> bool:
@@ -381,6 +400,41 @@ def default_frame_layout(*, controller: bool) -> tuple[AlicatFrameField, ...]:
         fields.append(AlicatFrameField.SETPOINT)
     fields.append(AlicatFrameField.GAS)
     return tuple(fields)
+
+
+def frame_mismatch(
+    address: str,
+    frame_description: str,
+    saved_fields: tuple[AlicatFrameField, ...],
+) -> str:
+    """Describe how a live data frame differs from the saved one, or "".
+
+    Decoding a status frame relies on knowing its column order. If a column
+    is added or removed on the instrument, every value after it lines up
+    against the wrong name, and a numeric value can be read as the gas name
+    without anything looking wrong. Comparing the instrument's own table with
+    the saved layout is what turns that into a plain error.
+
+    An unreadable table returns "": nothing can be concluded from it.
+    """
+
+    try:
+        columns = parse_frame_layout(address, frame_description)
+    except ValueError as error:
+        return str(error)
+    if columns is None:
+        return ""
+    live = tuple(column.field for column in columns)
+    if live == tuple(saved_fields):
+        return ""
+    return (
+        "This instrument's data frame has changed. It now reports "
+        + ", ".join(field.value for field in live)
+        + "; this device was set up for "
+        + ", ".join(field.value for field in saved_fields)
+        + ". Remove the device in Device Setup and add it again so its "
+        "columns are read afresh."
+    )
 
 
 def role_label(role: str) -> str:

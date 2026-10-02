@@ -218,7 +218,26 @@ class OhausGuardian5000(Device, MeasurementSource):
 
     def set_target_temperature(self, temperature: float) -> None:
         with self._lock:
+            # Reject invalid requests before interrupting a running heater.
+            temperature = self._validate(temperature, "heating")
+            self.refresh_state()  # Observe front-panel changes, not cached intent.
+            if self._mode is OperatingMode.ERROR:
+                raise self._instrument_error()
+            if temperature == self._target_temperature:
+                return
+
+            # Observed on G52 hardware with RTA enabled: a serial target can
+            # read back correctly while control still uses the previous target.
+            # A heat restart applies it. Keep this sequence under one lock and
+            # advance on confirmed replies, with no deliberate pause or ramp.
+            restart_heating = self.heating_enabled
+            if restart_heating:
+                self.stop_heating()
             self._set_target("TARGET_TEMPERATURE", temperature, "heating")
+            # Never restart in a finally block: a failed stop or target write /
+            # verification must abort the sequence without sending START_HEAT.
+            if restart_heating:
+                self.start_heating()
 
     def set_target_speed(self, rpm: float) -> None:
         with self._lock:

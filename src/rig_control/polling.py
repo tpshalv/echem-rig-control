@@ -10,6 +10,7 @@ from time import monotonic
 from rig_control.data.records import MeasurementRecord
 from rig_control.devices.manager import DeviceManager
 from rig_control.devices.measurement_source import MeasurementSource
+from rig_control.devices.power_supply import PowerSupply
 from rig_control.models import Event, EventSeverity, EventSink
 
 
@@ -387,6 +388,9 @@ class PollingService:
 
             for record in records:
                 latest[(record.device_id, record.channel)] = record
+                if record.channel == "output_enabled" and not record.measurement.value:
+                    for channel in ("voltage", "current"):
+                        latest.pop((record.device_id, channel), None)
             active_failures.pop(device_id, None)
             events: tuple[Event, ...] = ()
             if device_id in self._failed_device_ids:
@@ -501,7 +505,8 @@ class PollingService:
         with self._device_manager.operation(device_id) as device:
             if not isinstance(device, MeasurementSource):
                 return ()
-            readings = device.read_measurements()
+            readings = (device.read_telemetry() if isinstance(device, PowerSupply)
+                        else device.read_measurements())
 
         return tuple(
             MeasurementRecord(

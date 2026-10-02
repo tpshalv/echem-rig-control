@@ -530,6 +530,7 @@ class DashboardPanel(ttk.LabelFrame):
         ttk.Label(
             self,
             text=(
+                "Measured: solid; setpoint/limit: dashed. "
                 "Up to 500 representative points are displayed for this period; "
                 "full-resolution data is retained in the experiment recording."
             ),

@@ -24,6 +24,16 @@ baud_rate = 9600
 timeout_seconds = 2.0
 
 
+[[connections]]
+connection_id = "keithley_ethernet_169_254_146_219"
+connection_type = "socket_scpi"
+
+[connections.parameters]
+host = "169.254.146.219"
+port = 5050
+timeout_seconds = 5.0
+
+
 [[devices]]
 device_id = "esp32_main_controller"
 friendly_name = "Main ESP32 controller"
@@ -83,3 +93,26 @@ manufacturer = "OHAUS"
 
 [devices.settings]
 hardware_label = "Guardian 5000"
+
+
+[[devices]]
+device_id = "main_power_supply"
+friendly_name = "Main power supply"
+capability = "dc_power_supply"
+driver = "keithley_2280s"
+backend = "real"
+required = true
+enabled = true
+connection_id = "keithley_ethernet_169_254_146_219"
+poll_interval_seconds = 0.1
+
+[devices.identity]
+manufacturer = "Keithley Instruments"
+model = "2280S-32-6"
+
+[devices.settings]
+maximum_voltage = 32.0
+maximum_current = 6.0
+maximum_power = 192.0
+hardware_label = "Main power supply"
+purpose_label = "Electrolysis supply"

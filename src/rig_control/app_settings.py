@@ -44,6 +44,14 @@ def _non_negative_number(value: object) -> AppSettingValue:
     return number
 
 
+def _keithley_nplc(value: object) -> AppSettingValue:
+    number = _positive_number(value)
+    # The common range is valid on both 50 Hz and 60 Hz supplies.
+    if not 0.002 <= number <= 12:
+        raise ValueError("must be between 0.002 and 12 power-line cycles")
+    return number
+
+
 def _history_limit(value: object) -> AppSettingValue:
     if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError("must be an integer")
@@ -167,24 +175,37 @@ SETTING_DEFINITIONS = (
         validator=_non_empty_text,
     ),
     SettingDefinition(
+        key="keithley_2280s_nplc",
+        label="Keithley 2280S integration (NPLC)",
+        description=(
+            "0.002-12 power-line cycles; lower is faster but noisier. "
+            "0.5 suits 0.1 s polling. Applied on connection to each 2280S; "
+            "does not change Auto Zero, device polling or screen refresh."
+        ),
+        default=0.5,
+        validator=_keithley_nplc,
+    ),
+    SettingDefinition(
         key="power_supply_default_current_amps",
         label="Default current limit (A)",
         description=(
             "Default current limit applied whenever constant voltage mode "
-            "is intially entered. Can be adjusted in the power-supply control panel."
+            "is initially entered. This is a protective compliance limit and "
+            "can be adjusted in the power-supply control panel."
         ),
-        default=20.0,
-        validator=_positive_number,
+        default=0.0,
+        validator=_non_negative_number,
     ),
     SettingDefinition(
         key="power_supply_default_voltage_volts",
         label="Default voltage limit (V)",
         description=(
             "Default voltage limit applied whenever constant current mode "
-            "is intially entered. Can be adjusted in the power-supply control panel."
+            "is initially entered. This is a protective compliance limit and "
+            "can be adjusted in the power-supply control panel."
         ),
-        default=10.0,
-        validator=_positive_number,
+        default=0.0,
+        validator=_non_negative_number,
     ),
     SettingDefinition(
         key="power_supply_high_current_mode",
@@ -289,6 +310,10 @@ class AppSettings:
     @property
     def trend_history_readings(self) -> int:
         return int(self.values["trend_history_readings"])
+
+    @property
+    def keithley_2280s_nplc(self) -> float:
+        return float(self.values["keithley_2280s_nplc"])
 
     @property
     def power_supply_default_current_amps(self) -> float:

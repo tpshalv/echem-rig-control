@@ -7,7 +7,8 @@ from rig_control.devices.measurement_source import (
     DeviceMeasurement,
     MeasurementSource,
 )
-from rig_control.models import Measurement
+from rig_control.models import DeviceStatus, Measurement
+from rig_control.power_supply_telemetry import OUTPUT_STATE_UNIT
 
 class PowerSupplyOperatingMode(StrEnum):
     """How the operator or recipe intends the supply to regulate."""
@@ -86,3 +87,24 @@ class PowerSupply(Device, MeasurementSource):
     @abstractmethod
     def enter_safe_state(self) -> None:
         """Immediately request the configured safe state."""
+
+    def read_telemetry(self) -> tuple[DeviceMeasurement, ...]:
+        """Snapshot readings and cached source settings under the polling lock.
+
+        Drivers assume exclusive control: settings are read on connection and
+        cached after successful writes. No fabricated zero readings while off.
+        """
+        if self.status is not DeviceStatus.READY:
+            raise RuntimeError(f"Power supply {self.device_id!r} is not ready")
+        readings = self.read_measurements() if self.output_enabled else ()
+        voltage = Measurement(self.voltage_setpoint, "V")
+        if readings:
+            voltage = Measurement(self.voltage_setpoint, "V",
+                                  timestamp=readings[0].measurement.timestamp)
+        return readings + (
+            DeviceMeasurement("voltage_setpoint", voltage),
+            DeviceMeasurement("current_limit", Measurement(
+                self.current_limit, "A", timestamp=voltage.timestamp)),
+            DeviceMeasurement("output_enabled", Measurement(
+                float(self.output_enabled), OUTPUT_STATE_UNIT, timestamp=voltage.timestamp)),
+        )

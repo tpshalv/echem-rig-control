@@ -86,6 +86,29 @@ class PowerSupplyDialogs(SetupDialog):
         visa_fields = ("VISA resource", "VISA baud rate")
         visa_backend_field = "VISA backend (@ni requires NI-VISA)"
         ethernet_fields = ("IP address or host name", "SCPI port")
+        ethernet_port_hint = ttk.Label(form, wraplength=450)
+
+        def update_ethernet_port_hint() -> None:
+            driver = SCPI_POWER_SUPPLY_LABEL_TO_DRIVER[
+                entries["Power supply model"].get()
+            ]
+            method = entries[
+                "Connection method (Ethernet or VISA)"
+            ].get().strip().casefold()
+            hint = SCPI_POWER_SUPPLY_DRIVERS[driver].get(
+                "ethernet_port_hint", ""
+            )
+            if method == "ethernet" and hint:
+                ethernet_port_hint.configure(text=str(hint))
+                ethernet_port_hint.grid(
+                    row=len(fields),
+                    column=0,
+                    columnspan=2,
+                    sticky="w",
+                    pady=(6, 0),
+                )
+            else:
+                ethernet_port_hint.grid_remove()
 
         def update_model_defaults(*_args: object) -> None:
             driver = SCPI_POWER_SUPPLY_LABEL_TO_DRIVER[
@@ -109,6 +132,7 @@ class PowerSupplyDialogs(SetupDialog):
                 0,
                 f"{metadata['default_power']:g}",
             )
+            update_ethernet_port_hint()
 
         def update_connection_fields(*_args: object) -> None:
             method = entries[
@@ -125,6 +149,7 @@ class PowerSupplyDialogs(SetupDialog):
                 action = "grid" if method == "ethernet" else "grid_remove"
                 getattr(labels[field], action)()
                 getattr(entries[field], action)()
+            update_ethernet_port_hint()
 
         entries["Power supply model"].bind(
             "<<ComboboxSelected>>",
@@ -136,7 +161,7 @@ class PowerSupplyDialogs(SetupDialog):
         )
         update_connection_fields()
 
-        note_row = len(fields)
+        note_row = len(fields) + 1
         ttk.Label(
             form,
             text=(

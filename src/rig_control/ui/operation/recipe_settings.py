@@ -380,6 +380,25 @@ END_ACTION_TEXT = {"safe": "Safe state (off)", "leave": "Leave as it is", "set":
 LEFT_RUNNING_BY_DEFAULT = (DeviceCapability.MASS_FLOW_CONTROLLER, DeviceCapability.BACK_PRESSURE_CONTROLLER)
 
 
+#: Device types whose drivers have no safe state.  Used only when a device is
+#: not in the running session; otherwise the device itself is asked.
+NO_SAFE_STATE_CAPABILITIES = frozenset({
+    DeviceCapability.TEMPERATURE_SENSOR, DeviceCapability.HUMIDITY_SENSOR,
+    DeviceCapability.PRESSURE_SENSOR_ABSOLUTE, DeviceCapability.PRESSURE_SENSOR_RELATIVE,
+    DeviceCapability.PRESSURE_SENSOR_DIFFERENTIAL, DeviceCapability.MASS_FLOW_METER,
+    DeviceCapability.POTENTIOSTAT,
+})
+
+
+def capability_has_safe_state(role) -> bool:
+    return role.capability not in NO_SAFE_STATE_CAPABILITIES
+
+
+def end_state_roles(roles, has_safe_state=capability_has_safe_state) -> list:
+    """Devices worth listing in an end state: read-only devices have nothing to shut down."""
+    return [r for r in roles if has_safe_state(r) or r.capability in SETTINGS]
+
+
 def default_end_state(roles):
     """New recipes: MFCs and back-pressure controllers left as they are, everything else off."""
     from rig_control.recipes import EndAction, EndDevice, EndState
@@ -396,10 +415,19 @@ def _assignments_text(assignments, units: "ValueDisplay") -> str:
     return ", ".join(parts)
 
 
-def end_state_summary(end, roles, units: "ValueDisplay") -> list[str]:
+def _stays_on(end, roles, has_safe_state) -> list[str]:
+    """Devices with no safe state that the end state does not set: they keep their last settings."""
+    return [r.friendly_name for r in end_state_roles(roles, has_safe_state)
+            if not has_safe_state(r) and end.for_device(r.device_id).action.value != "set"]
+
+
+def end_state_summary(end, roles, units: "ValueDisplay", has_safe_state=capability_has_safe_state) -> list[str]:
     """Short lines a person can check at a glance, e.g. ``Left as they are: CO2 MFC``."""
     names = {r.device_id: r.friendly_name for r in roles}
-    leave = [names.get(d.device_id, d.device_id) for d in end.devices if d.action.value == "leave"]
+    stays = _stays_on(end, roles, has_safe_state)
+    leave = [names.get(d.device_id, d.device_id) for d in end.devices
+             if d.action.value == "leave" and names.get(d.device_id, d.device_id) not in stays]
+    leave += [f"{name} (no safe state)" for name in stays]
     lines = []
     if leave:
         lines.append(("Left as they are: " if len(leave) > 1 else "Left as it is: ") + ", ".join(leave))
@@ -409,10 +437,11 @@ def end_state_summary(end, roles, units: "ValueDisplay") -> list[str]:
     return lines
 
 
-def end_state_warnings(end, roles) -> list[str]:
+def end_state_warnings(end, roles, has_safe_state=capability_has_safe_state) -> list[str]:
     """Combinations worth a second look before a run."""
     from rig_control.recipes import EndAction
-    warnings = []
+    warnings = [f"{name} has no safe state, so it keeps its last settings (e.g. keeps heating). "
+                "Set it in the end state if it should change." for name in _stays_on(end, roles, has_safe_state)]
     by_capability = lambda capability: [r for r in roles if r.capability is capability]
     flowing = [r.friendly_name for r in by_capability(DeviceCapability.MASS_FLOW_CONTROLLER)
                if (d := end.for_device(r.device_id)).action is EndAction.LEAVE

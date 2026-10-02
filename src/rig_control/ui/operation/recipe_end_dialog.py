@@ -14,7 +14,7 @@ from rig_control.rig_profile import DeviceCapability
 from rig_control.ui.common.theme import ERROR_TEXT, SECTION_FONT, WARNING_TEXT
 from rig_control.ui.common.widgets import VerticalScrolledFrame
 from rig_control.ui.operation.recipe_settings import (
-    END_ACTION_TEXT, SETTINGS, ValueDisplay, default_value, device_settings, end_state_warnings, unit_for,
+    END_ACTION_TEXT, SETTINGS, ValueDisplay, capability_has_safe_state, end_state_roles, default_value, device_settings, end_state_warnings, unit_for,
 )
 from rig_control.ui.operation.recipe_step_dialog import _DeviceCard
 
@@ -36,9 +36,11 @@ class EndStateDialog:
     """Modal editor for the end state.  ``on_done`` gets the new EndState, or None on Cancel."""
 
     def __init__(self, parent: tk.Misc, end: EndState, *, roles, units: ValueDisplay,
-                 on_done: Callable[[EndState | None], None]) -> None:
-        #: Every enabled role: devices with no recipe settings can still be left or made safe.
+                 on_done: Callable[[EndState | None], None], has_safe_state=capability_has_safe_state) -> None:
         self._roles, self._units, self._on_done, self._closed = tuple(roles), units, on_done, False
+        self._has_safe_state = has_safe_state
+        #: Read-only devices (sensors, meters) have nothing to shut down, so they are not listed.
+        self._listed = end_state_roles(self._roles, has_safe_state)
         top = self._top = tk.Toplevel(parent)
         top.transient(parent.winfo_toplevel()); top.title("End state — when the run finishes or you press Stop")
         top.geometry("600x700"); top.columnconfigure(0, weight=1); top.rowconfigure(0, weight=1)
@@ -47,14 +49,14 @@ class EndStateDialog:
         ttk.Label(body, wraplength=_WRAP, justify="left", text=(
             "How the rig is left when the run finishes, when you press Stop (remaining steps are "
             "skipped), or if the recipe fails. Control then returns to manual. Devices not changed "
-            "here go to their safe state. The global safe state for emergencies still turns "
-            "everything off.")).grid(row=0, column=0, sticky="w", pady=(0, 8))
+            "here go to their safe state. Read-only devices such as sensors are not listed.")
+                  ).grid(row=0, column=0, sticky="w", pady=(0, 8))
         scroller = VerticalScrolledFrame(body); scroller.grid(row=1, column=0, sticky="nsew")
         self._rows: dict[str, tuple[ttk.Combobox, ttk.Frame]] = {}
         self._cards: dict[str, _DeviceCard] = {}
         self._actions: dict[str, EndAction] = {}
         self._initial = {d.device_id: d for d in end.devices}
-        for index, role in enumerate(self._roles):
+        for index, role in enumerate(self._listed):
             self._add_device_row(scroller.content, index, role)
         self._warning = ttk.Label(body, foreground=WARNING_TEXT, wraplength=_WRAP, justify="left")
         self._warning.grid(row=2, column=0, sticky="w", pady=(8, 0))
@@ -82,11 +84,20 @@ class EndStateDialog:
     def _add_device_row(self, parent: ttk.Frame, index: int, role) -> None:
         frame = ttk.Frame(parent, padding=(0, 4, 4, 6)); frame.grid(row=index, column=0, sticky="ew")
         frame.columnconfigure(0, weight=1)
-        ttk.Label(frame, text=role.friendly_name, font=SECTION_FONT).grid(row=0, column=0, sticky="w")
-        choices = _ACTIONS if role.capability in SETTINGS else _ACTIONS[:2]
+        safe = self._has_safe_state(role)
+        title = ttk.Frame(frame); title.grid(row=0, column=0, sticky="w")
+        ttk.Label(title, text=role.friendly_name, font=SECTION_FONT).pack(side="left")
+        if not safe:
+            ttk.Label(title, text="  no safe state: keeps its last settings unless set here",
+                      foreground=WARNING_TEXT).pack(side="left")
+        choices = [a for a in _ACTIONS if (a is not EndAction.SAFE or safe)
+                   and (a is not EndAction.SET or role.capability in SETTINGS)]
         box = ttk.Combobox(frame, state="readonly", width=18, values=[END_ACTION_TEXT[a.value] for a in choices])
         box.grid(row=0, column=1, sticky="e")
         entry = self._initial.get(role.device_id, EndDevice(role.device_id, EndAction.SAFE))
+        if not safe and entry.action is EndAction.SAFE:
+            # With no safe state, "not listed" really means it stays as it is: say so.
+            entry = EndDevice(role.device_id, EndAction.LEAVE)
         box.set(END_ACTION_TEXT[entry.action.value])
         self._actions[role.device_id] = entry.action
         card_frame = ttk.Frame(frame); card_frame.grid(row=1, column=0, columnspan=2, sticky="ew")
@@ -136,7 +147,7 @@ class EndStateDialog:
 
     def _build(self) -> EndState:
         devices = []
-        for role in self._roles:
+        for role in self._listed:
             action = self._actions[role.device_id]
             if action is EndAction.SAFE:
                 continue  # Not listed means safe state.
@@ -152,7 +163,7 @@ class EndStateDialog:
         except (ValueError, TypeError) as error:
             self._error.configure(text=str(error)); self._warning.configure(text=""); return
         self._error.configure(text="")
-        warnings = end_state_warnings(end, self._roles)
+        warnings = end_state_warnings(end, self._roles, self._has_safe_state)
         self._warning.configure(text="\n".join("⚠ " + w for w in warnings))
 
     def _ok(self) -> None:
@@ -160,7 +171,7 @@ class EndStateDialog:
             end = self._build()
         except (ValueError, TypeError) as error:
             self._error.configure(text=str(error)); return
-        live = [w for w in end_state_warnings(end, self._roles) if "turned ON" in w]
+        live = [w for w in end_state_warnings(end, self._roles, self._has_safe_state) if "turned ON" in w]
         if live and not messagebox.askokcancel("End state", (
                 "\n".join(live) + "\n\nThe supply would be left delivering current after the run ends or "
                 "you press Stop. Keep this end state?"), icon="warning", parent=self._top):

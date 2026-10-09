@@ -1,11 +1,15 @@
+from collections.abc import Callable
 from threading import RLock
+from time import sleep
 
 from rig_control.devices.kamoer_m1_stp.configuration import KamoerM1StpConfiguration
 from rig_control.devices.kamoer_m1_stp.protocol import (
     COIL_DIRECTION,
     COIL_PUMP_SWITCH,
+    COIL_RUN_MODE,
     INPUT_FAULT_STATUS,
     REGISTER_SPEED,
+    REGISTER_TARGET_TIME_MS,
     KamoerM1StpProtocol,
     KamoerM1StpProtocolError,
     uint32_to_words,
@@ -15,12 +19,31 @@ from rig_control.devices.pump import Pump, PumpDirection, PumpLimits
 from rig_control.models import DeviceStatus
 
 
+# The M1-STP has no run-until-stopped mode: it always stops after a target
+# run time or lap count, whichever mode is stored (a bench pump stopped after
+# a stored 10 s). Start therefore selects run-by-time with this target, so in
+# practice the pump runs until the app stops it. 2**31 - 1 ms (about 24.8
+# days) is the longest target that stays clear of any signed interpretation.
+CONTINUOUS_RUN_TIME_MS = 0x7FFFFFFF
+
+# The pump ignores a direction change while running, so a running pump is
+# stopped, given this long to come to rest, reversed and started again.
+DIRECTION_CHANGE_PAUSE_SECONDS = 0.5
+
+
 class KamoerM1Stp(Pump):
     """M1-STP peristaltic pump driven directly over its own RS485 adapter."""
 
-    def __init__(self, configuration: KamoerM1StpConfiguration, protocol: KamoerM1StpProtocol) -> None:
+    def __init__(
+        self,
+        configuration: KamoerM1StpConfiguration,
+        protocol: KamoerM1StpProtocol,
+        *,
+        pause: Callable[[float], None] = sleep,
+    ) -> None:
         self.configuration = configuration
         self._protocol = protocol
+        self._pause = pause
         self._status = DeviceStatus.DISCONNECTED
         self._speed_setpoint_rpm: float | None = None
         self._direction: PumpDirection | None = None
@@ -129,6 +152,10 @@ class KamoerM1Stp(Pump):
             self._require_ready()
             if not isinstance(direction, PumpDirection):
                 raise TypeError("Direction must be a PumpDirection")
+            restart = self._running is True and direction is not self._direction
+            if restart:
+                self._switch(False)
+                self._pause(DIRECTION_CHANGE_PAUSE_SECONDS)
             try:
                 self._protocol.write_coil(COIL_DIRECTION, direction is PumpDirection.REVERSE)
                 (actual,) = self._protocol.read_coils(COIL_DIRECTION, 1)
@@ -139,9 +166,28 @@ class KamoerM1Stp(Pump):
                 self._status = DeviceStatus.FAULTED
                 raise
             self._direction = direction
+            if restart:
+                self.start()
 
     def start(self) -> None:
-        self._switch(True)
+        with self._lock:
+            self._require_ready()
+            try:
+                self._protocol.write_coil(COIL_RUN_MODE, False)  # run by time
+                self._protocol.write_registers(
+                    REGISTER_TARGET_TIME_MS, uint32_to_words(CONTINUOUS_RUN_TIME_MS)
+                )
+                (by_laps,) = self._protocol.read_coils(COIL_RUN_MODE, 1)
+                high, low = self._protocol.read_holding_registers(REGISTER_TARGET_TIME_MS, 2)
+                if by_laps or words_to_uint32(high, low) != CONTINUOUS_RUN_TIME_MS:
+                    raise KamoerM1StpProtocolError(
+                        "Continuous run time was not confirmed by the pump"
+                    )
+            except Exception:
+                self._running = None
+                self._status = DeviceStatus.FAULTED
+                raise
+            self._switch(True)
 
     def stop(self) -> None:
         self._switch(False)

@@ -9,10 +9,15 @@ from rig_control.devices.kamoer_m1_stp.configuration import (
     KamoerM1StpConfiguration,
     configuration_from_profile,
 )
-from rig_control.devices.kamoer_m1_stp.driver import KamoerM1Stp
+from rig_control.devices.kamoer_m1_stp.driver import (
+    CONTINUOUS_RUN_TIME_MS,
+    DIRECTION_CHANGE_PAUSE_SECONDS,
+    KamoerM1Stp,
+)
 from rig_control.devices.kamoer_m1_stp.protocol import (
     COIL_DIRECTION,
     COIL_PUMP_SWITCH,
+    COIL_RUN_MODE,
     INPUT_FAULT_STATUS,
     INPUT_HARDWARE_VERSION,
     INPUT_SOFTWARE_VERSION,
@@ -123,6 +128,22 @@ def connect_responses(transport, *, fault=0, running=False, reverse=False, mode=
     )
 
 
+def run_time_responses(transport, *, by_laps=False, target_ms=CONTINUOUS_RUN_TIME_MS):
+    """Replies for the run-mode and target-time setup that start() performs."""
+    transport.responses[coil_write_request(COIL_RUN_MODE, False)] = coil_write_request(
+        COIL_RUN_MODE, False
+    )
+    transport.responses[
+        register_write_request(REGISTER_TARGET_TIME_MS, uint32_to_words(CONTINUOUS_RUN_TIME_MS))
+    ] = register_write_response(REGISTER_TARGET_TIME_MS, 2)
+    transport.responses[read_request(0x01, COIL_RUN_MODE, 1)] = read_response(
+        0x01, bytes([int(by_laps)])
+    )
+    transport.responses[read_request(0x03, REGISTER_TARGET_TIME_MS, 2)] = read_response(
+        0x03, pack_registers(uint32_to_words(target_ms))
+    )
+
+
 def make_device(transport=None, maximum_speed_rpm=350.0):
     protocol, transport = make_protocol(transport)
     configuration = KamoerM1StpConfiguration(
@@ -141,21 +162,18 @@ def profile(**role_changes):
     ))
 
 
-# --- Byte-order fixtures, taken directly from Modbus Poll capture files ---
-# recorded against a real M1-STP (see protocol.py docstring for provenance).
+# --- Byte order: standard Modbus, confirmed against a real M1-STP on the
+# bench (see protocol.py docstring). ---
 
-def test_input_register_capture_decodes_with_swapped_registers():
-    payload = bytes([7, 16, 0, 16, 0, 0])  # Read Input Registers.txt <Bytes>
-    software, hardware, fault = unpack_registers(payload)
-    assert (software, hardware, fault) == (4103, 4096, 0)
+def test_speed_setpoint_is_sent_high_byte_first():
+    # 50 RPM == 5000 == 0x1388. Sent swapped, the pump ran at 348.4 RPM.
+    assert pack_registers(uint32_to_words(5000)) == bytes([0x00, 0x00, 0x13, 0x88])
 
 
-def test_holding_register_capture_decodes_with_swapped_registers():
-    payload = bytes([0, 0, 16, 39, 200, 66, 0, 0, 0, 0, 16, 39])  # Holding Registers.txt
-    speed_high, speed_low, laps_high, laps_low, time_high, time_low = unpack_registers(payload)
-    assert words_to_uint32(speed_high, speed_low) == 10000  # Speed * 100 == 10000
-    assert words_to_float32(laps_high, laps_low) == 100.0   # Target revolutions
-    assert words_to_uint32(time_high, time_low) == 10000    # Target run time, ms
+def test_speed_reading_is_decoded_high_byte_first():
+    # A pump running at 350 RPM reports 35000 == 0x88B8. Decoded swapped,
+    # it showed as 472.4 RPM.
+    assert words_to_uint32(*unpack_registers(bytes([0x00, 0x00, 0x88, 0xB8]))) == 35000
 
 
 def test_uint32_and_float32_word_helpers_round_trip():
@@ -322,6 +340,7 @@ def test_set_direction_and_start_stop():
         COIL_PUMP_SWITCH, True
     )
     transport.responses[read_request(0x01, COIL_PUMP_SWITCH, 1)] = read_response(0x01, bytes([1]))
+    run_time_responses(transport)
     device.start()
     assert device.running is True
 
@@ -451,6 +470,7 @@ def test_control_service_dispatches_pump_running():
         COIL_PUMP_SWITCH, True
     )
     transport.responses[read_request(0x01, COIL_PUMP_SWITCH, 1)] = read_response(0x01, bytes([1]))
+    run_time_responses(transport)
     result = service.execute(SetPumpRunning("pump1", True, CommandSource.MANUAL))
     assert device.running is True
     assert "started" in result.message
@@ -470,3 +490,120 @@ def test_control_service_enters_pump_safe_state():
     result = service.enter_global_safe_state()
     assert result.all_succeeded
     assert device.running is False
+
+
+def test_start_selects_run_by_time_with_the_longest_target_before_switching_on():
+    device, transport = make_device()
+    connect_responses(transport, mode=True)  # stored as run-by-laps
+    device.connect()
+    run_time_responses(transport)
+    transport.responses[coil_write_request(COIL_PUMP_SWITCH, True)] = coil_write_request(
+        COIL_PUMP_SWITCH, True
+    )
+    transport.responses[read_request(0x01, COIL_PUMP_SWITCH, 1)] = read_response(0x01, bytes([1]))
+
+    device.start()
+
+    setup = [
+        coil_write_request(COIL_RUN_MODE, False),
+        register_write_request(REGISTER_TARGET_TIME_MS, uint32_to_words(CONTINUOUS_RUN_TIME_MS)),
+    ]
+    switch_on = transport.writes.index(coil_write_request(COIL_PUMP_SWITCH, True))
+    assert all(transport.writes.index(write) < switch_on for write in setup)
+    assert device.running is True
+
+
+@pytest.mark.parametrize("by_laps, target_ms", [(True, CONTINUOUS_RUN_TIME_MS), (False, 10000)])
+def test_start_refuses_to_switch_on_when_run_time_is_not_confirmed(by_laps, target_ms):
+    device, transport = make_device()
+    connect_responses(transport)
+    device.connect()
+    run_time_responses(transport, by_laps=by_laps, target_ms=target_ms)
+
+    with pytest.raises(KamoerM1StpProtocolError):
+        device.start()
+
+    assert coil_write_request(COIL_PUMP_SWITCH, True) not in transport.writes
+    assert device.status is DeviceStatus.FAULTED
+
+
+def switch_responses(transport):
+    for running in (True, False):
+        transport.responses[coil_write_request(COIL_PUMP_SWITCH, running)] = coil_write_request(
+            COIL_PUMP_SWITCH, running
+        )
+
+
+def test_direction_change_while_running_stops_pauses_reverses_and_restarts():
+    protocol, transport = make_protocol()
+    events = []
+    device = KamoerM1Stp(
+        KamoerM1StpConfiguration("pump1", "COM9", SLAVE, 0.2, PumpLimits(350.0)),
+        protocol,
+        pause=lambda seconds: events.append(("pause", seconds)),
+    )
+    connect_responses(transport, running=True)
+    device.connect()
+    switch_responses(transport)
+    run_time_responses(transport)
+    transport.responses[coil_write_request(COIL_DIRECTION, True)] = coil_write_request(
+        COIL_DIRECTION, True
+    )
+    transport.responses[read_request(0x01, COIL_DIRECTION, 1)] = read_response(0x01, bytes([1]))
+    switch_state = iter((0, 1))
+    original_write = transport.write
+
+    def write(data):
+        events.append(data)
+        original_write(data)
+        if data == read_request(0x01, COIL_PUMP_SWITCH, 1):
+            transport.pending = read_response(0x01, bytes([next(switch_state)]))
+
+    transport.write = write
+    transport.responses[read_request(0x01, COIL_PUMP_SWITCH, 1)] = b""
+
+    device.set_direction(PumpDirection.REVERSE)
+
+    order = [
+        events.index(coil_write_request(COIL_PUMP_SWITCH, False)),
+        events.index(("pause", DIRECTION_CHANGE_PAUSE_SECONDS)),
+        events.index(coil_write_request(COIL_DIRECTION, True)),
+        events.index(coil_write_request(COIL_PUMP_SWITCH, True)),
+    ]
+    assert order == sorted(order)
+    assert device.direction is PumpDirection.REVERSE
+    assert device.running is True
+
+
+def test_direction_change_while_stopped_does_not_start_the_pump():
+    device, transport = make_device()
+    connect_responses(transport, running=False)
+    device.connect()
+    transport.responses[coil_write_request(COIL_DIRECTION, True)] = coil_write_request(
+        COIL_DIRECTION, True
+    )
+    transport.responses[read_request(0x01, COIL_DIRECTION, 1)] = read_response(0x01, bytes([1]))
+
+    device.set_direction(PumpDirection.REVERSE)
+
+    assert not any(write[:4] == coil_write_request(COIL_PUMP_SWITCH, True)[:4] for write in transport.writes)
+    assert device.running is False
+
+
+def test_failed_direction_change_leaves_a_running_pump_stopped():
+    device, transport = make_device()
+    connect_responses(transport, running=True)
+    device.connect()
+    switch_responses(transport)
+    transport.responses[read_request(0x01, COIL_PUMP_SWITCH, 1)] = read_response(0x01, bytes([0]))
+    transport.responses[coil_write_request(COIL_DIRECTION, True)] = coil_write_request(
+        COIL_DIRECTION, True
+    )
+    transport.responses[read_request(0x01, COIL_DIRECTION, 1)] = read_response(0x01, bytes([0]))
+    device._pause = lambda seconds: None
+
+    with pytest.raises(KamoerM1StpProtocolError):
+        device.set_direction(PumpDirection.REVERSE)
+
+    assert coil_write_request(COIL_PUMP_SWITCH, True) not in transport.writes
+    assert device.status is DeviceStatus.FAULTED

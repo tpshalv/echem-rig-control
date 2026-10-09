@@ -19,21 +19,14 @@ document (2022-11-25). Serial: 9600 8N1, no hardware flow control.
         0x3002  Hardware version (same packing)
         0x3003  Fault status: 0 normal, non-zero abnormal
 
-IMPORTANT — non-standard register byte order. Every 16-bit register on
-this pump is transmitted low-byte-first, the reverse of the Modbus RTU
-convention (which is big-endian/high-byte-first). Kamoer's document does
-not mention this. It was reverse engineered from Modbus Poll capture
-files recording live reads from a real M1-STP: three independently-typed
-fields (an unsigned speed value, an IEEE-754 float, and plain version
-words) only decode to sensible numbers once each register's two bytes are
-swapped before use. That is strong, but not certain, evidence; the
-capture files hold decoded payload bytes, not full wire frames with a
-CRC, so the CRC algorithm itself is unverified against this specific
-pump (see CRC test fixtures, which use a different Kamoer pump's
-documented frame). Function codes 0x05 (write coil) and 0x10 (write
-multiple registers) are inferred from the Modbus function set and from
-that other Kamoer pump's documented frame — verify all of this on the
-bench, especially before trusting a write, before relying on it for real.
+Register byte order is standard Modbus (high byte first), confirmed on the
+bench: with each register byte-swapped, a 50 RPM request ran the pump at
+348.4 RPM (0x1388 sent as 0x8813) and a 350 RPM pump read back as 472.4
+(0x88B8 decoded as 0xB888). An earlier version of this driver did swap,
+based on Modbus Poll capture files; those files store each register in the
+PC's own little-endian order, so the swap was an artefact of the file
+format, not of the wire. The CRC algorithm is verified against a different
+Kamoer pump's documented frame (see CRC test fixtures).
 """
 
 from collections.abc import Callable, Sequence
@@ -86,21 +79,21 @@ def _append_crc(frame: bytes) -> bytes:
 
 
 def pack_registers(words: Sequence[int]) -> bytes:
-    """Encode register values for the wire, applying this pump's per-register
-    byte swap (each register little-endian, in address order)."""
+    """Encode register values for the wire (each register big-endian, in
+    address order)."""
 
     for word in words:
         if isinstance(word, bool) or not isinstance(word, int) or not 0 <= word <= 0xFFFF:
             raise ValueError(f"Register value {word!r} must be an int in 0..65535")
-    return struct.pack(f"<{len(words)}H", *words)
+    return struct.pack(f">{len(words)}H", *words)
 
 
 def unpack_registers(data: bytes) -> tuple[int, ...]:
-    """Decode registers read off the wire, undoing this pump's byte swap."""
+    """Decode registers read off the wire."""
 
     if len(data) % 2:
         raise KamoerM1StpProtocolError(f"Odd-length register payload: {data.hex(' ')}")
-    return struct.unpack(f"<{len(data) // 2}H", data)
+    return struct.unpack(f">{len(data) // 2}H", data)
 
 
 def words_to_uint32(high: int, low: int) -> int:

@@ -238,3 +238,19 @@ def test_a_port_without_read_until_still_works():
     with pytest.raises(TimeoutError):
         transport.request("A")
     assert port.readline_calls == 1
+
+
+def test_read_line_returns_a_further_reply_without_writing() -> None:
+    transport, port, _ = make_transport(b"*OK\r")
+    transport.open()
+
+    assert transport.read_line() == "*OK"
+    assert port.writes == []
+
+
+def test_read_line_times_out_when_nothing_further_arrives() -> None:
+    transport, _, _ = make_transport(b"")
+    transport.open()
+
+    with pytest.raises(TimeoutError):
+        transport.read_line()

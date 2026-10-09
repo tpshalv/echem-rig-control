@@ -142,6 +142,24 @@ class PySerialTextTransport(SerialTextTransport):
             else:
                 self.close()
                 raise ValueError("Alicat multiline response exceeds 64 lines; connection closed")
+        return self._decode(response, f"request {message!r}")
+
+    def read_line(self) -> str:
+        if not self.is_open or self._serial is None:
+            raise RuntimeError(f"Serial port {self._port!r} is not open")
+        response = self._read_reply()
+        for _ in range(8):
+            if not response or response.strip(b"\r\n"):
+                break
+            response = self._read_reply()
+        if not response:
+            raise TimeoutError(
+                f"No further line from serial port {self._port!r} "
+                f"within {self._timeout_seconds:g} seconds"
+            )
+        return self._decode(response, "a further line")
+
+    def _decode(self, response: bytes, context: str) -> str:
         try:
             if self._line_ending == "\r\n" and not response.endswith(b"\r\n"):
                 raise TimeoutError("Incomplete CRLF serial response")
@@ -153,8 +171,7 @@ class PySerialTextTransport(SerialTextTransport):
             ) from error
         if not decoded:
             raise ValueError(
-                f"Empty response from serial port {self._port!r} for "
-                f"request {message!r}"
+                f"Empty response from serial port {self._port!r} for {context}"
             )
         return decoded
 

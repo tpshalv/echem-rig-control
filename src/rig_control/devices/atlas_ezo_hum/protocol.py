@@ -34,17 +34,19 @@ class EzoHumProtocol:
         self._expect_ok(f"O,Dew,{1 if include_dew_point else 0}")
 
     def identify(self) -> EzoHumIdentity:
-        response = self._request("i")
+        response = self._request_data("i")
         parts = response.split(",")
-        if len(parts) != 3 or parts[0] != "?i" or parts[1].upper() != "HUM":
+        if len(parts) != 3 or parts[0].lower() != "?i" or parts[1].upper() != "HUM":
             raise EzoHumProtocolError(f"Unexpected EZO-HUM identity response: {response!r}")
         if not parts[2].strip():
             raise EzoHumProtocolError("EZO-HUM identity has no firmware version")
         return EzoHumIdentity(parts[2].strip())
 
     def read(self, *, include_dew_point: bool) -> EzoHumReading:
-        response = self._request("R")
-        values = self._numbers(response)
+        response = self._request_data("R")
+        # Real probes (firmware 1.01) label the dew point: "34.96,24.45,Dew,8.04".
+        fields = [field for field in response.split(",") if field.strip().lower() != "dew"]
+        values = self._numbers(",".join(fields))
         expected = 3 if include_dew_point else 2
         if len(values) != expected:
             raise EzoHumProtocolError(
@@ -56,17 +58,37 @@ class EzoHumProtocol:
 
     def _expect_ok(self, command: str, *, allow_unsolicited_reading: bool = False) -> None:
         response = self._request(command)
+        if allow_unsolicited_reading:
+            # A probe may have sent a final continuous reading just before C,0
+            # was received. Its ack follows that reading, so read on to it.
+            for _ in range(3):
+                if response == "*OK":
+                    break
+                self._numbers(response)
+                response = self._read_line()
         if response == "*OK":
             return
-        if allow_unsolicited_reading:
-            # A probe may have sent one final continuous reading just before C,0
-            # was received. Repeat the idempotent command to obtain its ack.
-            self._numbers(response)
-            if self._request(command) == "*OK":
-                return
         raise EzoHumProtocolError(
             f"EZO-HUM command {command!r} was not acknowledged: {response!r}"
         )
+
+    def _request_data(self, command: str) -> str:
+        # With response codes on (the factory default) a data reply is followed
+        # by its own "*OK" line. Left queued, that line would be taken as the
+        # reply to the next command.
+        response = self._request(command)
+        ack = self._read_line()
+        if ack != "*OK":
+            raise EzoHumProtocolError(
+                f"EZO-HUM reply to {command!r} was not followed by *OK: {ack!r}"
+            )
+        return response
+
+    def _read_line(self) -> str:
+        response = self.transport.read_line().strip()
+        if response.startswith("*ER"):
+            raise EzoHumProtocolError(f"EZO-HUM reported an error: {response}")
+        return response
 
     def _request(self, command: str) -> str:
         response = self.transport.request(command).strip()

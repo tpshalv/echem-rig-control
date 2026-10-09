@@ -20,3 +20,13 @@ class SerialTextTransport(ABC):
     @abstractmethod
     def request(self, message: str) -> str:
         """Send one request and return its complete response."""
+
+    def read_line(self) -> str:
+        """Read one further reply line without sending anything.
+
+        For instruments that follow a data reply with a separate
+        acknowledgement line. Transports that never need it may leave this
+        unimplemented.
+        """
+
+        raise NotImplementedError(f"{type(self).__name__} cannot read extra lines")

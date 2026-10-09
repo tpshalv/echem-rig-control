@@ -18,7 +18,7 @@ class FakeTransport(SerialTextTransport):
     def __init__(self, responses=None):
         self._is_open = False
         self.requests: list[str] = []
-        self.responses = list(responses or ["*OK", "*OK", "*OK", "?i,HUM,1.01", "48.2,22.4,10.5", "48.2,22.4,10.5"])
+        self.responses = list(responses or ["*OK", "*OK", "*OK", "?i,HUM,1.01", "*OK", "48.2,22.4,10.5", "*OK", "48.2,22.4,10.5", "*OK"])
 
     @property
     def is_open(self):
@@ -32,6 +32,9 @@ class FakeTransport(SerialTextTransport):
 
     def request(self, message):
         self.requests.append(message)
+        return self.responses.pop(0)
+
+    def read_line(self):
         return self.responses.pop(0)
 
 
@@ -77,16 +80,27 @@ def test_connect_configures_on_demand_temperature_and_reads_measurements():
 
 def test_one_final_continuous_reading_is_discarded_when_disabling_continuous_mode():
     device, transport = make_device(responses=[
-        "48.2", "*OK", "*OK", "*OK", "?i,HUM,1.01", "48.2,22.4,10.5",
+        "48.2", "*OK", "*OK", "*OK", "?i,HUM,1.01", "*OK", "48.2,22.4,10.5", "*OK",
     ])
     device.connect()
 
-    assert transport.requests[:2] == ["C,0", "C,0"]
+    assert transport.requests[:2] == ["C,0", "O,T,1"]
+
+
+def test_identity_prefix_is_accepted_in_either_case():
+    # Real probes (firmware 1.01) reply "?I,..." although the datasheet shows "?i,...".
+    device, _ = make_device(responses=[
+        "*OK", "*OK", "*OK", "?I,HUM,1.01", "*OK", "48.2,22.4,10.5", "*OK",
+    ])
+    device.connect()
+
+    assert device.identity is not None
+    assert device.identity.firmware_version == "1.01"
 
 
 def test_optional_dew_point_is_configured_and_returned():
     device, transport = make_device(dew_point=True, responses=[
-        "*OK", "*OK", "*OK", "?i,HUM,1.01", "48.2,22.4,10.5", "48.3,22.5,10.6",
+        "*OK", "*OK", "*OK", "?i,HUM,1.01", "*OK", "48.2,22.4,10.5", "*OK", "48.3,22.5,10.6", "*OK",
     ])
     device.connect()
     readings = device.read_measurements()
@@ -97,9 +111,22 @@ def test_optional_dew_point_is_configured_and_returned():
     ]
 
 
+def test_labelled_dew_point_from_real_probe_is_parsed():
+    device, _ = make_device(dew_point=True, responses=[
+        "*OK", "*OK", "*OK", "?I,HUM,1.01", "*OK", "34.96,24.45,Dew,8.04", "*OK",
+        "34.96,24.45,Dew,8.04", "*OK",
+    ])
+    device.connect()
+    readings = device.read_measurements()
+
+    assert [(item.channel, item.measurement.value) for item in readings] == [
+        ("humidity", 34.96), ("temperature", 24.45), ("dew_point", 8.04),
+    ]
+
+
 def test_invalid_or_short_reading_is_never_recorded_as_fresh_measurement():
     device, _ = make_device(responses=[
-        "*OK", "*OK", "*OK", "?i,HUM,1.01", "48.2,22.4,10.5", "48.2",
+        "*OK", "*OK", "*OK", "?i,HUM,1.01", "*OK", "48.2,22.4,10.5", "*OK", "48.2", "*OK",
     ])
     device.connect()
     with pytest.raises(EzoHumProtocolError):
@@ -109,7 +136,7 @@ def test_invalid_or_short_reading_is_never_recorded_as_fresh_measurement():
 
 def test_out_of_range_wet_sensor_reading_is_preserved_as_uncertain():
     device, _ = make_device(responses=[
-        "*OK", "*OK", "*OK", "?i,HUM,1.01", "101.2,22.4,10.5", "101.2,22.4,10.5",
+        "*OK", "*OK", "*OK", "?i,HUM,1.01", "*OK", "101.2,22.4,10.5", "*OK", "101.2,22.4,10.5", "*OK",
     ])
     device.connect()
     readings = device.read_measurements()

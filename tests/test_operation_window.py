@@ -151,6 +151,7 @@ def test_measurement_display_updates_existing_rows_in_place() -> None:
     window._measurements = FakeTree()
     window._warnings = FakeListbox()
     window._monitor_button = FakeWidget()
+    window._monitor_status = FakeWidget()
     window._record_button = FakeWidget()
     window._recording_status = FakeWidget()
     window._measurement_keys = {}

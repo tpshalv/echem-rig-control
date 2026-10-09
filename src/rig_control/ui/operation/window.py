@@ -8,7 +8,10 @@ from traceback import format_exc
 from typing import Any
 
 from rig_control.models import Event, EventSeverity, EventSink
-from rig_control.ui.common.theme import ERROR_TEXT, SECTION_FONT, TITLE_FONT
+from rig_control.ui.common.theme import (
+    ERROR_TEXT, SECTION_FONT, SUCCESS_BACKGROUND, SUCCESS_TEXT, TITLE_FONT,
+    WARNING_BACKGROUND, WARNING_TEXT,
+)
 from rig_control.ui.manual_control.types import DEFAULT_WIRING_CURRENT_CEILING_AMPS
 from rig_control.ui.operation.model import (
     OperationActionResult,
@@ -130,28 +133,34 @@ class OperationWindow:
             command=self._toggle_monitoring,
         )
         self._monitor_button.grid(row=0, column=1)
-        controls.columnconfigure(2, weight=1)
+        # tk.Label rather than ttk so the badge can carry its own colours.
+        self._monitor_status = tk.Label(
+            controls, font=SECTION_FONT, padx=8, pady=2, relief="solid", borderwidth=1,
+        )
+        self._monitor_status.grid(row=0, column=2, padx=(8, 0))
+        self._show_monitoring_state(False)
+        controls.columnconfigure(3, weight=1)
         ttk.Label(
             controls,
             text=("■ SET: double-click VALUE, type, press Enter   •   "
                   "double-click DEVICE/CHANNEL for trend"),
             font=("Segoe UI", 9, "bold"),
-        ).grid(row=0, column=2, padx=18)
+        ).grid(row=0, column=3, padx=18)
         ttk.Button(controls, text="Enter safe state — all devices",
-                   command=self._enter_global_safe_state).grid(row=0, column=3)
+                   command=self._enter_global_safe_state).grid(row=0, column=4)
         ttk.Button(
             controls,
             text="Live dashboard",
             command=self._open_live_dashboard,
-        ).grid(row=1, column=3, sticky="e", pady=(6, 0))
+        ).grid(row=1, column=4, sticky="e", pady=(6, 0))
         ttk.Button(
             controls,
             text="Recipe builder",
             command=self._open_recipe_builder,
-        ).grid(row=1, column=4, sticky="e", padx=(8, 0), pady=(6, 0))
+        ).grid(row=1, column=5, sticky="e", padx=(8, 0), pady=(6, 0))
         self._action_status = ttk.Label(controls, text="Ready")
         self._action_status.grid(
-            row=1, column=0, columnspan=3, sticky="w", pady=(6, 0)
+            row=1, column=0, columnspan=4, sticky="w", pady=(6, 0)
         )
 
         left = ttk.Frame(body, style="Blueprint.TFrame")
@@ -336,10 +345,22 @@ class OperationWindow:
         else:
             messagebox.showinfo(
                 "Devices connected",
-                "All configured devices connected successfully.",
+                "All configured devices connected successfully."
+                + ("\nMonitoring is running." if self._view_model.is_monitoring else ""),
                 parent=self._root,
             )
         self._update_display()
+
+    def _show_monitoring_state(self, monitoring: bool) -> None:
+        if monitoring:
+            self._monitor_status.configure(
+                text="● MONITORING", foreground=SUCCESS_TEXT, background=SUCCESS_BACKGROUND,
+            )
+        else:
+            self._monitor_status.configure(
+                text="● NOT MONITORING — readings are not updating",
+                foreground=WARNING_TEXT, background=WARNING_BACKGROUND,
+            )
 
     def _toggle_monitoring(self) -> None:
         action = (
@@ -918,6 +939,7 @@ class OperationWindow:
         self._monitor_button.configure(
             text="Stop monitoring" if monitoring else "Start monitoring"
         )
+        self._show_monitoring_state(monitoring)
         self._record_button.configure(
             text="Stop recording" if recording else "Start recording"
         )

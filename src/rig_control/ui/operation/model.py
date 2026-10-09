@@ -11,6 +11,7 @@ from traceback import format_exc
 from rig_control.data.experiment import ExperimentMetadata
 from rig_control.devices.manager import DeviceManager
 from rig_control.experiment_recording import ExperimentRecorder
+from rig_control.devices.pump_calibration import PumpCalibration
 from rig_control.instrument_settings.pump_calibration import PumpCalibrationService
 from rig_control.models import Event, Measurement, Quality
 from rig_control.polling import PollingService
@@ -435,6 +436,19 @@ class OperationViewModel:
                     device.speed_setpoint_rpm, "rpm", "good", None, device_system,
                     True, "number", 0.0, device.limits.maximum_speed_rpm,
                 )
+                calibration = self._active_pump_calibration(device_id)
+                if calibration is not None:
+                    # Derived from the speed setpoint through the active
+                    # calibration; entering a flow converts it back to rpm.
+                    fit = calibration.fit
+                    rows[(device_id, "flow_setpoint")] = OperationChannelRow(
+                        device_id, device_name, "flow_setpoint", "Flow setpoint (calibrated)",
+                        None if device.speed_setpoint_rpm is None
+                        else round(fit.flow_for_speed(device.speed_setpoint_rpm), 3),
+                        "mL/min", "good", None, device_system, True, "number",
+                        max(fit.intercept, 0.0),
+                        fit.flow_for_speed(device.limits.maximum_speed_rpm),
+                    )
                 rows[(device_id, "direction")] = OperationChannelRow(
                     device_id, device_name, "direction", "Direction",
                     device.direction.value if device.direction is not None else None,
@@ -535,6 +549,8 @@ class OperationViewModel:
     ) -> OperationActionResult:
         """Apply one editable channel through existing typed commands."""
 
+        if channel == "flow_setpoint":
+            return self._set_pump_flow(device_id, float(value))
         if channel == "pressure_setpoint_absolute":
             # The unit shown on the row is the unit the value is sent in, so a
             # number can never be separated from what it means.
@@ -803,6 +819,15 @@ class OperationViewModel:
                     default_result.technical_details,
                 )
             )
+        connected = any(
+            self._device_manager.get(device_id).status is not DeviceStatus.DISCONNECTED
+            for device_id in self._device_manager.device_ids
+        )
+        if connected and not self.is_monitoring:
+            # Connected devices that nobody polls look exactly like broken
+            # sensors, so monitoring follows connection rather than waiting
+            # for a separate button press.
+            results.append(self.start_monitoring())
         return tuple(results)
 
     def start_monitoring(self) -> OperationActionResult:
@@ -823,6 +848,46 @@ class OperationViewModel:
         except Exception as error:
             return self._failure("stop monitoring", error)
         return OperationActionResult(True, "Background monitoring stopped.")
+
+    def _active_pump_calibration(self, device_id: str) -> PumpCalibration | None:
+        try:
+            return self._pump_calibration_service.active_calibration(device_id)
+        except Exception:
+            # An unreadable history only hides the flow row; rpm still works.
+            return None
+
+    def _set_pump_flow(self, device_id: str, flow_ml_per_min: float) -> OperationActionResult:
+        """Convert a flow to rpm with the active calibration and send that speed."""
+
+        calibration = self._active_pump_calibration(device_id)
+        if calibration is None:
+            return OperationActionResult(
+                False,
+                f"Pump {device_id!r} has no readable calibration; set its speed in rpm instead.",
+            )
+        fit = calibration.fit
+        rpm = round(fit.speed_for_flow(flow_ml_per_min), 2)
+        if rpm < 0:
+            return OperationActionResult(
+                False,
+                f"{flow_ml_per_min:g} mL/min is below what calibration "
+                f"{calibration.calibration_id} reaches: its line gives "
+                f"{fit.intercept:g} mL/min at 0 rpm.",
+            )
+        result = self.manual_control.set_pump_speed(device_id, rpm)
+        if not result.succeeded:
+            return OperationActionResult(False, result.summary, result.technical_details)
+        speeds = [point.speed_rpm for point in calibration.points]
+        note = (
+            "" if min(speeds) <= rpm <= max(speeds)
+            else f" That is outside the calibrated {min(speeds):g}-{max(speeds):g} rpm, "
+            "so the flow is extrapolated."
+        )
+        return OperationActionResult(
+            True,
+            f"Set pump {device_id!r} to {flow_ml_per_min:g} mL/min ({rpm:g} rpm, "
+            f"calibration {calibration.calibration_id}).{note}",
+        )
 
     def _pump_calibration_metadata(self) -> dict[str, str | float]:
         """Record which calibration was active for each pump at run start.

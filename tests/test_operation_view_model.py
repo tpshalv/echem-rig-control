@@ -743,3 +743,94 @@ def test_native_display_units_leave_flow_exactly_as_the_device_has_it():
     assert device.flow_setpoint == 1.5
     row = {r.channel: r for r in model.channel_rows()}["setpoint"]
     assert (row.unit, row.value, row.maximum) == ("SLPM", 1.5, 2.0)
+
+
+def _calibrated_pump_model(tmp_path, points):
+    manager = DeviceManager()
+    manager.register(_StubPump("pump1", maximum_speed_rpm=150.0))
+    recorder = ExperimentRecorder(writer_factory=lambda _root: InMemoryExperimentWriter())
+    polling = PollingService(manager, interval_seconds=60, batch_handler=recorder.record_batch)
+    calibration_service = PumpCalibrationService(directory=tmp_path)
+    if points:
+        calibration_service.accept(
+            calibration_service.fit_candidate("pump1", "operator", points)
+        )
+    model = OperationViewModel(
+        manager, polling, recorder, RigControlService(manager),
+        profile_id="simulation", pump_calibration_service=calibration_service,
+    )
+    return model, manager.get("pump1")
+
+
+def test_pump_flow_setpoint_is_converted_to_rpm_with_the_active_calibration(tmp_path) -> None:
+    # flow = 2 * rpm + 4
+    model, pump = _calibrated_pump_model(
+        tmp_path, [CalibrationPoint(10.0, 24.0), CalibrationPoint(50.0, 104.0)]
+    )
+
+    row = {row.channel: row for row in model.channel_rows()}["flow_setpoint"]
+    assert row.unit == "mL/min"
+    assert row.writable is True
+    assert row.maximum == pytest.approx(304.0)
+
+    result = model.apply_channel_value("pump1", "flow_setpoint", 64.0)
+
+    assert result.succeeded is True
+    assert pump.speed_setpoint_rpm == pytest.approx(30.0)
+    assert "30 rpm" in result.summary
+    row = {row.channel: row for row in model.channel_rows()}["flow_setpoint"]
+    assert row.value == pytest.approx(64.0)
+
+
+def test_pump_flow_outside_calibrated_speeds_is_flagged_as_extrapolated(tmp_path) -> None:
+    model, pump = _calibrated_pump_model(
+        tmp_path, [CalibrationPoint(10.0, 24.0), CalibrationPoint(50.0, 104.0)]
+    )
+
+    result = model.apply_channel_value("pump1", "flow_setpoint", 204.0)
+
+    assert result.succeeded is True
+    assert pump.speed_setpoint_rpm == pytest.approx(100.0)
+    assert "extrapolated" in result.summary
+
+
+def test_pump_flow_below_the_calibration_line_is_refused(tmp_path) -> None:
+    model, pump = _calibrated_pump_model(
+        tmp_path, [CalibrationPoint(10.0, 24.0), CalibrationPoint(50.0, 104.0)]
+    )
+
+    result = model.apply_channel_value("pump1", "flow_setpoint", 2.0)
+
+    assert result.succeeded is False
+    assert pump.speed_setpoint_rpm != pytest.approx(-1.0)
+
+
+def test_uncalibrated_pump_has_no_flow_setpoint(tmp_path) -> None:
+    model, _ = _calibrated_pump_model(tmp_path, [])
+
+    assert "flow_setpoint" not in {row.channel for row in model.channel_rows()}
+    assert model.apply_channel_value("pump1", "flow_setpoint", 10.0).succeeded is False
+
+
+def test_connecting_devices_starts_monitoring_automatically() -> None:
+    model, _, _, _ = make_model()
+    assert model.is_monitoring is False
+
+    results = model.connect_all()
+
+    assert all(result.succeeded for result in results)
+    assert model.is_monitoring is True
+    model.stop_monitoring()
+
+
+def test_connecting_with_nothing_connected_does_not_start_monitoring() -> None:
+    manager = DeviceManager()
+    recorder = ExperimentRecorder(writer_factory=lambda _root: InMemoryExperimentWriter())
+    polling = PollingService(manager, interval_seconds=60, batch_handler=recorder.record_batch)
+    model = OperationViewModel(
+        manager, polling, recorder, RigControlService(manager), profile_id="simulation",
+    )
+
+    model.connect_all()
+
+    assert model.is_monitoring is False

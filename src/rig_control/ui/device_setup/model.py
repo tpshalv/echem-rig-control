@@ -474,6 +474,13 @@ class DeviceSetupViewModel:
     def switch_profile(self, path: str | Path) -> ReadinessCheckResult:
         return self._profiles.switch_profile(path)
 
+    @property
+    def profile_is_read_only(self) -> bool:
+        return self._profiles.is_read_only
+
+    def make_editable_copy(self) -> ReadinessCheckResult:
+        return self._profiles.make_editable_copy()
+
     def save_profile_as(self, path: str | Path) -> ReadinessCheckResult:
         return self._profiles.save_profile_as(path)
 

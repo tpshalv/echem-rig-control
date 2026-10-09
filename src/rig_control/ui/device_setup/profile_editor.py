@@ -13,6 +13,7 @@ from rig_control.devices.kamoer_m1_stp.configuration import (
 from rig_control.devices.alicat.configuration import (
     configuration_from_profile as alicat_configuration_from_profile,
 )
+from rig_control.app_paths import editable_profile_copy_path, is_shipped_rig_profile
 from rig_control.diagnostics.esp32 import Esp32DiscoveryResult
 from rig_control.rig_profile import (
     ConnectionDefinition,
@@ -52,9 +53,40 @@ class ProfileEditor:
     def profile_path(self) -> Path:
         return self._profile_path
 
+    @property
+    def is_read_only(self) -> bool:
+        """Whether the active profile is a shipped template."""
+        return is_shipped_rig_profile(self._profile_path)
+
+    def _write(self, candidate: RigProfile, path: Path) -> Path | None:
+        if is_shipped_rig_profile(path):
+            raise PermissionError(
+                f"{Path(path).name} is a shipped template and cannot be changed. "
+                "Make an editable copy first."
+            )
+        return self._profile_writer(candidate, path)
+
+    def make_editable_copy(self) -> ReadinessCheckResult:
+        """Save the active template to the profiles folder and switch to it."""
+        try:
+            selected = editable_profile_copy_path(self._profile_path)
+            selected.parent.mkdir(parents=True, exist_ok=True)
+            self._write(self._profile, selected)
+        except Exception as error:
+            return ReadinessCheckResult(
+                False,
+                "An editable copy of the rig profile could not be made.",
+                f"{type(error).__name__}: {error}",
+            )
+        self._profile_path = selected
+        return ReadinessCheckResult(
+            True,
+            f"Made an editable copy at {selected}. Changes are now saved there.",
+        )
+
     def commit(self, candidate: RigProfile) -> Path | None:
         """Publish an edited profile only after it is successfully saved."""
-        backup = self._profile_writer(candidate, self._profile_path)
+        backup = self._write(candidate, self._profile_path)
         self._profile = candidate
         return backup
 
@@ -79,7 +111,7 @@ class ProfileEditor:
     def save_profile_as(self, path: str | Path) -> ReadinessCheckResult:
         try:
             selected = Path(path)
-            backup = self._profile_writer(self._profile, selected)
+            backup = self._write(self._profile, selected)
         except Exception as error:
             return ReadinessCheckResult(
                 False,
@@ -113,7 +145,7 @@ class ProfileEditor:
                 profile_id=selected_id,
                 friendly_name=selected_name,
             )
-            backup = self._profile_writer(candidate, self._profile_path)
+            backup = self._write(candidate, self._profile_path)
         except Exception as error:
             return ReadinessCheckResult(
                 False,
@@ -159,7 +191,7 @@ class ProfileEditor:
                 device_roles=(),
                 connections=(),
             )
-            backup = self._profile_writer(candidate, selected_path)
+            backup = self._write(candidate, selected_path)
         except Exception as error:
             return ReadinessCheckResult(
                 False,
@@ -236,7 +268,7 @@ class ProfileEditor:
                 ),
             )
             self._validate_device_configuration(candidate, role.device_id)
-            backup = self._profile_writer(candidate, self._profile_path)
+            backup = self._write(candidate, self._profile_path)
         except Exception as error:
             return ReadinessCheckResult(
                 False,
@@ -324,7 +356,7 @@ class ProfileEditor:
                 device_roles=remaining,
                 connections=connections,
             )
-            backup = self._profile_writer(candidate, self._profile_path)
+            backup = self._write(candidate, self._profile_path)
         except Exception as error:
             return ReadinessCheckResult(
                 False,
@@ -531,7 +563,7 @@ class ProfileEditor:
                 device_roles=(*self._profile.device_roles, *roles),
             )
             backup = (
-                self._profile_writer(candidate, self._profile_path)
+                self._write(candidate, self._profile_path)
                 if roles
                 else None
             )
@@ -580,7 +612,7 @@ class ProfileEditor:
                     for item in self._profile.device_roles
                 ),
             )
-            backup = self._profile_writer(candidate, self._profile_path)
+            backup = self._write(candidate, self._profile_path)
         except Exception as error:
             return ReadinessCheckResult(
                 False,

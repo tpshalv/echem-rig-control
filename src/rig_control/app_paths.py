@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
 
+from rig_control.build_stamp import build_directory
+
 
 def home_directory() -> Path:
     """Return the per-machine folder for user data (settings, rig profiles,
@@ -53,3 +55,33 @@ def calibrations_directory() -> Path:
 
 def default_selection_path() -> Path:
     return home_directory() / "app-selection.toml"
+
+
+# Rig profiles shipped with the app, next to the source checkout or the .exe.
+# They are templates: device setup never writes to them, so a bench's real
+# configuration cannot silently overwrite them (or end up in git).
+SHIPPED_RIG_PROFILE_NAMES = frozenset({
+    "rig-profile.example.toml",
+    "rig-profile.esp32.toml",
+    "rig-profile.simulation.toml",
+})
+
+
+def is_shipped_rig_profile(path: str | Path) -> bool:
+    selected = Path(path).resolve()
+    return (
+        selected.name in SHIPPED_RIG_PROFILE_NAMES
+        and selected.parent == build_directory().resolve()
+    )
+
+
+def editable_profile_copy_path(path: str | Path) -> Path:
+    """Return an unused path in the profiles folder for a copy of `path`."""
+
+    name = Path(path)
+    candidate = profiles_directory() / name.name
+    number = 2
+    while candidate.exists():
+        candidate = profiles_directory() / f"{name.stem}-{number}{name.suffix}"
+        number += 1
+    return candidate

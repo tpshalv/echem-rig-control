@@ -1584,3 +1584,61 @@ def test_setpoint_unit_disagreeing_with_the_frame_blocks_the_add(tmp_path) -> No
     assert result.succeeded is False
     assert "reports setpoints in 'SCCM'" in result.technical_details
     assert not (tmp_path / "rig-profile.toml").exists()
+
+
+def test_shipped_template_is_read_only_until_an_editable_copy_is_made(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("ECHEM_RIG_CONTROL_HOME", str(tmp_path))
+    written = []
+    model = DeviceSetupViewModel(
+        load_rig_profile("rig-profile.example.toml"),
+        profile_path="rig-profile.example.toml",
+        serial_port_provider=lambda: (),
+        profile_writer=lambda profile, path: written.append(path),
+    )
+    device_id = model.profile.device_roles[0].device_id
+
+    assert model.profile_is_read_only is True
+    refused = model.remove_device(device_id)
+    assert refused.succeeded is False
+    assert "shipped template" in refused.technical_details
+    assert written == []
+
+    copied = model.make_editable_copy()
+
+    assert copied.succeeded is True
+    assert model.profile_path == tmp_path / "profiles" / "rig-profile.example.toml"
+    assert model.profile_is_read_only is False
+    assert model.remove_device(device_id).succeeded is True
+    assert written == [model.profile_path, model.profile_path]
+
+
+def test_editable_copy_does_not_overwrite_an_existing_local_profile(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("ECHEM_RIG_CONTROL_HOME", str(tmp_path))
+    (tmp_path / "profiles").mkdir()
+    (tmp_path / "profiles" / "rig-profile.esp32.toml").write_text("existing")
+    model = DeviceSetupViewModel(
+        load_rig_profile("rig-profile.esp32.toml"),
+        profile_path="rig-profile.esp32.toml",
+        serial_port_provider=lambda: (),
+        profile_writer=lambda profile, path: None,
+    )
+
+    assert model.make_editable_copy().succeeded is True
+    assert model.profile_path == tmp_path / "profiles" / "rig-profile.esp32-2.toml"
+
+
+def test_save_as_onto_a_shipped_template_is_refused() -> None:
+    written = []
+    model = DeviceSetupViewModel(
+        load_rig_profile("rig-profile.example.toml"),
+        profile_path="device-library.toml",
+        serial_port_provider=lambda: (),
+        profile_writer=lambda profile, path: written.append(path),
+    )
+
+    assert model.save_profile_as("rig-profile.simulation.toml").succeeded is False
+    assert written == []

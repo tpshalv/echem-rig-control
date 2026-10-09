@@ -71,12 +71,17 @@ class DeviceSetupWindow:
         self._profile_summary.grid(row=0, column=0, sticky="w")
         profile_buttons = ttk.Frame(profile)
         profile_buttons.grid(row=0, column=1, sticky="e")
+        # Shown only while a shipped template is open; see refresh().
+        self._make_copy_button = ttk.Button(
+            profile_buttons, text="Make editable copy", command=self._make_editable_copy
+        )
         ttk.Button(
             profile_buttons, text="New rig", command=self._profile_dialogs._new_profile
         ).grid(row=0, column=0, padx=(0, 4))
-        ttk.Button(
+        edit_details = ttk.Button(
             profile_buttons, text="Edit details", command=self._profile_dialogs._edit_profile
-        ).grid(row=0, column=1, padx=(0, 4))
+        )
+        edit_details.grid(row=0, column=1, padx=(0, 4))
         ttk.Button(
             profile_buttons, text="Switch profile", command=self._profile_dialogs._switch_profile
         ).grid(row=0, column=2, padx=(0, 4))
@@ -115,34 +120,43 @@ class DeviceSetupWindow:
 
         device_buttons = ttk.Frame(main)
         device_buttons.grid(row=3, column=0, sticky="w", pady=(8, 12))
-        ttk.Button(
+        add_device = ttk.Button(
             device_buttons,
             text="Add device",
             command=self._open_add_device,
-        ).grid(row=0, column=0, padx=(0, 8))
-        ttk.Button(
+        )
+        add_device.grid(row=0, column=0, padx=(0, 8))
+        edit_selected = ttk.Button(
             device_buttons,
             text="Edit selected",
             command=self._editing_dialogs._edit_selected_device,
-        ).grid(row=0, column=1, padx=(0, 8))
+        )
+        edit_selected.grid(row=0, column=1, padx=(0, 8))
         self._check_button = ttk.Button(
             device_buttons,
             text="Run read-only check",
             command=self._check_selected,
         )
         self._check_button.grid(row=0, column=2, padx=(0, 8))
-        ttk.Button(device_buttons, text="Acknowledge BPR installation",
-                   command=self._alicat_dialogs._acknowledge_bpr_installation).grid(row=1, column=0, columnspan=2, sticky="w", pady=4)
-        ttk.Button(
+        acknowledge_bpr = ttk.Button(device_buttons, text="Acknowledge BPR installation",
+                   command=self._alicat_dialogs._acknowledge_bpr_installation)
+        acknowledge_bpr.grid(row=1, column=0, columnspan=2, sticky="w", pady=4)
+        edit_interval = ttk.Button(
             device_buttons,
             text="Edit measurement interval",
             command=self._editing_dialogs._edit_measurement_interval,
-        ).grid(row=0, column=3, padx=(0, 8))
-        ttk.Button(
+        )
+        edit_interval.grid(row=0, column=3, padx=(0, 8))
+        remove_selected = ttk.Button(
             device_buttons,
             text="Remove selected",
             command=self._editing_dialogs._remove_selected_device,
-        ).grid(row=0, column=4, padx=(0, 8))
+        )
+        remove_selected.grid(row=0, column=4, padx=(0, 8))
+        self._editing_buttons = (
+            edit_details, add_device, edit_selected, acknowledge_bpr,
+            edit_interval, remove_selected,
+        )
         ttk.Button(
             device_buttons,
             text="Refresh lists",
@@ -183,12 +197,23 @@ class DeviceSetupWindow:
 
     def refresh(self) -> None:
         profile = self._view_model.profile
+        read_only = self._view_model.profile_is_read_only
         self._profile_summary.configure(
             text=(
                 f"{profile.friendly_name}  ({profile.profile_id})\n"
                 f"{self._view_model.profile_path.resolve()}"
+                + (
+                    "\nRead-only shipped template. Make an editable copy to change it."
+                    if read_only else ""
+                )
             )
         )
+        for button in self._editing_buttons:
+            button.configure(state="disabled" if read_only else "normal")
+        if read_only:
+            self._make_copy_button.grid(row=0, column=5, padx=(4, 0))
+        else:
+            self._make_copy_button.grid_remove()
         selected = self._selected_device_id()
         for item in self._devices.get_children():
             self._devices.delete(item)
@@ -229,6 +254,10 @@ class DeviceSetupWindow:
             self._port_note.configure(text=f"{len(ports)} serial port(s) found.")
         else:
             self._port_note.configure(text="No Windows serial ports found.")
+
+    def _make_editable_copy(self) -> None:
+        self._record_result(self._view_model.make_editable_copy())
+        self.refresh()
 
     def _check_selected(self) -> None:
         device_id = self._selected_device_id()

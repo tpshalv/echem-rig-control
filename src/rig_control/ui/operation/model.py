@@ -1,8 +1,11 @@
 from rig_control.devices.pressure_controller import PressureController
 from rig_control.display_units import DisplayUnits
+from array import array
+from bisect import bisect_left
 from collections import deque
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from math import floor
 from pathlib import Path
 import json
 from queue import Empty
@@ -60,145 +63,251 @@ class LiveMeasurementRow:
     timestamp: datetime
 
 
-@dataclass(slots=True)
-class _HistoryBucket:
-    index: int
-    minimum: LiveMeasurementRow
-    maximum: LiveMeasurementRow
-    latest: LiveMeasurementRow
+class _Samples:
+    """Compact time-ordered (timestamp, value, quality code) storage."""
 
-    def add(self, row: LiveMeasurementRow) -> None:
-        if row.value < self.minimum.value:
-            self.minimum = row
-        if row.value > self.maximum.value:
-            self.maximum = row
-        self.latest = row
+    __slots__ = ("times", "values", "qualities")
 
-    def representatives(self) -> tuple[LiveMeasurementRow, ...]:
-        unique = {
-            row.timestamp: row
-            for row in (self.minimum, self.maximum, self.latest)
-        }
-        return tuple(sorted(unique.values(), key=lambda row: row.timestamp))
+    def __init__(self) -> None:
+        self.times = array("d")
+        self.values = array("d")
+        self.qualities = bytearray()
+
+    def __len__(self) -> int:
+        return len(self.times)
+
+    def append(self, timestamp: float, value: float, quality: int) -> None:
+        self.times.append(timestamp)
+        self.values.append(value)
+        self.qualities.append(quality)
+
+    def drop_oldest(self, count: int) -> None:
+        del self.times[:count]
+        del self.values[:count]
+        del self.qualities[:count]
+
+    def nearest_index(self, timestamp: float) -> int | None:
+        if not self.times:
+            return None
+        index = bisect_left(self.times, timestamp)
+        candidates = [i for i in (index - 1, index) if 0 <= i < len(self.times)]
+        return min(candidates, key=lambda i: abs(self.times[i] - timestamp))
+
+
+def _extrema_in_order(samples: _Samples, start: int, stop: int) -> tuple[int, ...]:
+    """Indices of the lowest and highest value in ``[start, stop)``, oldest first."""
+
+    chunk = samples.values[start:stop]
+    lowest = start + chunk.index(min(chunk))
+    highest = start + chunk.index(max(chunk))
+    if lowest == highest:
+        return (lowest,)
+    return (lowest, highest) if lowest < highest else (highest, lowest)
+
+
+def _binned_indices(
+    samples: _Samples,
+    start: int,
+    stop: int,
+    bin_seconds: float,
+) -> list[int]:
+    """Min and max of each fixed-width time bin over ``[start, stop)``.
+
+    Bins sit on an absolute time grid, so a refresh only changes the bins
+    new readings land in instead of reshuffling the whole trace.
+    """
+
+    times = samples.times
+    selected: list[int] = []
+    index = start
+    current_bin = floor(times[start] / bin_seconds)
+    while index < stop:
+        current_bin = max(current_bin, floor(times[index] / bin_seconds))
+        end = bisect_left(times, (current_bin + 1) * bin_seconds, index, stop)
+        end = max(end, index + 1)  # Guards against float rounding at an edge.
+        selected.extend(_extrema_in_order(samples, index, end))
+        index = end
+        current_bin += 1
+    return selected
 
 
 class _ChannelHistory:
-    """Bounded recent and multi-resolution history for one live signal."""
+    """Bounded history for one live signal.
 
-    _LEVELS = ((10, 360), (60, 480), (600, 1_008))
-    _OVERVIEW_LIMIT = 500
+    Every reading from the last ``_RAW_SECONDS`` is kept as-is, which covers
+    every fixed graph period at full detail. A second, fixed-size copy spans
+    the whole run at an even resolution that halves whenever it fills, so a
+    run of any length costs the same memory. Graph queries take the slice
+    for the selected period and reduce it to the min and max of fixed-width
+    time bins, so the point count never depends on which store was used.
+    """
+
+    _RAW_SECONDS = 28_800  # The longest fixed graph period ("Last 8 hours").
+    _RAW_LIMIT = 100_000  # Backstop for very fast polling.
+    _RUN_LIMIT = 10_000
+    _TRIM_CHUNK = 1_024
 
     def __init__(self, recent_limit: int) -> None:
-        self.recent: deque[LiveMeasurementRow] = deque(maxlen=recent_limit)
-        self.levels: dict[int, deque[_HistoryBucket]] = {
-            seconds: deque(maxlen=count) for seconds, count in self._LEVELS
-        }
-        self.overview: list[LiveMeasurementRow] = []
+        self._recent_limit = recent_limit
+        self._raw = _Samples()
+        self._run = _Samples()
+        # Readings per group feeding the whole-run store; 1 keeps them all.
+        self._group_size = 1
+        self._group: list[tuple[float, float, int]] = []
+        self._qualities: list[str] = []
+        self._quality_codes: dict[str, int] = {}
+        self._identity: tuple[str, str, str] | None = None
+        self._timezone = None
+        self._first_time: float | None = None
 
     def append(self, row: LiveMeasurementRow) -> None:
-        self.recent.append(row)
+        try:
+            value = float(row.value)
+        except (TypeError, ValueError):
+            return  # Not something a graph can draw.
         timestamp = row.timestamp.timestamp()
-        for seconds, buckets in self.levels.items():
-            index = int(timestamp // seconds)
-            if buckets and buckets[-1].index == index:
-                buckets[-1].add(row)
-            else:
-                buckets.append(_HistoryBucket(index, row, row, row))
-        self.overview.append(row)
-        if len(self.overview) > self._OVERVIEW_LIMIT * 2:
-            self.overview = _condense_rows(self.overview, self._OVERVIEW_LIMIT)
+        if self._raw and timestamp < self._raw.times[-1]:
+            return  # Keep both stores time-ordered for bisection.
+        self._identity = (row.device_id, row.channel, row.unit)
+        if self._first_time is None:
+            self._first_time = timestamp
+        self._timezone = row.timestamp.tzinfo
+        quality = self._quality_codes.get(row.quality)
+        if quality is None:
+            quality = self._quality_codes[row.quality] = len(self._qualities)
+            self._qualities.append(row.quality)
+
+        self._raw.append(timestamp, value, quality)
+        self._trim_raw()
+        self._append_to_run(timestamp, value, quality)
+
+    def _trim_raw(self) -> None:
+        times = self._raw.times
+        expired = bisect_left(times, times[-1] - self._RAW_SECONDS)
+        excess = max(expired, len(times) - self._RAW_LIMIT)
+        if excess >= self._TRIM_CHUNK:
+            self._raw.drop_oldest(excess)
+
+    def _append_to_run(self, timestamp: float, value: float, quality: int) -> None:
+        if self._group_size == 1:
+            self._run.append(timestamp, value, quality)
+        else:
+            self._group.append((timestamp, value, quality))
+            if len(self._group) >= self._group_size:
+                lowest = min(self._group, key=lambda sample: sample[1])
+                highest = max(self._group, key=lambda sample: sample[1])
+                for sample in sorted({lowest, highest}):
+                    self._run.append(*sample)
+                self._group.clear()
+        if len(self._run) >= self._RUN_LIMIT:
+            self._halve_run()
+
+    def _halve_run(self) -> None:
+        """Keep the min and max of every four samples: half the points, same span."""
+
+        old = self._run
+        self._run = _Samples()
+        for start in range(0, len(old), 4):
+            for index in _extrema_in_order(old, start, min(start + 4, len(old))):
+                self._run.append(
+                    old.times[index], old.values[index], old.qualities[index]
+                )
+        # New readings must arrive at the density the halved store now has:
+        # one sample per reading becomes two per four, then two per eight...
+        self._group_size = 4 if self._group_size == 1 else self._group_size * 2
 
     def recent_rows(self) -> tuple[LiveMeasurementRow, ...]:
-        return tuple(self.recent)
+        count = min(self._recent_limit, len(self._raw))
+        return tuple(
+            self._row(self._raw, index)
+            for index in range(len(self._raw) - count, len(self._raw))
+        )
 
     def rows_for_period(
         self,
         seconds: int | None,
         limit: int = 500,
     ) -> tuple[LiveMeasurementRow, ...]:
-        if seconds is None:
-            return tuple(_condense_rows(self.overview, limit))
-        if not self.recent:
+        if not self._raw:
             return ()
-        latest = self.recent[-1].timestamp.timestamp() if self.recent else 0.0
-        cutoff = latest - seconds
-        run_start = self.overview[0].timestamp.timestamp()
-        required_start = max(cutoff, run_start)
+        latest = self._raw.times[-1]
+        run_start = self._first_time
+        start = run_start if seconds is None else max(latest - seconds, run_start)
+        # Size bins from the data actually shown: a 15-minute run in the
+        # 8-hour view must not get 8-hour-wide bins.
+        span = latest - start
 
-        recent_rows = list(self.recent)
-        if recent_rows[0].timestamp.timestamp() <= required_start:
-            selected = [
-                row
-                for row in recent_rows
-                if row.timestamp.timestamp() >= cutoff
-            ]
-            return tuple(_condense_rows(selected, limit))
+        raw_start = self._raw.times[0]
+        sources: list[tuple[_Samples, int, int]] = []
+        if start < raw_start:
+            # Older than the raw store: only the whole-run store has it.
+            sources.append(
+                (
+                    self._run,
+                    bisect_left(self._run.times, start),
+                    bisect_left(self._run.times, raw_start),
+                )
+            )
+        sources.append(
+            (self._raw, bisect_left(self._raw.times, start), len(self._raw))
+        )
+        sources = [source for source in sources if source[2] > source[1]]
 
-        for level_seconds, _count in self._LEVELS:
-            rows = [
-                row
-                for bucket in self.levels[level_seconds]
-                for row in bucket.representatives()
-                if row.timestamp.timestamp() >= cutoff
-            ]
-            if rows and rows[0].timestamp.timestamp() <= (
-                required_start + level_seconds
-            ):
-                return tuple(_condense_rows(rows, limit))
+        if sum(stop - begin for _samples, begin, stop in sources) <= limit:
+            return tuple(
+                self._row(samples, index)
+                for samples, begin, stop in sources
+                for index in range(begin, stop)
+            )
 
-        return tuple(_condense_rows(self.overview, limit))
+        # Two points per bin, one extra bin for grid alignment, one split at
+        # the junction between stores, plus both endpoints keeps us in limit.
+        bin_seconds = max(span, 1e-6) / max(1, (limit - 6) // 2)
+        rows: list[LiveMeasurementRow] = []
+        last = len(sources) - 1
+        for position, (samples, begin, stop) in enumerate(sources):
+            indices = _binned_indices(samples, begin, stop, bin_seconds)
+            if position == 0:
+                indices.insert(0, begin)
+            if position == last:
+                indices.append(stop - 1)
+            rows.extend(
+                self._row(samples, index) for index in dict.fromkeys(indices)
+            )
+        return tuple(rows)
 
     def nearest(self, timestamp: float) -> LiveMeasurementRow | None:
         """The retained reading closest in time; every candidate is a real reading."""
+
         candidates = [
-            *self.recent,
-            *(row for buckets in self.levels.values()
-              for bucket in buckets for row in bucket.representatives()),
-            *self.overview,
+            (samples, index)
+            for samples in (self._raw, self._run)
+            if (index := samples.nearest_index(timestamp)) is not None
         ]
-        return min(
+        if not candidates:
+            return None
+        samples, index = min(
             candidates,
-            key=lambda row: abs(row.timestamp.timestamp() - timestamp),
-            default=None,
+            key=lambda candidate: abs(candidate[0].times[candidate[1]] - timestamp),
         )
+        return self._row(samples, index)
 
     def set_recent_limit(self, limit: int) -> None:
-        self.recent = deque(self.recent, maxlen=limit)
+        self._recent_limit = limit
 
     def retained_count(self) -> int:
-        return (
-            len(self.recent)
-            + len(self.overview)
-            + sum(len(buckets) for buckets in self.levels.values())
+        return len(self._raw) + len(self._run) + len(self._group)
+
+    def _row(self, samples: _Samples, index: int) -> LiveMeasurementRow:
+        device_id, channel, unit = self._identity
+        return LiveMeasurementRow(
+            device_id=device_id,
+            channel=channel,
+            value=samples.values[index],
+            unit=unit,
+            quality=self._qualities[samples.qualities[index]],
+            timestamp=datetime.fromtimestamp(samples.times[index], self._timezone),
         )
-
-
-def _condense_rows(
-    rows: list[LiveMeasurementRow],
-    limit: int,
-) -> list[LiveMeasurementRow]:
-    """Preserve endpoints and local extrema while bounding display points."""
-
-    if len(rows) <= limit:
-        return list(rows)
-    interior = rows[1:-1]
-    bucket_count = max(1, (limit - 2) // 2)
-    bucket_size = max(1, (len(interior) + bucket_count - 1) // bucket_count)
-    selected = [rows[0]]
-    for start in range(0, len(interior), bucket_size):
-        bucket = interior[start : start + bucket_size]
-        extrema = {
-            min(bucket, key=lambda row: row.value).timestamp:
-                min(bucket, key=lambda row: row.value),
-            max(bucket, key=lambda row: row.value).timestamp:
-                max(bucket, key=lambda row: row.value),
-        }
-        selected.extend(sorted(extrema.values(), key=lambda row: row.timestamp))
-    selected.append(rows[-1])
-    if len(selected) > limit:
-        step = (len(selected) - 1) / (limit - 1)
-        selected = [selected[round(index * step)] for index in range(limit)]
-    return selected
 
 
 @dataclass(frozen=True, slots=True)

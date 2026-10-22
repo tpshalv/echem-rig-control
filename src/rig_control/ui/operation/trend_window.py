@@ -12,7 +12,6 @@ if TYPE_CHECKING:
     from rig_control.ui.operation.annotation_ui import AnnotationHub
 
 
-MAX_RENDERED_POINTS = 2_000
 TIME_RANGES = {
     "Last 10 minutes": 600,
     "Last 30 minutes": 1_800,
@@ -161,18 +160,6 @@ class TrendCanvasRenderer:
             self._canvas.itemconfigure(item, state=state)
 
 
-def subsample_readings(readings: tuple[TrendReading, ...], limit: int = MAX_RENDERED_POINTS):
-    """Thin display data evenly while preserving both endpoints."""
-
-    if len(readings) <= limit:
-        return readings
-    step = (len(readings) - 1) / (limit - 1)
-    indices = [round(index * step) for index in range(limit)]
-    indices[0] = 0
-    indices[-1] = len(readings) - 1
-    return tuple(readings[index] for index in indices)
-
-
 class TrendReading(Protocol):
     value: float
     unit: str
@@ -217,8 +204,7 @@ class TrendChart(ttk.Frame):
         self._canvas.bind("<Configure>", lambda _event: self.refresh())
 
     def refresh(self) -> None:
-        retained = self._history_provider()
-        readings = subsample_readings(retained)
+        readings = self._history_provider()
         width = max(self._canvas.winfo_width(), 100)
         height = max(self._canvas.winfo_height(), 100)
 
@@ -234,8 +220,7 @@ class TrendChart(ttk.Frame):
             text=(
                 f"Current: {latest.value:.6g} {latest.unit}  |  "
                 f"Quality: {latest.quality.upper()}  |  "
-                f"{len(retained)} retained readings"
-                + (f"  |  {len(readings)} displayed" if len(readings) < len(retained) else "")
+                f"{len(readings)} points shown"
             )
         )
 

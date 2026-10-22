@@ -12,14 +12,12 @@ from rig_control.ui.operation.annotation_overlay import PlotMapping
 from rig_control.ui.operation.trend_window import (
     TIME_RANGES,
     padded_value_range,
-    subsample_readings,
 )
 
 if TYPE_CHECKING:
     from rig_control.ui.operation.annotation_ui import AnnotationHub
 
 
-LIVE_POINT_LIMIT = 500
 MAX_TRACES_PER_PANEL = 8
 TRACE_COLOURS = (
     "#0067A3",
@@ -287,7 +285,7 @@ class MultiTraceCanvasRenderer:
             )
             if selected:
                 visible.append(
-                    (signal, subsample_readings(selected, LIVE_POINT_LIMIT), colour)
+                    (signal, selected, colour)
                 )
         if not visible:
             self._show_empty(width, height)

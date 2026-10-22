@@ -4,7 +4,6 @@ from types import SimpleNamespace
 from rig_control.ui.operation.trend_window import (
     TrendCanvasRenderer,
     padded_value_range,
-    subsample_readings,
 )
 from rig_control.ui.operation.dashboard_window import (
     DashboardSignal,
@@ -33,21 +32,6 @@ class FakeCanvas:
 
     def itemconfigure(self, item, *_args, **kwargs) -> None:
         self.configured[item] = kwargs
-
-
-def test_chart_subsampling_caps_points_and_preserves_endpoints() -> None:
-    start = datetime(2026, 8, 24, tzinfo=UTC)
-    readings = tuple(
-        SimpleNamespace(value=float(index), unit="V", quality="good",
-                        timestamp=start + timedelta(seconds=index))
-        for index in range(10_000)
-    )
-
-    displayed = subsample_readings(readings, 2_000)
-
-    assert len(displayed) == 2_000
-    assert displayed[0] is readings[0]
-    assert displayed[-1] is readings[-1]
 
 
 def test_chart_range_adds_space_around_nearly_flat_temperature() -> None:

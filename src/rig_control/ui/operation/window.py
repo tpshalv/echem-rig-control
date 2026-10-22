@@ -7,11 +7,14 @@ from threading import Thread
 from traceback import format_exc
 from typing import Any
 
+from rig_control.data.annotations import ANNOTATION_KIND_LABELS, ANNOTATION_KINDS
 from rig_control.models import Event, EventSeverity, EventSink
 from rig_control.ui.common.theme import (
-    ERROR_TEXT, SECTION_FONT, SUCCESS_BACKGROUND, SUCCESS_TEXT, TITLE_FONT,
+    ERROR_TEXT, MUTED_TEXT, SECTION_FONT, SUCCESS_BACKGROUND, SUCCESS_TEXT, TITLE_FONT,
     WARNING_BACKGROUND, WARNING_TEXT,
 )
+from rig_control.ui.operation.annotation_dialog import RunReviewDialog
+from rig_control.ui.operation.annotation_ui import AnnotationHub
 from rig_control.ui.manual_control.types import DEFAULT_WIRING_CURRENT_CEILING_AMPS
 from rig_control.ui.operation.model import (
     OperationActionResult,
@@ -77,6 +80,13 @@ class OperationWindow:
         self._recording_finalising = False
         self._pending_close: Callable[[tuple[str, ...]], None] | None = None
         self._updates_cancelled = False
+        self._note_started_at: datetime | None = None
+        self._displayed_annotations: tuple = ()
+        self._review_export_directory = None
+        self._annotation_hub = AnnotationHub(
+            root, view_model,
+            on_changed=self._annotations_changed, on_status=self._set_status,
+        )
         self._root.title("Echem Rig Control — Operation")
         self._root.geometry("1050x760")
         self._root.minsize(850, 620)
@@ -223,7 +233,7 @@ class OperationWindow:
             ("Experiment ID", "experiment_id"),
             ("Operator", "operator"),
             ("Output folder", "output"),
-            ("Notes", "notes"),
+            ("Start notes", "notes"),
         )
         self._entries: dict[str, ttk.Entry] = {}
         for row, (label, key) in enumerate(fields):
@@ -237,8 +247,10 @@ class OperationWindow:
             row=2, column=2, pady=2
         )
 
+        self._create_note_box(recording, row=4)
+
         actions = ttk.Frame(recording)
-        actions.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        actions.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(8, 0))
         self._record_button = ttk.Button(
             actions, text="Start recording", command=self._toggle_recording
         )
@@ -247,6 +259,10 @@ class OperationWindow:
             actions, text="Export Excel", command=self._export_excel
         )
         self._export_button.grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self._review_button = ttk.Button(
+            actions, text="Review run…", command=self._review_past_run
+        )
+        self._review_button.grid(row=1, column=1, sticky="w", padx=(12, 0), pady=(8, 0))
         self._recording_status = ttk.Label(
             actions, text="Not recording", font=SECTION_FONT
         )
@@ -256,13 +272,111 @@ class OperationWindow:
             text=("Every new reading is saved once. Measurement intervals "
                   "are configured per device in Device Setup."),
             wraplength=280,
-        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        ).grid(row=7, column=0, columnspan=3, sticky="w", pady=(10, 0))
 
         for text, x, y, anchor in (("┌", 2, 2, "nw"), ("┐", 1, 2, "ne"),
                                     ("└", 2, 1, "sw"), ("┘", 1, 1, "se")):
             ttk.Label(main, text=text, style="Blueprint.TLabel").place(
                 relx=x if x == 1 else 0, rely=y if y == 1 else 0,
                 x=4 if x == 2 else -4, y=4 if y == 2 else -4, anchor=anchor)
+
+    def _create_note_box(self, parent: ttk.Frame, *, row: int) -> None:
+        """One line for notes during a run; the time is taken at the first key."""
+        box = ttk.Frame(parent)
+        box.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        box.columnconfigure(1, weight=1)
+        self._note_kind_values = {ANNOTATION_KIND_LABELS[kind]: kind for kind in ANNOTATION_KINDS}
+        self._note_kind = ttk.Combobox(
+            box, values=tuple(self._note_kind_values), state="readonly", width=9,
+        )
+        self._note_kind.set(ANNOTATION_KIND_LABELS["lab_note"])
+        self._note_kind.grid(row=0, column=0, padx=(0, 4))
+        self._note_entry = ttk.Entry(box)
+        self._note_entry.grid(row=0, column=1, sticky="ew")
+        self._note_entry.bind("<KeyPress>", self._note_key_pressed)
+        self._note_entry.bind("<KeyRelease>", self._note_key_released)
+        self._note_entry.bind("<Return>", lambda _event: self._add_typed_note())
+        self._note_entry.bind("<Escape>", lambda _event: self._clear_note())
+        self._note_button = ttk.Button(box, text="Add note", command=self._add_typed_note)
+        self._note_button.grid(row=0, column=2, padx=(4, 0))
+        self._note_time = ttk.Label(box, foreground=MUTED_TEXT, width=9)
+        self._note_time.grid(row=0, column=3, padx=(6, 0))
+        self._recent_notes = ttk.Label(
+            parent, foreground=MUTED_TEXT, justify="left", wraplength=320,
+            text="Notes: Ctrl+N to type one, or double-click a graph.",
+        )
+        self._recent_notes.grid(row=row + 1, column=0, columnspan=3, sticky="w", pady=(2, 0))
+        for sequence in ("<Control-n>", "<Control-N>"):
+            self._root.bind(sequence, self._focus_note_box, add="+")
+
+    def _focus_note_box(self, _event: tk.Event | None = None) -> str:
+        if self._view_model.is_recording:
+            self._note_entry.focus_set()
+        else:
+            self._set_status("Start recording to add notes; notes are saved with the run.")
+        return "break"
+
+    def _note_key_pressed(self, event: tk.Event) -> None:
+        # Notes are usually written just after the event, so the time is
+        # taken when typing starts rather than when Enter is pressed.
+        if self._note_started_at is None and event.char and event.char.isprintable():
+            self._note_started_at = datetime.now(UTC)
+            self._note_time.configure(
+                text=self._note_started_at.astimezone().strftime("%H:%M:%S")
+            )
+
+    def _note_key_released(self, _event: tk.Event) -> None:
+        if not self._note_entry.get().strip():
+            self._note_started_at = None
+            self._note_time.configure(text="")
+
+    def _clear_note(self) -> str:
+        self._note_entry.delete(0, "end")
+        self._note_started_at = None
+        self._note_time.configure(text="")
+        return "break"
+
+    def _add_typed_note(self) -> str:
+        text = self._note_entry.get().strip()
+        if not text:
+            return "break"
+        result = self._view_model.add_annotation(
+            self._note_kind_values[self._note_kind.get()],
+            text,
+            self._note_started_at or datetime.now(UTC),
+        )
+        self._set_status(result.summary)
+        if not result.succeeded:
+            messagebox.showerror("Note not saved", result.summary, parent=self._root)
+            return "break"
+        self._clear_note()
+        self._note_kind.set(ANNOTATION_KIND_LABELS["lab_note"])
+        self._annotations_changed()
+        return "break"
+
+    def _annotations_changed(self) -> None:
+        self._show_recent_notes()
+        for trend in tuple(self._trend_windows.values()):
+            trend.refresh()
+        if self._dashboard_window is not None:
+            self._dashboard_window.refresh()
+
+    def _show_recent_notes(self) -> None:
+        notes = tuple(getattr(self._view_model, "annotations", ()))
+        if notes == self._displayed_annotations:
+            return
+        self._displayed_annotations = notes
+        if not notes:
+            self._recent_notes.configure(
+                text="Notes: Ctrl+N to type one, or double-click a graph."
+            )
+            return
+        latest = sorted(notes, key=lambda note: note.created_at)[-3:]
+        self._recent_notes.configure(text="\n".join(
+            f"{note.timestamp.astimezone():%H:%M} · {note.kind_label} · "
+            + (note.text if len(note.text) <= 48 else note.text[:47] + "…").replace("\n", " ")
+            for note in reversed(latest)
+        ))
 
     def _open_recipe_builder(self) -> None:
         """Open one non-modal editor; execution itself stays off the Tk thread."""
@@ -413,9 +527,69 @@ class OperationWindow:
             self._recording_finalising = False
             self._show_outcome("Stopping recording", value, error)
             self._update_display()
-            self._resume_pending_close()
+            if getattr(self, "_review_export_directory", None) is not None:
+                self._refresh_excel_after_review()
+            else:
+                self._resume_pending_close()
 
         self._run_in_background(self._view_model.stop_recording, complete)
+        self._open_run_review()
+
+    def _open_run_review(self, directory: object = None) -> None:
+        """Offer the optional review; recording has already stopped by now."""
+        try:
+            context = self._view_model.run_review_context(directory)
+        except Exception as error:
+            if directory is not None:
+                messagebox.showerror("Run review", str(error), parent=self._root)
+            return
+
+        def done(result: tuple[str, str] | None) -> None:
+            if result is None:
+                return
+            overall_qc, end_notes = result
+            outcome = self._view_model.save_run_review(
+                context.directory, overall_qc, end_notes
+            )
+            self._show_result(outcome)
+            if outcome.succeeded:
+                self._review_export_directory = context.directory
+                self._refresh_excel_after_review()
+
+        RunReviewDialog(self._root, context, on_done=done)
+
+    def _refresh_excel_after_review(self) -> None:
+        """Rewrite only the workbook; the review does not change the CSV."""
+        directory = self._review_export_directory
+        if directory is None or self._recording_finalising:
+            return  # Picked up when the final exports finish.
+        self._review_export_directory = None
+        self._recording_finalising = True
+        self._set_status("Adding run review to Excel…")
+        self._update_display()
+
+        def complete(value: object, error: Exception | None) -> None:
+            self._recording_finalising = False
+            self._show_outcome("Adding run review to Excel", value, error)
+            self._update_display()
+            self._resume_pending_close()
+
+        self._run_in_background(
+            lambda: self._view_model.export_excel(directory), complete
+        )
+
+    def _review_past_run(self) -> None:
+        if self._view_model.is_recording:
+            self._set_status("Stop recording first; the review opens when you do.")
+            return
+        selected = filedialog.askdirectory(
+            parent=self._root,
+            title="Choose an experiment folder to review",
+            initialdir=str(self._view_model.experiment_directory
+                           or self._entries["output"].get() or "."),
+        )
+        if selected:
+            self._open_run_review(selected)
 
     def _export_excel(self) -> None:
         if self._action_in_progress:
@@ -450,6 +624,7 @@ class OperationWindow:
             signal_provider=self._dashboard_signals,
             history_provider=self._view_model.measurement_history_for_period,
             on_close=lambda: setattr(self, "_dashboard_window", None),
+            annotations=self._annotation_hub,
         )
 
     def _dashboard_signals(self) -> tuple[DashboardSignal, ...]:
@@ -545,6 +720,7 @@ class OperationWindow:
                 None,
             ),
             history_limit=self._view_model.history_limit,
+            annotations=self._annotation_hub,
         )
 
     def _begin_cell_edit(self, event: tk.Event, system: str | None) -> None:
@@ -1028,6 +1204,13 @@ class OperationWindow:
             else "Writing final exports…" if finalising
             else "Not recording"
         )
+        if hasattr(self, "_note_entry"):
+            note_state = "normal" if recording else "disabled"
+            self._note_entry.configure(state=note_state)
+            self._note_button.configure(state=note_state)
+            self._note_kind.configure(state="readonly" if recording else "disabled")
+            self._review_button.configure(state="disabled" if recording else "normal")
+            self._show_recent_notes()
         if refresh_trends:
             for trend in tuple(self._trend_windows.values()):
                 trend.refresh()

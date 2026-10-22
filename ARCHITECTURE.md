@@ -370,6 +370,7 @@ It contains:
 - Experiment metadata.
 - Measurement records.
 - Event records.
+- Operator notes and the end-of-run review (`data/annotations.py`).
 - Writer interfaces.
 - Directory-based experiment writing.
 - Recovery from partially written journal files.
@@ -548,8 +549,21 @@ record; the cache is derived data. The export cache is not a recording-resume fe
 Stopping recording finishes the CSV and creates `experiment.xlsx`. Operation's
 **Export Excel** button also creates a snapshot during recording, without holding
 the acquisition lock. When idle, it prompts for an existing experiment folder.
-The workbook contains Overview, Data and Events; original raw readings remain in
-the journals rather than a duplicate worksheet. Excel is streamed with bounded
+The workbook contains Overview, Data, Events and Notes; original raw readings
+remain in the journals rather than a duplicate worksheet. Excel is streamed with bounded
 memory, and Data/Events continue on numbered sheets at Excel's row limit. Displayed
 timestamps use seconds unless a subsecond export interval is configured. An
 on-demand snapshot may include the latest, still-incomplete time bin.
+
+## Operator notes
+
+Notes and QC flags made during a run (typed in Operation or placed by
+double-clicking a live graph) are stored in `annotations.journal.jsonl` as
+append-only create/edit/delete records keyed by note ID; the latest record per
+ID is the note's current state. Notes are linked to measurements only by time
+and never change a reading. The wide CSV carries them in trailing `notes` and
+`qc_flags` columns, placed in the same time bins as readings; because a note can
+be placed in the past or corrected, any change to the notes journal rebuilds the
+CSV. The optional end-of-run review (overall QC flag and end notes) is appended
+to `run-review.journal.jsonl`, newest wins, and leads the Excel Overview sheet.
+`metadata.json` is never rewritten. Decision 0019 records why.

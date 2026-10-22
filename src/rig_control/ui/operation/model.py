@@ -2,12 +2,24 @@ from rig_control.devices.pressure_controller import PressureController
 from rig_control.display_units import DisplayUnits
 from collections import deque
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import json
 from queue import Empty
 from traceback import format_exc
 
+from rig_control.data.annotations import (
+    Annotation,
+    AnnotationRecord,
+    RunReview,
+    append_run_review,
+    deleted_annotation,
+    edited_annotation,
+    latest_run_review,
+    new_annotation,
+    read_annotations,
+    resolve_annotations,
+)
 from rig_control.data.experiment import ExperimentMetadata
 from rig_control.devices.manager import DeviceManager
 from rig_control.experiment_recording import ExperimentRecorder
@@ -136,6 +148,20 @@ class _ChannelHistory:
 
         return tuple(_condense_rows(self.overview, limit))
 
+    def nearest(self, timestamp: float) -> LiveMeasurementRow | None:
+        """The retained reading closest in time; every candidate is a real reading."""
+        candidates = [
+            *self.recent,
+            *(row for buckets in self.levels.values()
+              for bucket in buckets for row in bucket.representatives()),
+            *self.overview,
+        ]
+        return min(
+            candidates,
+            key=lambda row: abs(row.timestamp.timestamp() - timestamp),
+            default=None,
+        )
+
     def set_recent_limit(self, limit: int) -> None:
         self.recent = deque(self.recent, maxlen=limit)
 
@@ -173,6 +199,22 @@ def _condense_rows(
         step = (len(selected) - 1) / (limit - 1)
         selected = [selected[round(index * step)] for index in range(limit)]
     return selected
+
+
+@dataclass(frozen=True, slots=True)
+class RunReviewContext:
+    """What the end-of-run review shows: the plan, what happened, any review so far."""
+
+    directory: Path
+    experiment_id: str
+    start_notes: str
+    annotations: tuple[Annotation, ...]
+    review: RunReview | None
+
+
+# A note may be placed at most this far ahead of the clock, to absorb the
+# moment between capturing a time and saving it.
+_ANNOTATION_CLOCK_SLACK = timedelta(seconds=5)
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,6 +283,8 @@ class OperationViewModel:
         ] = {}
         self._warnings: dict[str, str] = {}
         self._events: deque[Event] = deque(maxlen=event_limit)
+        self._annotation_records: list[AnnotationRecord] = []
+        self._annotations: tuple[Annotation, ...] = ()
 
     @property
     def profile(self) -> RigProfile | None:
@@ -956,6 +1000,8 @@ class OperationViewModel:
             )
         except Exception as error:
             return self._failure("start experiment recording", error)
+        self._annotation_records.clear()
+        self._annotations = ()
         return OperationActionResult(
             True,
             f"Recording experiment {experiment_id!r}.",
@@ -978,6 +1024,163 @@ class OperationViewModel:
         except Exception as error:
             return self._failure("export Excel", error)
         return OperationActionResult(True, f"Excel exported to {path}")
+
+    @property
+    def run_started_at(self) -> datetime | None:
+        """Start of the current run, or of the last one once stopped."""
+        metadata = self._experiment_recorder.metadata
+        return None if metadata is None else metadata.started_at
+
+    @property
+    def annotations(self) -> tuple[Annotation, ...]:
+        """Notes for the current run (or the last one, once stopped), by time."""
+        return self._annotations
+
+    def annotations_between(
+        self,
+        start: float,
+        end: float,
+    ) -> tuple[Annotation, ...]:
+        return tuple(
+            note for note in self._annotations
+            if start <= note.timestamp.timestamp() <= end
+        )
+
+    def nearest_reading(
+        self,
+        device_id: str,
+        channel: str,
+        timestamp: datetime,
+    ) -> LiveMeasurementRow | None:
+        history = self._measurement_histories.get((device_id, channel))
+        return None if history is None else history.nearest(timestamp.timestamp())
+
+    def add_annotation(
+        self,
+        kind: str,
+        text: str,
+        timestamp: datetime,
+        *,
+        origin: str = "typed",
+        uncertainty_seconds: float | None = None,
+        signal: tuple[str, str] | None = None,
+    ) -> OperationActionResult:
+        problem = self._annotation_time_problem(timestamp)
+        if problem is not None:
+            return OperationActionResult(False, problem)
+        try:
+            record = new_annotation(
+                kind=kind, text=text, timestamp=timestamp, origin=origin,
+                uncertainty_seconds=uncertainty_seconds, signal=signal,
+            )
+        except (TypeError, ValueError) as error:
+            return OperationActionResult(False, str(error))
+        return self._write_annotation(record, "Note added.")
+
+    def edit_annotation(
+        self,
+        annotation_id: str,
+        *,
+        kind: str | None = None,
+        text: str | None = None,
+        timestamp: datetime | None = None,
+        origin: str | None = None,
+        uncertainty_seconds: float | None = None,
+        signal: tuple[str, str] | None = None,
+    ) -> OperationActionResult:
+        current = self._annotation(annotation_id)
+        if current is None:
+            return OperationActionResult(False, "That note no longer exists.")
+        if timestamp is not None:
+            problem = self._annotation_time_problem(timestamp)
+            if problem is not None:
+                return OperationActionResult(False, problem)
+        try:
+            record = edited_annotation(
+                current, kind=kind, text=text, timestamp=timestamp, origin=origin,
+                uncertainty_seconds=uncertainty_seconds, signal=signal,
+            )
+        except (TypeError, ValueError) as error:
+            return OperationActionResult(False, str(error))
+        return self._write_annotation(
+            record, "Note moved." if timestamp is not None else "Note updated."
+        )
+
+    def delete_annotation(self, annotation_id: str) -> OperationActionResult:
+        if self._annotation(annotation_id) is None:
+            return OperationActionResult(False, "That note no longer exists.")
+        return self._write_annotation(deleted_annotation(annotation_id), "Note deleted.")
+
+    def run_review_context(
+        self,
+        directory: str | Path | None = None,
+    ) -> RunReviewContext:
+        """Read a run's start notes, notes and review back from its folder."""
+        folder = Path(directory) if directory is not None else self.experiment_directory
+        if folder is None:
+            raise RuntimeError("No experiment folder is available to review")
+        metadata_path = folder / "metadata.json"
+        if not metadata_path.is_file():
+            raise ValueError("Choose an experiment folder containing metadata.json")
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        return RunReviewContext(
+            directory=folder,
+            experiment_id=str(metadata.get("experiment_id", folder.name)),
+            start_notes=metadata.get("notes") or "",
+            annotations=read_annotations(folder),
+            review=latest_run_review(folder),
+        )
+
+    def save_run_review(
+        self,
+        directory: str | Path,
+        overall_qc: str,
+        end_notes: str,
+    ) -> OperationActionResult:
+        try:
+            append_run_review(directory, RunReview(
+                overall_qc=overall_qc,
+                end_notes=end_notes.strip(),
+                reviewed_at=datetime.now(UTC),
+            ))
+        except Exception as error:
+            return self._failure("save the run review", error)
+        return OperationActionResult(True, "Run review saved.")
+
+    def _annotation(self, annotation_id: str) -> Annotation | None:
+        return next(
+            (note for note in self._annotations if note.annotation_id == annotation_id),
+            None,
+        )
+
+    def _annotation_time_problem(self, timestamp: datetime) -> str | None:
+        started_at = self._experiment_recorder.recording_started_at
+        if started_at is None:
+            return "Notes can only be added while recording."
+        if timestamp.tzinfo is None:
+            return "A note's time must include a timezone."
+        if timestamp < started_at:
+            return "That time is before this recording started."
+        if timestamp > datetime.now(UTC) + _ANNOTATION_CLOCK_SLACK:
+            return "A note cannot be placed in the future."
+        return None
+
+    def _write_annotation(
+        self,
+        record: AnnotationRecord,
+        summary: str,
+    ) -> OperationActionResult:
+        if not self.is_recording:
+            return OperationActionResult(
+                False, "Notes can only be added or changed while recording."
+            )
+        try:
+            self._experiment_recorder.record_annotation(record)
+        except Exception as error:
+            return self._failure("save the note", error)
+        self._annotation_records.append(record)
+        self._annotations = resolve_annotations(self._annotation_records)
+        return OperationActionResult(True, summary)
 
     def collect_polling_results(self) -> int:
         """Drain queued batches; intended for a Tk ``after`` callback."""

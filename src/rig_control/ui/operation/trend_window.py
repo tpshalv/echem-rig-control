@@ -3,9 +3,13 @@ from __future__ import annotations
 import tkinter as tk
 from collections.abc import Callable
 from tkinter import ttk
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from rig_control.ui.common.theme import ERROR_TEXT, INFO_TEXT, MUTED_TEXT, TITLE_FONT
+from rig_control.ui.operation.annotation_overlay import PlotMapping
+
+if TYPE_CHECKING:
+    from rig_control.ui.operation.annotation_ui import AnnotationHub
 
 
 MAX_RENDERED_POINTS = 2_000
@@ -186,6 +190,8 @@ class TrendChart(ttk.Frame):
         parent: tk.Misc,
         *,
         history_provider: Callable[[], tuple[TrendReading, ...]],
+        annotations: AnnotationHub | None = None,
+        signal: tuple[str, str] | None = None,
     ) -> None:
         super().__init__(parent)
         self._history_provider = history_provider
@@ -201,6 +207,13 @@ class TrendChart(ttk.Frame):
         )
         self._canvas.grid(row=1, column=0, sticky="nsew")
         self._renderer = TrendCanvasRenderer(self._canvas)
+        self._notes = None
+        if annotations is not None:
+            from rig_control.ui.operation.annotation_ui import ChartAnnotations
+
+            self._notes = ChartAnnotations(
+                self._canvas, annotations, signal_at=lambda _x, _y: signal,
+            )
         self._canvas.bind("<Configure>", lambda _event: self.refresh())
 
     def refresh(self) -> None:
@@ -212,6 +225,8 @@ class TrendChart(ttk.Frame):
         if not readings:
             self._renderer.show_empty(width, height)
             self._current.configure(text="No readings")
+            if self._notes is not None:
+                self._notes.draw(None)
             return
 
         latest = readings[-1]
@@ -270,6 +285,11 @@ class TrendChart(ttk.Frame):
             .timestamp.astimezone()
             .strftime("%H:%M:%S"),
         )
+        if self._notes is not None:
+            self._notes.draw(
+                PlotMapping(left, top, right, bottom, first_time, first_time + time_span)
+                if time_span > 0 else None
+            )
 
 
 class TrendWindow:
@@ -284,6 +304,7 @@ class TrendWindow:
         history_provider: Callable[[int | None], tuple[TrendReading, ...]],
         on_close: Callable[[], None],
         history_limit: int = 120,
+        annotations: AnnotationHub | None = None,
     ) -> None:
         self._on_close = on_close
         self._window = tk.Toplevel(parent)
@@ -316,10 +337,17 @@ class TrendWindow:
         )
         range_picker.grid(row=0, column=2)
         range_picker.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
+        if annotations is not None:
+            ttk.Checkbutton(
+                heading, text="Show notes", variable=annotations.show,
+                command=annotations.changed,
+            ).grid(row=0, column=3, padx=(12, 0))
         self._history_provider = history_provider
         self._chart = TrendChart(
             self._window,
             history_provider=self._visible_history,
+            annotations=annotations,
+            signal=(device_id, channel),
         )
         self._chart.grid(
             row=1, column=0, sticky="nsew", padx=12, pady=(4, 12)
@@ -329,6 +357,7 @@ class TrendWindow:
             text=(
                 "Up to 500 representative points are displayed; full-resolution "
                 "data is retained in the experiment recording."
+                + ("  Double-click the graph to add a note." if annotations else "")
             ),
             foreground=MUTED_TEXT,
         ).grid(row=2, column=0, sticky="w", padx=12, pady=(0, 8))

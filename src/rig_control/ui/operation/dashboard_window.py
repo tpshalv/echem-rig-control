@@ -5,13 +5,18 @@ from dataclasses import dataclass
 from datetime import datetime
 from math import ceil, floor, log10
 from tkinter import messagebox, ttk
+from typing import TYPE_CHECKING
 
 from rig_control.ui.common.theme import HAIRLINE, INFO_TEXT, MUTED_TEXT, SECTION_FONT
+from rig_control.ui.operation.annotation_overlay import PlotMapping
 from rig_control.ui.operation.trend_window import (
     TIME_RANGES,
     padded_value_range,
     subsample_readings,
 )
+
+if TYPE_CHECKING:
+    from rig_control.ui.operation.annotation_ui import AnnotationHub
 
 
 LIVE_POINT_LIMIT = 500
@@ -175,6 +180,7 @@ class MultiTraceCanvasRenderer:
         )
         self._lines: dict[tuple[str, str], int] = {}
         self._displayed_ranges: dict[str, tuple[float, float]] = {}
+        self.mapping: PlotMapping | None = None
 
     @property
     def item_count(self) -> int:
@@ -184,6 +190,23 @@ class MultiTraceCanvasRenderer:
         """Forget any sticky axis ranges, e.g. when the signal set changes."""
 
         self._displayed_ranges.clear()
+
+    def trace_nearest(self, x: float, y: float) -> tuple[str, str] | None:
+        """The drawn trace passing closest to a point, judged at that x."""
+
+        best: tuple[float, tuple[str, str]] | None = None
+        for key, item in self._lines.items():
+            if self._canvas.itemcget(item, "state") == "hidden":
+                continue
+            coordinates = self._canvas.coords(item)
+            points = list(zip(coordinates[0::2], coordinates[1::2], strict=False))
+            if not points:
+                continue
+            _px, py = min(points, key=lambda point: abs(point[0] - x))
+            distance = abs(py - y)
+            if best is None or distance < best[0]:
+                best = (distance, key)
+        return None if best is None else best[1]
 
     def _apply_sticky_range(
         self,
@@ -234,6 +257,7 @@ class MultiTraceCanvasRenderer:
     ) -> tuple[float, float] | None:
         for item in self._lines.values():
             self._canvas.itemconfigure(item, state="hidden")
+        self.mapping = None
         usable = tuple(
             (signal, readings, colour)
             for signal, readings, colour in traces
@@ -387,6 +411,7 @@ class MultiTraceCanvasRenderer:
             self._canvas.coords(mark, x, bottom, x, bottom + 4)
             self._canvas.itemconfigure(mark, fill=MUTED_TEXT, state="normal")
             self._set_text(label, x, bottom + 7, text, "n")
+        self.mapping = PlotMapping(left, top, right, bottom, selected_start, selected_end)
         return (selected_start, selected_end)
 
     def _draw_value_ticks(
@@ -461,7 +486,14 @@ class MultiTraceCanvasRenderer:
 
 
 class DashboardPanel(ttk.LabelFrame):
-    def __init__(self, parent, *, signal_provider, history_provider) -> None:
+    def __init__(
+        self,
+        parent,
+        *,
+        signal_provider,
+        history_provider,
+        annotations: AnnotationHub | None = None,
+    ) -> None:
         super().__init__(parent, text="LIVE GRAPH", padding=10)
         self._signal_provider = signal_provider
         self._history_provider = history_provider
@@ -516,6 +548,11 @@ class DashboardPanel(ttk.LabelFrame):
             variable=self._follow_live,
             command=self.refresh,
         ).grid(row=0, column=6, padx=(8, 0))
+        if annotations is not None:
+            ttk.Checkbutton(
+                controls, text="Show notes", variable=annotations.show,
+                command=annotations.changed,
+            ).grid(row=0, column=7, padx=(8, 0))
         self._group.bind("<<ComboboxSelected>>", lambda _event: self._refresh_choices())
 
         self._legend = ttk.Frame(self)
@@ -537,6 +574,17 @@ class DashboardPanel(ttk.LabelFrame):
             foreground=MUTED_TEXT,
         ).grid(row=3, column=0, sticky="w", pady=(3, 0))
         self._renderer = MultiTraceCanvasRenderer(self._canvas)
+        self._notes = None
+        if annotations is not None:
+            from rig_control.ui.operation.annotation_ui import ChartAnnotations
+
+            self._notes = ChartAnnotations(
+                self._canvas, annotations,
+                signal_at=self._renderer.trace_nearest,
+                signal_label=lambda key: (
+                    self._selected[key].label if key in self._selected else ".".join(key)
+                ),
+            )
         self._canvas.bind("<Configure>", lambda _event: self.refresh())
         self._canvas.bind("<MouseWheel>", self._zoom)
         self._canvas.bind("<ButtonPress-1>", self._start_pan)
@@ -571,6 +619,8 @@ class DashboardPanel(ttk.LabelFrame):
         )
         if selected is not None and not self._follow_live.get():
             self._view_start, self._view_end = selected
+        if self._notes is not None:
+            self._notes.draw(self._renderer.mapping)
 
     def reset_view(self) -> None:
         self._view_start = None
@@ -584,7 +634,8 @@ class DashboardPanel(ttk.LabelFrame):
             "visible_traces": sum(
                 variable.get() for variable in self._visible.values()
             ),
-            "canvas_items": self._renderer.item_count,
+            "canvas_items": self._renderer.item_count
+            + (self._notes.item_count if self._notes is not None else 0),
         }
 
     def _refresh_choices(self) -> None:
@@ -685,7 +736,15 @@ class DashboardPanel(ttk.LabelFrame):
 
 
 class LiveDashboardWindow:
-    def __init__(self, parent, *, signal_provider, history_provider, on_close) -> None:
+    def __init__(
+        self,
+        parent,
+        *,
+        signal_provider,
+        history_provider,
+        on_close,
+        annotations: AnnotationHub | None = None,
+    ) -> None:
         self._on_close = on_close
         self._window = tk.Toplevel(parent)
         self._window.title("Comprehensive live dashboard")
@@ -714,7 +773,10 @@ class LiveDashboardWindow:
         count.bind("<Return>", lambda _event: self._apply_layout())
         ttk.Label(
             header,
-            text="Mouse wheel: zoom time  •  drag: pan  •  Reset: return to live",
+            text=(
+                "Mouse wheel: zoom time  •  drag: pan  •  Reset: return to live"
+                + ("  •  double-click: add note" if annotations is not None else "")
+            ),
         ).grid(row=0, column=3)
 
         self._body = ttk.Frame(self._window, padding=(8, 0, 8, 8))
@@ -724,6 +786,7 @@ class LiveDashboardWindow:
                 self._body,
                 signal_provider=signal_provider,
                 history_provider=history_provider,
+                annotations=annotations,
             )
             for _ in range(4)
         )

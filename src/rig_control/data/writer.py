@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 
+from rig_control.data.annotations import AnnotationRecord
 from rig_control.data.experiment import ExperimentMetadata
 from rig_control.data.records import MeasurementRecord
 from rig_control.models import Event
@@ -46,6 +47,10 @@ class ExperimentWriter(ABC):
 
         for event in events:
             self.write_event(event)
+
+    @abstractmethod
+    def write_annotation(self, record: AnnotationRecord) -> None:
+        """Record one operator note, or a correction to one."""
 
     @abstractmethod
     def close_experiment(self) -> None:

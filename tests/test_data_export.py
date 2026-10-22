@@ -26,10 +26,12 @@ def test_wide_export_uses_regular_bins_and_preserves_missing_values() -> None:
         "timestamp_utc",
         "re72_1.process_value [degC]",
         "re72_1.target_setpoint [degC]",
+        "notes",
+        "qc_flags",
     ]
     assert rows == [
-        ["2026-09-17T10:00:00+00:00", 21.0, ""],
-        ["2026-09-17T10:00:01+00:00", "", 30.0],
+        ["2026-09-17T10:00:00+00:00", 21.0, "", "", ""],
+        ["2026-09-17T10:00:01+00:00", "", 30.0, "", ""],
     ]
 
 
@@ -54,8 +56,8 @@ def test_wide_export_allows_subsecond_bins() -> None:
         bin_seconds=0.5,
     )
 
-    assert headers == ["timestamp_utc", "re72_1.process_value [degC]"]
+    assert headers == ["timestamp_utc", "re72_1.process_value [degC]", "notes", "qc_flags"]
     assert rows == [
-        ["2026-09-17T10:00:00+00:00", 20.0],
-        ["2026-09-17T10:00:00.500000+00:00", 23.0],
+        ["2026-09-17T10:00:00+00:00", 20.0, "", ""],
+        ["2026-09-17T10:00:00.500000+00:00", 23.0, "", ""],
     ]

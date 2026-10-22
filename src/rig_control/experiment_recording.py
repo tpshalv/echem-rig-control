@@ -1,8 +1,10 @@
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 from dataclasses import replace
 from threading import Condition, Lock, RLock
 
+from rig_control.data.annotations import AnnotationRecord
 from rig_control.data.directory_writer import DirectoryExperimentWriter
 from rig_control.data.experiment import ExperimentMetadata
 from rig_control.data.writer import ExperimentWriter
@@ -30,6 +32,7 @@ class ExperimentRecorder:
         self._finalising = 0
         self._last_writer: ExperimentWriter | None = None
         self._writer: ExperimentWriter | None = None
+        self._metadata: ExperimentMetadata | None = None
         self._measurement_records_written = 0
         self._event_records_written = 0
 
@@ -75,6 +78,7 @@ class ExperimentRecorder:
             writer.open_experiment(metadata)
             self._writer = writer
             self._last_writer = writer
+            self._metadata = metadata
             self._measurement_records_written = 0
             self._event_records_written = 0
 
@@ -84,6 +88,26 @@ class ExperimentRecorder:
             if self._writer is not None and self._writer.is_open:
                 self._writer.write_event(event)
                 self._event_records_written += 1
+
+    def record_annotation(self, record: AnnotationRecord) -> None:
+        """Record an operator note; unlike events, refuse rather than drop it."""
+        with self._lock:
+            if self._writer is None or not self._writer.is_open:
+                raise RuntimeError("Notes can only be added while recording")
+            self._writer.write_annotation(record)
+
+    @property
+    def metadata(self) -> ExperimentMetadata | None:
+        """Metadata of the current run, or of the last one once stopped."""
+        with self._lock:
+            return self._metadata
+
+    @property
+    def recording_started_at(self) -> datetime | None:
+        with self._lock:
+            if self._writer is None or self._metadata is None:
+                return None
+            return self._metadata.started_at
 
     @property
     def experiment_directory(self) -> Path | None:

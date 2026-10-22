@@ -78,7 +78,7 @@ def test_partial_journal_line_is_not_consumed_until_complete(tmp_path):
     encoded = json.dumps(record(0, 21))
     path.write_text(encoded[:20], encoding="utf-8")
     exporter.update(final=True)
-    assert rows(tmp_path) == [["timestamp_utc"]]
+    assert rows(tmp_path) == [["timestamp_utc", "notes", "qc_flags"]]
     with path.open("a", encoding="utf-8") as stream:
         stream.write(encoded[20:] + "\n")
     exporter.update(final=True)
@@ -117,7 +117,7 @@ def test_excel_has_no_raw_sheet_splits_data_and_preserves_subsecond_interval(tmp
     path = export_excel(tmp_path)  # Infer saved half-second interval after restart.
     workbook = load_workbook(path, read_only=True)
     try:
-        assert workbook.sheetnames == ["Overview", "Data", "Data 2", "Data 3", "Events"]
+        assert workbook.sheetnames == ["Overview", "Data", "Data 2", "Data 3", "Events", "Notes"]
         data = [row for name in ("Data", "Data 2", "Data 3")
                 for row in list(workbook[name].values)[1:]]
         assert len(data) == 8

@@ -6,6 +6,14 @@ from pathlib import Path
 from typing import Any
 
 from rig_control.atomic_replace import replace_atomically
+from rig_control.data.annotations import (
+    Annotation,
+    RunReview,
+    format_annotation_cell,
+    format_duration,
+    latest_run_review,
+    read_annotations,
+)
 from rig_control.power_supply_telemetry import state_label
 
 
@@ -19,6 +27,24 @@ LAST_VALUE_CHANNELS = {
     "output_enabled",
     "regulation_mode",
 }
+ANNOTATION_HEADERS = ["notes", "qc_flags"]
+
+
+def annotation_cells(
+    annotations: tuple[Annotation, ...],
+    bin_seconds: float,
+) -> dict[int, tuple[str, str]]:
+    """Place each note in the export bin its time rounds to, like a reading."""
+    cells: dict[int, tuple[list[str], list[str]]] = defaultdict(lambda: ([], []))
+    for note in annotations:
+        bucket = floor(note.timestamp.timestamp() / bin_seconds + 0.5)
+        cells[bucket][0 if note.kind == "lab_note" else 1].append(
+            format_annotation_cell(note)
+        )
+    return {
+        bucket: (" | ".join(lab_notes), " | ".join(qc_flags))
+        for bucket, (lab_notes, qc_flags) in cells.items()
+    }
 
 
 def export_experiment_files(
@@ -84,10 +110,12 @@ def export_excel(
     # on-demand export running indefinitely.
     events_path = directory / "events.journal.jsonl"
     events_end = events_path.stat().st_size
+    annotations = read_annotations(directory)
     with exporter.snapshot() as (signals, rows):
         _write_xlsx(path, metadata=metadata,
                     wide_headers=exporter.headers(signals, metadata), wide_rows=rows,
-                    events=_iter_jsonl(events_path, events_end), bin_seconds=bin_seconds)
+                    events=_iter_jsonl(events_path, events_end), bin_seconds=bin_seconds,
+                    annotations=annotations, review=latest_run_review(directory))
     return path
 
 
@@ -96,6 +124,7 @@ def build_wide_rows(
     *,
     bin_seconds: float = 1.0,
     channel_labels: dict[str, dict[str, str]] | None = None,
+    annotations: tuple[Annotation, ...] = (),
 ) -> tuple[list[str], list[list[object]]]:
     """Bin long-form observations onto a regular grid without carrying values."""
     if bin_seconds <= 0:
@@ -123,9 +152,10 @@ def build_wide_rows(
            if channel_labels and channel in channel_labels.get(device_id, {}) else "")
         + f" [{signals[(device_id, channel)]}]"
         for device_id, channel in ordered_signals
-    ]
+    ] + ANNOTATION_HEADERS
+    notes = annotation_cells(annotations, bin_seconds)
     rows: list[list[object]] = []
-    for bucket in sorted(buckets):
+    for bucket in sorted(set(buckets) | set(notes)):
         timestamp = datetime.fromtimestamp(
             bucket * bin_seconds, tz=timezone.utc
         ).isoformat()
@@ -141,6 +171,7 @@ def build_wide_rows(
             else:
                 values = [float(record["value"]) for record in records]
                 row.append(sum(values) / len(values))
+        row.extend(notes.get(bucket, ("", "")))
         rows.append(row)
     return headers, rows
 
@@ -182,6 +213,8 @@ def _write_xlsx(
     wide_rows,
     events,
     bin_seconds: float,
+    annotations: tuple[Annotation, ...] = (),
+    review: RunReview | None = None,
 ) -> None:
     from openpyxl import Workbook
     from openpyxl.cell import WriteOnlyCell
@@ -244,7 +277,18 @@ def _write_xlsx(
     overview.append(cells(overview, ["Experiment export"]))
     overview.append([])
     overview.append(cells(overview, ["Field", "Value"], header=True))
+    # The run review leads, so the first sheet answers "was this run any good?"
+    overview.append(cells(overview, [
+        "Overall QC", review.overall_qc_label if review else "Not reviewed"]))
+    overview.append(cells(overview, ["Start notes", metadata.get("notes") or ""]))
+    overview.append(cells(overview, ["End notes", review.end_notes if review else ""]))
+    if review is not None:
+        overview.append(cells(overview, [
+            "Reviewed at (UTC)", _excel_datetime(review.reviewed_at.isoformat())]))
+    overview.append(cells(overview, ["Notes during run", len(annotations)]))
     for key, value in metadata.items():
+        if key == "notes":
+            continue
         if key == "extra":
             for extra_key, extra_value in dict(value).items():
                 overview.append(cells(overview, [f"extra.{extra_key}", extra_value]))
@@ -262,6 +306,15 @@ def _write_xlsx(
     table("Events", event_headers,
           ([_excel_datetime(event.get("timestamp")),
             *(event.get(key) for key in event_headers[1:])] for event in events))
+    table("Notes",
+          ["timestamp", "type", "text", "uncertainty", "placed", "signal",
+           "recorded_at", "edited"],
+          ([_excel_datetime(note.timestamp.isoformat()), note.kind_label, note.text,
+            format_duration(note.uncertainty_seconds) if note.uncertainty_seconds else "",
+            "from graph" if note.origin == "graph" else "typed",
+            ".".join(note.signal) if note.signal else "",
+            _excel_datetime(note.created_at.isoformat()),
+            "yes" if note.edited else ""] for note in annotations))
     temporary = path.with_name(f"{path.stem}.tmp{path.suffix}")
     try:
         workbook.save(temporary)

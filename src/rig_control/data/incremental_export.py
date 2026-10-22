@@ -4,6 +4,8 @@ The journals remain authoritative. This rebuildable SQLite cache bounds memory,
 remembers the journal byte offset, and permits Excel to read a consistent snapshot
 while recording continues. A new signal or a late correction to an exported bin
 requires a streamed CSV rebuild; ordinary updates only append completed rows.
+Operator notes can be added for earlier times, edited or deleted, so any change
+to the notes journal also rebuilds the CSV. Notes are rare, so this stays cheap.
 """
 
 from contextlib import contextmanager
@@ -17,7 +19,13 @@ import os
 import sqlite3
 
 from rig_control.atomic_replace import replace_atomically
-from rig_control.data.export import LAST_VALUE_CHANNELS, _channel_labels
+from rig_control.data.annotations import read_annotation_journal, resolve_annotations
+from rig_control.data.export import (
+    ANNOTATION_HEADERS,
+    LAST_VALUE_CHANNELS,
+    _channel_labels,
+    annotation_cells,
+)
 from rig_control.power_supply_telemetry import state_label
 
 
@@ -124,7 +132,10 @@ class IncrementalCsvExporter:
             connection.commit()
             connection.execute("BEGIN IMMEDIATE")
             state = self._state(connection)
+            notes, notes_size = self.notes()
             maximum = connection.execute("SELECT MAX(bucket) FROM bins").fetchone()[0]
+            if final:
+                maximum = _latest_bucket(maximum, notes)
             through = (maximum if final or maximum is None
                        else maximum - max(1, ceil(2 / self.bin_seconds)))
             previous = state.get("through")
@@ -136,6 +147,7 @@ class IncrementalCsvExporter:
                 or not self.path.exists()
                 or self.path.stat().st_size != state.get("csv_size")
                 or (previous is not None and dirty is not None and dirty <= previous)
+                or state.get("annotations_size", 0) != notes_size
             )
             signals = self.signals(connection)
             metadata_path = self.directory / "metadata.json"
@@ -146,19 +158,22 @@ class IncrementalCsvExporter:
                 with temporary.open("w", encoding="utf-8-sig", newline="") as stream:
                     writer = csv.writer(stream)
                     writer.writerow(headers)
-                    writer.writerows(self.rows(connection, signals, through=through))
+                    writer.writerows(
+                        self.rows(connection, signals, through=through, notes=notes)
+                    )
                     stream.flush()
                     os.fsync(stream.fileno())
                 replace_atomically(temporary, self.path)
             elif through is not None and (previous is None or through > previous):
                 with self.path.open("a", encoding="utf-8", newline="") as stream:
-                    csv.writer(stream).writerows(
-                        self.rows(connection, signals, after=previous, through=through)
-                    )
+                    csv.writer(stream).writerows(self.rows(
+                        connection, signals, after=previous, through=through,
+                        notes=notes,
+                    ))
                     stream.flush()
                     os.fsync(stream.fileno())
             self._save(connection, through=through, dirty=None, schema_changed=False,
-                       csv_size=self.path.stat().st_size)
+                       csv_size=self.path.stat().st_size, annotations_size=notes_size)
             connection.commit()
         return self.path
 
@@ -175,11 +190,28 @@ class IncrementalCsvExporter:
             f"{device}.{channel}"
             + (f" ({labels[device][channel]})" if channel in labels.get(device, {}) else "")
             + f" [{unit}]" for device, channel, unit in signals
-        ]
+        ] + ANNOTATION_HEADERS
 
-    def rows(self, connection, signals, *, after=None, through=None):
+    def notes(self) -> tuple[dict[int, tuple[str, str]], int]:
+        """Note cells by export bin, plus the journal bytes they came from."""
+        records, size = read_annotation_journal(self.directory)
+        return annotation_cells(resolve_annotations(records), self.bin_seconds), size
+
+    def _timestamp(self, bucket: int) -> str:
+        return datetime.fromtimestamp(bucket * self.bin_seconds, timezone.utc).isoformat()
+
+    def rows(self, connection, signals, *, after=None, through=None, notes=None):
         if through is None:
             return
+        if notes is None:
+            notes, _size = self.notes()
+        # A note may fall in a bin with no readings; it still gets its own row.
+        note_buckets = sorted(
+            bucket for bucket in notes
+            if bucket <= through and (after is None or bucket > after)
+        )
+        blank = [""] * len(signals)
+        next_note = 0
         query = "SELECT bucket, device, channel, total, count, latest_value FROM bins WHERE bucket<=?"
         parameters = [through]
         if after is not None:
@@ -187,14 +219,23 @@ class IncrementalCsvExporter:
             parameters.append(after)
         query += " ORDER BY bucket, device, channel"
         for bucket, records in groupby(connection.execute(query, parameters), key=lambda row: row[0]):
+            while next_note < len(note_buckets) and note_buckets[next_note] < bucket:
+                note_bucket = note_buckets[next_note]
+                yield [self._timestamp(note_bucket), *blank, *notes[note_bucket]]
+                next_note += 1
+            if next_note < len(note_buckets) and note_buckets[next_note] == bucket:
+                next_note += 1
             values = {
                 (device, channel): latest if channel in LAST_VALUE_CHANNELS else total / count
                 for _, device, channel, total, count, latest in records
             }
-            yield [datetime.fromtimestamp(bucket * self.bin_seconds, timezone.utc).isoformat(),
+            yield [self._timestamp(bucket),
                    *(state_label(values[(device, channel)], unit)
                      if (device, channel) in values else ""
-                     for device, channel, unit in signals)]
+                     for device, channel, unit in signals),
+                   *notes.get(bucket, ("", ""))]
+        for note_bucket in note_buckets[next_note:]:
+            yield [self._timestamp(note_bucket), *blank, *notes[note_bucket]]
 
     @contextmanager
     def snapshot(self):
@@ -202,5 +243,15 @@ class IncrementalCsvExporter:
         with self._connect() as connection:
             connection.execute("BEGIN")
             signals = self.signals(connection)
-            maximum = connection.execute("SELECT MAX(bucket) FROM bins").fetchone()[0]
-            yield signals, self.rows(connection, signals, through=maximum)
+            notes, _size = self.notes()
+            maximum = _latest_bucket(
+                connection.execute("SELECT MAX(bucket) FROM bins").fetchone()[0], notes
+            )
+            yield signals, self.rows(connection, signals, through=maximum, notes=notes)
+
+
+def _latest_bucket(measurement_maximum: int | None, notes: dict) -> int | None:
+    """A note after the last reading still belongs in a complete export."""
+    candidates = [bucket for bucket in (measurement_maximum, max(notes, default=None))
+                  if bucket is not None]
+    return max(candidates, default=None)

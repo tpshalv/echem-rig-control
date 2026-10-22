@@ -9,6 +9,11 @@ from time import monotonic
 from typing import TextIO
 
 from rig_control.atomic_replace import replace_atomically
+from rig_control.data.annotations import (
+    ANNOTATIONS_JOURNAL,
+    AnnotationRecord,
+    annotation_record_to_dict,
+)
 from rig_control.data.experiment import ExperimentMetadata
 from rig_control.data.records import MeasurementRecord
 from rig_control.data.serialization import (
@@ -51,6 +56,7 @@ class DirectoryExperimentWriter(ExperimentWriter):
         self._metadata: ExperimentMetadata | None = None
         self._measurement_file: TextIO | None = None
         self._event_file: TextIO | None = None
+        self._annotation_file: TextIO | None = None
         self._is_open = False
 
     @property
@@ -130,6 +136,14 @@ class DirectoryExperimentWriter(ExperimentWriter):
                 encoding="utf-8",
                 buffering=1,
             )
+            annotation_file = (
+                experiment_directory
+                / ANNOTATIONS_JOURNAL
+            ).open(
+                "a",
+                encoding="utf-8",
+                buffering=1,
+            )
 
         except Exception:
             self._close_files()
@@ -142,6 +156,7 @@ class DirectoryExperimentWriter(ExperimentWriter):
         self._metadata = metadata
         self._measurement_file = measurement_file
         self._event_file = event_file
+        self._annotation_file = annotation_file
         self._is_open = True
 
     def write_measurement(
@@ -199,6 +214,16 @@ class DirectoryExperimentWriter(ExperimentWriter):
         self._write_json_lines(
             self._event_file,
             (event_to_dict(event) for event in prepared),
+        )
+        self._refresh_live_export_if_due()
+
+    def write_annotation(self, record: AnnotationRecord) -> None:
+        self._require_open()
+        if not isinstance(record, AnnotationRecord):
+            raise TypeError("Experiment writer requires AnnotationRecord")
+        assert self._annotation_file is not None
+        self._write_json_lines(
+            self._annotation_file, (annotation_record_to_dict(record),)
         )
         self._refresh_live_export_if_due()
 
@@ -263,6 +288,10 @@ class DirectoryExperimentWriter(ExperimentWriter):
             self._event_file.close()
             self._event_file = None
 
+        if self._annotation_file is not None:
+            self._annotation_file.close()
+            self._annotation_file = None
+
     def _refresh_live_export_if_due(self) -> None:
         if self._live_export_interval_seconds <= 0:
             return
@@ -292,7 +321,9 @@ class DirectoryExperimentWriter(ExperimentWriter):
             self._live_export_future.result()
 
     def _flush_files(self) -> None:
-        for file in (self._measurement_file, self._event_file):
+        for file in (
+            self._measurement_file, self._event_file, self._annotation_file,
+        ):
             if file is None:
                 continue
             file.flush()

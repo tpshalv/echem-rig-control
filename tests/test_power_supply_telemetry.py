@@ -76,7 +76,7 @@ def test_supply_history_reaches_raw_csv_and_excel_with_readable_states(tmp_path)
     try:
         data = list(workbook["Data"].values)
         assert list(data[0]) == headers
-        assert list(data[1][1:]) == expected[0][1:]
+        assert list(data[1][1:]) == [None if v == "" else v for v in expected[0][1:]]
         assert list(data[2][1:]) == [None if v == "" else v for v in expected[1][1:]]
     finally:
         workbook.close()

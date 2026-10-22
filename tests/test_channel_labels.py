@@ -126,7 +126,8 @@ def test_ui_graphs_and_exports_use_snapshot_labels_but_keep_raw_ids(tmp_path):
     export_wide_csv(directory)
     with (directory / "measurements-wide.csv").open(encoding="utf-8-sig", newline="") as stream:
         headers = next(csv.reader(stream))
-    assert headers == ["timestamp_utc", "probe.tc1 (Water bath) [degC]", "probe.tc2 (Cell) [degC]"]
+    assert headers == ["timestamp_utc", "probe.tc1 (Water bath) [degC]", "probe.tc2 (Cell) [degC]",
+                       "notes", "qc_flags"]
     workbook = load_workbook(directory / "experiment.xlsx", read_only=True)
     try:
         assert [cell.value for cell in next(workbook["Data"].rows)] == headers

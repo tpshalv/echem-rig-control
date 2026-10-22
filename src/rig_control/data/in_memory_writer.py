@@ -1,3 +1,4 @@
+from rig_control.data.annotations import AnnotationRecord
 from rig_control.data.experiment import ExperimentMetadata
 from rig_control.data.records import MeasurementRecord
 from rig_control.data.writer import ExperimentWriter
@@ -12,6 +13,7 @@ class InMemoryExperimentWriter(ExperimentWriter):
         self._metadata: ExperimentMetadata | None = None
         self._measurements: list[MeasurementRecord] = []
         self._events: list[Event] = []
+        self._annotations: list[AnnotationRecord] = []
 
     @property
     def is_open(self) -> bool:
@@ -28,6 +30,10 @@ class InMemoryExperimentWriter(ExperimentWriter):
     @property
     def events(self) -> tuple[Event, ...]:
         return tuple(self._events)
+
+    @property
+    def annotations(self) -> tuple[AnnotationRecord, ...]:
+        return tuple(self._annotations)
 
     def open_experiment(
         self,
@@ -46,6 +52,7 @@ class InMemoryExperimentWriter(ExperimentWriter):
         self._metadata = metadata
         self._measurements.clear()
         self._events.clear()
+        self._annotations.clear()
         self._is_open = True
 
     def write_measurement(
@@ -70,6 +77,16 @@ class InMemoryExperimentWriter(ExperimentWriter):
             )
 
         self._events.append(event)
+
+    def write_annotation(self, record: AnnotationRecord) -> None:
+        self._require_open()
+
+        if not isinstance(record, AnnotationRecord):
+            raise TypeError(
+                "Experiment writer requires AnnotationRecord"
+            )
+
+        self._annotations.append(record)
 
     def close_experiment(self) -> None:
         self._require_open()

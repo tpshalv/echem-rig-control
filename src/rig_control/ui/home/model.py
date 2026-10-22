@@ -101,6 +101,11 @@ class HomeViewModel:
     def feature_active(self) -> bool:
         return bool(self._active_features)
 
+    @property
+    def recording_exports_pending(self) -> bool:
+        """A stopped run is still writing its final CSV/Excel exports."""
+        return self._session.experiment_recorder.is_finalising
+
     def is_feature_active(self, feature: str) -> bool:
         self._validate_feature(feature)
         return feature in self._active_features

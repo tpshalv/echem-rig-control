@@ -1034,8 +1034,12 @@ class OperationViewModel:
                         )
             self._events.extend(batch.events)
 
-    def shutdown(self) -> tuple[str, ...]:
+    def shutdown(self, *, wait_for_exports: bool = True) -> tuple[str, ...]:
         """Stop recording and polling for this screen.
+
+        ``wait_for_exports=False`` is the operator's "close anyway": a
+        stopped run's final exports are then left to finish in the
+        background (or are cut short if the application exits).
 
         Does not disconnect devices - Operation and Diagnostics share one
         device manager, so device disconnection is only ever done centrally
@@ -1054,6 +1058,9 @@ class OperationViewModel:
                 failures.append(
                     f"Could not stop recording: {type(error).__name__}: {error}"
                 )
+        # A run stopped just before closing may still be writing its exports.
+        if wait_for_exports:
+            self._experiment_recorder.wait_for_finalisation()
         if self.is_monitoring:
             try:
                 self._polling_service.stop()

@@ -210,7 +210,8 @@ class HomeWindow:
 
         def force_close() -> None:
             window.cancel_updates()
-            failures = model.shutdown()
+            # Application exit has already asked whether to wait for exports.
+            failures = model.shutdown(wait_for_exports=False)
             if failures:
                 messagebox.showerror(
                     "Operation shutdown problems", "\n".join(failures), parent=child
@@ -305,6 +306,9 @@ class HomeWindow:
         self._device_setup_model = None
         self.refresh()
 
+    def show_status(self, text: str) -> None:
+        self._status.configure(text=text)
+
     def _show_result(self, result: HomeActionResult) -> None:
         self._status.configure(text=result.summary)
         if not result.succeeded:
@@ -352,6 +356,37 @@ def main(arguments: Sequence[str] | None = None) -> int:
         )
         if not confirmed:
             return
+        finish_close()
+
+    waiting_for_exports = False
+
+    def finish_close(*, check_exports: bool = True) -> None:
+        nonlocal waiting_for_exports
+        if check_exports and model.recording_exports_pending:
+            choice = messagebox.askyesnocancel(
+                "Recording exports still being written",
+                "The last recording's final CSV/Excel files are still being "
+                "written. For a long run this can take a few minutes.\n\n"
+                "Yes — wait, then close automatically.\n\n"
+                "No — close anyway. Raw readings are already saved in the "
+                "experiment's journal files; re-create the CSV/Excel later with "
+                "Export Excel and choose that experiment folder.\n\n"
+                "Cancel — keep the application open.",
+                icon="warning",
+                parent=root,
+            )
+            if choice is None:
+                return
+            if choice:
+                if not waiting_for_exports:
+                    waiting_for_exports = True
+                    home_window.show_status(
+                        "Closing when recording exports finish… "
+                        "(close again to force)"
+                    )
+                    wait_then_close()
+                return
+        waiting_for_exports = False
         if model.feature_active:
             home_window.close_all_features()
         failures = model.close()
@@ -359,7 +394,23 @@ def main(arguments: Sequence[str] | None = None) -> int:
             messagebox.showerror("Shutdown problems", "\n".join(failures), parent=root)
         root.destroy()
 
-    root.protocol("WM_DELETE_WINDOW", close)
+    def wait_then_close() -> None:
+        if not waiting_for_exports:
+            return
+        if model.recording_exports_pending:
+            root.after(500, wait_then_close)
+        else:
+            finish_close(check_exports=False)
+
+    def close_requested() -> None:
+        # While already waiting, a second close skips the first confirmation
+        # and goes straight to the wait / close-anyway choice.
+        if waiting_for_exports:
+            finish_close()
+        else:
+            close()
+
+    root.protocol("WM_DELETE_WINDOW", close_requested)
     root.mainloop()
     return 0
 

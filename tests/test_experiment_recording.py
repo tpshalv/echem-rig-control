@@ -198,3 +198,34 @@ def test_record_batch_requires_polling_batch() -> None:
 
     with pytest.raises(TypeError, match="PollingBatch"):
         recorder.record_batch(object())  # type: ignore[arg-type]
+
+
+def test_stop_detaches_at_once_and_reports_finalisation_until_exports_finish() -> None:
+    from threading import Event as ThreadEvent, Thread
+
+    release = ThreadEvent()
+    closing = ThreadEvent()
+
+    class SlowWriter(InMemoryExperimentWriter):
+        def close_experiment(self) -> None:
+            closing.set()
+            release.wait(5)
+            super().close_experiment()
+
+    writer = SlowWriter()
+    recorder = make_recorder(writer)
+    recorder.start(metadata=metadata(), root_directory="unused")
+    stopper = Thread(target=recorder.stop)
+    stopper.start()
+    assert closing.wait(5)
+
+    assert recorder.is_recording is False
+    assert recorder.is_finalising is True
+    recorder.record_batch(batch(1.0))
+    assert writer.measurements == ()
+    assert recorder.wait_for_finalisation(0.01) is False
+
+    release.set()
+    assert recorder.wait_for_finalisation(5) is True
+    stopper.join(5)
+    assert recorder.is_finalising is False

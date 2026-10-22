@@ -73,6 +73,9 @@ class OperationWindow:
         self._background_results: Queue[Callable[[], None]] = Queue()
         self._connection_in_progress = False
         self._action_in_progress = False
+        self._action_description: str | None = None
+        self._recording_finalising = False
+        self._pending_close: Callable[[tuple[str, ...]], None] | None = None
         self._updates_cancelled = False
         self._root.title("Echem Rig Control — Operation")
         self._root.geometry("1050x760")
@@ -371,20 +374,48 @@ class OperationWindow:
         self._run_operation_action("Updating monitoring", action)
 
     def _toggle_recording(self) -> None:
+        if self._recording_finalising:
+            self._set_status(
+                "Still writing the last recording's CSV/Excel exports — please wait."
+            )
+            return
         if self._view_model.is_recording:
-            action = self._view_model.stop_recording
-        else:
-            experiment_id = self._entries["experiment_id"].get().strip()
-            operator = self._entries["operator"].get().strip()
-            output_directory = self._entries["output"].get().strip()
-            notes = self._entries["notes"].get().strip()
-            action = lambda: self._view_model.start_recording(
+            self._stop_recording()
+            return
+        experiment_id = self._entries["experiment_id"].get().strip()
+        operator = self._entries["operator"].get().strip()
+        output_directory = self._entries["output"].get().strip()
+        notes = self._entries["notes"].get().strip()
+        self._run_operation_action(
+            "Starting recording",
+            lambda: self._view_model.start_recording(
                 experiment_id=experiment_id,
                 operator=operator,
                 output_directory=output_directory,
                 notes=notes,
-            )
-        self._run_operation_action("Updating recording", action)
+            ),
+        )
+
+    def _stop_recording(self) -> None:
+        """Stop without locking the window while long-run exports are written.
+
+        The recorder detaches acquisition immediately; only the final CSV and
+        Excel files are still being produced, so other controls stay usable.
+        """
+        self._recording_finalising = True
+        self._set_status(
+            "Recording stopped — writing final CSV/Excel exports "
+            "(can take a few minutes for long runs)…"
+        )
+        self._update_display()
+
+        def complete(value: object, error: Exception | None) -> None:
+            self._recording_finalising = False
+            self._show_outcome("Stopping recording", value, error)
+            self._update_display()
+            self._resume_pending_close()
+
+        self._run_in_background(self._view_model.stop_recording, complete)
 
     def _export_excel(self) -> None:
         if self._action_in_progress:
@@ -668,27 +699,48 @@ class OperationWindow:
         action: Callable[[], OperationActionResult],
     ) -> None:
         if self._action_in_progress:
+            self._set_status(
+                f"Still busy: {self._action_description or 'previous action'}… "
+                "— please wait for it to finish."
+            )
             return
         self._action_in_progress = True
-        if hasattr(self, "_action_status"):
-            self._action_status.configure(text=f"{description}…")
+        self._action_description = description
+        self._set_status(f"{description}…")
 
         def complete(value: object, error: Exception | None) -> None:
             self._action_in_progress = False
-            if error is not None:
-                self._show_result(
-                    OperationActionResult(
-                        False,
-                        f"{description} failed: {type(error).__name__}: {error}",
-                        format_exc(),
-                    )
-                )
-            else:
-                assert isinstance(value, OperationActionResult)
-                self._show_result(value)
+            self._action_description = None
+            self._show_outcome(description, value, error)
             self._update_display()
+            self._resume_pending_close()
 
         self._run_in_background(action, complete)
+
+    def _show_outcome(
+        self, description: str, value: object, error: Exception | None
+    ) -> None:
+        if error is not None:
+            self._show_result(
+                OperationActionResult(
+                    False,
+                    f"{description} failed: {type(error).__name__}: {error}",
+                    format_exc(),
+                )
+            )
+        else:
+            assert isinstance(value, OperationActionResult)
+            self._show_result(value)
+
+    def _set_status(self, text: str) -> None:
+        if hasattr(self, "_action_status"):
+            self._action_status.configure(text=text)
+
+    def _resume_pending_close(self) -> None:
+        on_closed = self._pending_close
+        if on_closed is not None:
+            self._pending_close = None
+            self.request_close(on_closed)
 
     def _run_in_background(
         self,
@@ -711,13 +763,35 @@ class OperationWindow:
 
     def request_close(self, on_closed: Callable[[tuple[str, ...]], None]) -> None:
         """Stop feature services off the Tk thread before closing this window."""
-        if self._action_in_progress:
-            messagebox.showinfo(
-                "Operation busy",
-                "Wait for the current operation to finish before closing this window.",
-                parent=self._root,
+        force = False
+        if self._action_in_progress or self._recording_finalising:
+            busy = (
+                "the final recording exports are written"
+                if self._recording_finalising
+                else f"{self._action_description or 'the current action'} finishes"
             )
-            return
+            # A second close request while waiting offers a way out of
+            # anything that has got stuck.
+            if self._pending_close is None or not messagebox.askyesno(
+                "Close Operation anyway?",
+                f"Operation is still waiting until {busy}.\n\n"
+                "Closing anyway does not wait for it. Raw readings are already "
+                "saved in the experiment's journal files; if the final CSV/Excel "
+                "files end up missing or out of date, re-create them with "
+                "Export Excel and choose that experiment folder.\n\n"
+                "Close Operation anyway?",
+                icon="warning",
+                parent=self._root,
+            ):
+                # Close automatically once the work finishes, rather than refusing.
+                self._pending_close = on_closed
+                self._set_status(
+                    f"Operation will close when {busy}… "
+                    "(close again to force)"
+                )
+                return
+            self._pending_close = None
+            force = True
         if self._view_model.is_recording and not messagebox.askyesno(
             "Stop recording and close Operation",
             "Recording will stop and the final exports will be written before "
@@ -726,11 +800,12 @@ class OperationWindow:
         ):
             return
         self._action_in_progress = True
-        if hasattr(self, "_action_status"):
-            self._action_status.configure(text="Stopping Operation…")
+        self._action_description = "Stopping Operation"
+        self._set_status("Stopping Operation…")
 
         def complete(value: object, error: Exception | None) -> None:
             self._action_in_progress = False
+            self._action_description = None
             failures = (
                 (f"Could not close Operation: {type(error).__name__}: {error}",)
                 if error is not None
@@ -745,11 +820,12 @@ class OperationWindow:
             self.cancel_updates()
             on_closed(failures)
 
-        self._run_in_background(self._view_model.shutdown, complete)
+        self._run_in_background(
+            lambda: self._view_model.shutdown(wait_for_exports=not force), complete
+        )
 
     def _show_result(self, result: OperationActionResult) -> None:
-        if hasattr(self, "_action_status"):
-            self._action_status.configure(text=result.summary)
+        self._set_status(result.summary)
         if not result.succeeded:
             messagebox.showerror("Operation failed", result.summary, parent=self._root)
 
@@ -940,11 +1016,17 @@ class OperationWindow:
             text="Stop monitoring" if monitoring else "Start monitoring"
         )
         self._show_monitoring_state(monitoring)
+        finalising = getattr(self, "_recording_finalising", False)
         self._record_button.configure(
-            text="Stop recording" if recording else "Start recording"
+            text="Stop recording" if recording
+            else "Writing exports…" if finalising
+            else "Start recording",
+            state="disabled" if finalising else "normal",
         )
         self._recording_status.configure(
-            text="RECORDING" if recording else "Not recording"
+            text="RECORDING" if recording
+            else "Writing final exports…" if finalising
+            else "Not recording"
         )
         if refresh_trends:
             for trend in tuple(self._trend_windows.values()):

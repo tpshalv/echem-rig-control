@@ -1,7 +1,7 @@
 from collections.abc import Callable
 from pathlib import Path
 from dataclasses import replace
-from threading import Lock, RLock
+from threading import Condition, Lock, RLock
 
 from rig_control.data.directory_writer import DirectoryExperimentWriter
 from rig_control.data.experiment import ExperimentMetadata
@@ -26,6 +26,8 @@ class ExperimentRecorder:
         self._context_provider = context_provider
         self._lock = RLock()
         self._export_lock = Lock()
+        self._finalised = Condition(self._lock)
+        self._finalising = 0
         self._last_writer: ExperimentWriter | None = None
         self._writer: ExperimentWriter | None = None
         self._measurement_records_written = 0
@@ -101,16 +103,37 @@ class ExperimentRecorder:
                 raise RuntimeError("No experiment folder is available to export")
             return writer.export_excel()
 
+    @property
+    def is_finalising(self) -> bool:
+        """True while a stopped run's final CSV/Excel exports are being written."""
+        with self._lock:
+            return self._finalising > 0
+
+    def wait_for_finalisation(self, timeout: float | None = None) -> bool:
+        """Block until every stopped run has finished its final exports."""
+        with self._finalised:
+            return self._finalised.wait_for(lambda: self._finalising == 0, timeout)
+
     def stop(self) -> None:
-        """Detach acquisition, then finish exports without holding its lock."""
-        with self._export_lock:
-            with self._lock:
-                if not self.is_recording:
-                    raise RuntimeError("No experiment is being recorded")
-                writer = self._writer
-                self._writer = None
-            assert writer is not None
-            writer.close_experiment()
+        """Detach acquisition at once, then finish exports without its lock.
+
+        Final exports of a long run can take minutes, so readings stop being
+        recorded immediately rather than after an in-progress export.
+        """
+        with self._lock:
+            if not self.is_recording:
+                raise RuntimeError("No experiment is being recorded")
+            writer = self._writer
+            self._writer = None
+            self._finalising += 1
+        assert writer is not None
+        try:
+            with self._export_lock:
+                writer.close_experiment()
+        finally:
+            with self._finalised:
+                self._finalising -= 1
+                self._finalised.notify_all()
 
     def record_batch(self, batch: PollingBatch) -> None:
         """Record each newly acquired measurement exactly once."""

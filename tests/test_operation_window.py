@@ -302,3 +302,90 @@ def test_cancel_excel_folder_selection_does_not_export(monkeypatch):
     window._run_operation_action = lambda *args: pytest.fail("Cancelled export ran")
     monkeypatch.setattr("rig_control.ui.operation.window.filedialog.askdirectory", lambda **kwargs: "")
     window._export_excel()
+
+
+def _busy_window():
+    window = OperationWindow.__new__(OperationWindow)
+    window._root = None
+    window._action_status = SimpleNamespace(
+        text="", configure=lambda **kw: setattr(window._action_status, "text", kw["text"])
+    )
+    window._action_in_progress = False
+    window._action_description = None
+    window._recording_finalising = False
+    window._pending_close = None
+    window._update_display = lambda **kwargs: None
+    window._view_model = SimpleNamespace(is_recording=True)
+    return window
+
+
+def test_stopping_recording_leaves_other_controls_usable():
+    window = _busy_window()
+    queued = []
+    window._run_in_background = lambda action, complete: queued.append(complete)
+    window._view_model.stop_recording = lambda: None
+
+    window._toggle_recording()
+
+    assert window._recording_finalising is True
+    assert window._action_in_progress is False
+    ran = []
+    window._run_in_background = lambda action, complete: ran.append(action)
+    window._run_operation_action("Updating pump", lambda: None)
+    assert len(ran) == 1
+
+
+def test_ignored_click_while_busy_explains_why():
+    window = _busy_window()
+    window._action_in_progress = True
+    window._action_description = "Updating pump"
+    window._run_operation_action("Updating monitoring", lambda: pytest.fail("ran"))
+    assert "Still busy: Updating pump" in window._action_status.text
+
+
+def test_close_while_writing_exports_closes_when_they_finish():
+    window = _busy_window()
+    window._recording_finalising = True
+    closed = []
+    waited = []
+    window._view_model = SimpleNamespace(
+        is_recording=False,
+        shutdown=lambda wait_for_exports: waited.append(wait_for_exports) or (),
+    )
+    window.cancel_updates = lambda: None
+    window._run_in_background = lambda action, complete: complete(action(), None)
+
+    window.request_close(closed.append)
+    assert closed == []
+    assert "will close" in window._action_status.text
+
+    window._recording_finalising = False
+    window._resume_pending_close()
+    assert closed == [()]
+    assert waited == [True]
+
+
+@pytest.mark.parametrize("force", [True, False])
+def test_second_close_while_stuck_offers_close_anyway(force, monkeypatch):
+    window = _busy_window()
+    window._action_in_progress = True
+    window._action_description = "Updating pump"
+    closed, waited, prompts = [], [], []
+    window._view_model = SimpleNamespace(
+        is_recording=False,
+        shutdown=lambda wait_for_exports: waited.append(wait_for_exports) or (),
+    )
+    window.cancel_updates = lambda: None
+    window._run_in_background = lambda action, complete: complete(action(), None)
+    monkeypatch.setattr(
+        "rig_control.ui.operation.window.messagebox.askyesno",
+        lambda *args, **kwargs: prompts.append(args) or force,
+    )
+
+    window.request_close(closed.append)
+    assert prompts == [] and closed == []
+    window.request_close(closed.append)
+
+    assert len(prompts) == 1
+    assert closed == ([()] if force else [])
+    assert waited == ([False] if force else [])

@@ -4,115 +4,88 @@ friendly_name = "ESP32 hardware PoC"
 
 
 [[connections]]
-connection_id = "main_esp32"
-connection_type = "serial_json"
-
-[connections.parameters]
-port = "COM5"
-baud_rate = 115200
-timeout_seconds = 2.0
-controller_id = "esp32_main_controller"
-
-
-[[connections]]
-connection_id = "guardian_serial_com9"
+connection_id = "ezo_hum_serial_com4"
 connection_type = "serial_text"
 
 [connections.parameters]
-port = "COM9"
+port = "COM4"
 baud_rate = 9600
 timeout_seconds = 2.0
 
 
 [[connections]]
-connection_id = "keithley_ethernet_169_254_146_219"
-connection_type = "socket_scpi"
+connection_id = "ezo_hum_serial_com5"
+connection_type = "serial_text"
 
 [connections.parameters]
-host = "169.254.146.219"
-port = 5050
-timeout_seconds = 5.0
+port = "COM5"
+baud_rate = 9600
+timeout_seconds = 2.0
+
+
+[[connections]]
+connection_id = "pump_serial_com6"
+connection_type = "serial_binary"
+
+[connections.parameters]
+port = "COM6"
+baud_rate = 9600
+timeout_seconds = 2.0
 
 
 [[devices]]
-device_id = "esp32_main_controller"
-friendly_name = "Main ESP32 controller"
-capability = "remote_controller"
-driver = "esp32_json"
+device_id = "inlet_humidity"
+friendly_name = "Inlet humidity"
+capability = "humidity_sensor"
+driver = "atlas_ezo_hum"
 backend = "real"
 required = true
 enabled = true
-connection_id = "main_esp32"
-
-[devices.settings]
-controller_id = "esp32_main_controller"
-heartbeat_interval_seconds = 2.0
-
-
-[[devices]]
-device_id = "esp32_dht11"
-friendly_name = "ESP32 DHT11 temperature and humidity"
-capability = "temperature_sensor"
-driver = "esp32_dht11"
-backend = "real"
-required = true
-enabled = true
-connection_id = "main_esp32"
-poll_interval_seconds = 1.5
-
-
-[[devices]]
-device_id = "re72_1"
-friendly_name = "Lumel RE72 controller 1"
-capability = "temperature_controller"
-driver = "lumel_re72"
-backend = "real"
-required = true
-enabled = true
-connection_id = "main_esp32"
+connection_id = "ezo_hum_serial_com4"
+system = "Gas handling"
 poll_interval_seconds = 1.0
 
+[devices.identity]
+manufacturer = "Atlas Scientific"
+model = "EZO-HUM"
+
 [devices.settings]
-controller_id = "esp32_main_controller"
+hardware_label = "Inlet humidity"
+include_dew_point = true
+
+
+[[devices]]
+device_id = "outlet_humidity"
+friendly_name = "Outlet humidity"
+capability = "humidity_sensor"
+driver = "atlas_ezo_hum"
+backend = "real"
+required = true
+enabled = true
+connection_id = "ezo_hum_serial_com5"
+system = "Gas handling"
+poll_interval_seconds = 1.0
+
+[devices.identity]
+manufacturer = "Atlas Scientific"
+model = "EZO-HUM"
+
+[devices.settings]
+hardware_label = "Outlet humidity"
+include_dew_point = true
+
+
+[[devices]]
+device_id = "pump1"
+friendly_name = "Kamoer M1-STP"
+capability = "peristaltic_pump"
+driver = "kamoer_m1_stp"
+backend = "real"
+required = true
+enabled = true
+connection_id = "pump_serial_com6"
+system = "Fluid handling"
+
+[devices.settings]
 slave = 1
-
-
-[[devices]]
-device_id = "hotplate"
-friendly_name = "Guardian 5000"
-capability = "hotplate_stirrer"
-driver = "ohaus_guardian_5000"
-backend = "real"
-required = true
-enabled = true
-connection_id = "guardian_serial_com9"
-poll_interval_seconds = 2.0
-
-[devices.identity]
-manufacturer = "OHAUS"
-
-[devices.settings]
-hardware_label = "Guardian 5000"
-
-
-[[devices]]
-device_id = "main_power_supply"
-friendly_name = "Main power supply"
-capability = "dc_power_supply"
-driver = "keithley_2280s"
-backend = "real"
-required = true
-enabled = true
-connection_id = "keithley_ethernet_169_254_146_219"
-poll_interval_seconds = 0.1
-
-[devices.identity]
-manufacturer = "Keithley Instruments"
-model = "2280S-32-6"
-
-[devices.settings]
-maximum_voltage = 32.0
-maximum_current = 6.0
-maximum_power = 192.0
-hardware_label = "Main power supply"
-purpose_label = "Electrolysis supply"
+maximum_speed_rpm = 350.0

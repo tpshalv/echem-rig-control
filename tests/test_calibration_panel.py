@@ -4,14 +4,15 @@ from unittest.mock import Mock
 import pytest
 
 from rig_control.devices.manager import DeviceManager
-from rig_control.devices.pump_calibration import CalibrationPoint
-from rig_control.instrument_settings.pump_calibration import (
+from rig_control.devices.linear_calibration import CalibrationPoint
+from rig_control.instrument_settings.calibration import (
     PumpCalibrationService,
     PumpCalibrationSettingsService,
+    today_calibration_name,
 )
 from rig_control.rig_profile import RigProfile
-from rig_control.ui.instrument_settings.pump_calibration_panel import PumpCalibrationPanel
-from tests.test_pump_calibration import _StubPump
+from rig_control.ui.instrument_settings.calibration_panel import PUMP_PANEL_TEXT, CalibrationPanel
+from tests.test_calibration import _StubPump
 
 
 @pytest.fixture
@@ -34,7 +35,7 @@ def dialogs(monkeypatch):
              ("showerror", "showinfo", "showwarning", "askyesno")}
     for name, mock in mocks.items():
         monkeypatch.setattr(
-            f"rig_control.ui.instrument_settings.pump_calibration_panel.messagebox.{name}", mock,
+            f"rig_control.ui.instrument_settings.calibration_panel.messagebox.{name}", mock,
         )
     return mocks
 
@@ -47,7 +48,7 @@ def make_panel(root, tmp_path, *, allow_write=True):
         PumpCalibrationService(directory=tmp_path),
         require_write_access=(lambda: None) if allow_write else _deny,
     )
-    panel = PumpCalibrationPanel(root, lambda: service, lambda _event: None)
+    panel = CalibrationPanel(root, lambda: service, lambda _event: None, PUMP_PANEL_TEXT)
     panel._operator_var.set("operator")
     return panel, service
 
@@ -160,7 +161,7 @@ def test_corrupted_history_file_does_not_crash_the_panel(root, tmp_path):
 
 def test_resize_redraw_does_not_re_read_history_from_disk(root, tmp_path):
     panel, service = make_panel(root, tmp_path)
-    service.accept(service.fit_candidate("pump1", "operator",
+    service.accept(service.fit_candidate("pump1", "2026-10-01", "operator",
         [CalibrationPoint(10.0, 20.0), CalibrationPoint(20.0, 42.0)]))
     panel.refresh()  # Loads the accepted calibration into the cache.
     original_history = panel._history_cache
@@ -172,3 +173,60 @@ def test_resize_redraw_does_not_re_read_history_from_disk(root, tmp_path):
 
     assert panel._history_cache == original_history
     assert "Could not read" not in panel._status.cget("text")
+
+
+def test_name_is_prefilled_with_today_and_reset_after_accept(root, tmp_path):
+    panel, service = make_panel(root, tmp_path)
+    assert panel._name_var.get() == today_calibration_name()
+
+    panel._name_var.set("tubing swap")
+    panel._notes_var.set("new tubing")
+    enter_points(panel, [(10.0, 20.0), (20.0, 42.0), (30.0, 61.0)])
+    panel._fit()
+    panel._accept()
+
+    saved = service.active_calibration("pump1")
+    assert (saved.name, saved.notes) == ("tubing swap", "new tubing")
+    assert panel._name_var.get() == today_calibration_name()
+    assert panel._notes_var.get() == ""
+
+
+def test_name_edited_after_fit_is_the_one_saved(root, tmp_path):
+    panel, service = make_panel(root, tmp_path)
+    enter_points(panel, [(10.0, 20.0), (20.0, 42.0), (30.0, 61.0)])
+    panel._fit()
+
+    panel._name_var.set("renamed")
+    panel._accept()
+
+    assert service.active_calibration("pump1").name == "renamed"
+
+
+def test_a_duplicate_name_is_refused_and_the_candidate_kept(root, tmp_path, dialogs):
+    panel, service = make_panel(root, tmp_path)
+    service.accept(service.fit_candidate("pump1", "2026-10-01", "operator",
+        [CalibrationPoint(10.0, 20.0), CalibrationPoint(20.0, 42.0)]))
+    enter_points(panel, [(10.0, 20.0), (20.0, 42.0), (30.0, 61.0)])
+    panel._fit()
+
+    panel._name_var.set("2026-10-01")
+    panel._accept()
+
+    assert dialogs["showerror"].called
+    assert len(service.history("pump1")) == 1
+    assert panel._candidate is not None
+
+
+def test_saved_calibrations_are_listed_newest_first_and_can_be_opened(root, tmp_path):
+    panel, service = make_panel(root, tmp_path)
+    for name in ("2026-10-01", "2026-10-14"):
+        service.accept(service.fit_candidate("pump1", name, "operator",
+            [CalibrationPoint(10.0, 20.0), CalibrationPoint(20.0, 42.0)], f"notes {name}"))
+    panel.refresh()
+
+    assert panel._saved.get_children() == ("2026-10-14", "2026-10-01")
+    panel._saved.selection_set("2026-10-01")
+    panel._show_selected()
+
+    assert panel._selected.name == "2026-10-01"
+    assert "notes 2026-10-01" in panel._saved_detail.cget("text")

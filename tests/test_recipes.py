@@ -553,3 +553,62 @@ def test_runner_reports_which_session_devices_have_a_safe_state():
     runner, _supply, _mfc = make_runner()
     assert runner.has_safe_state("supply") is True
     assert runner.has_safe_state("not-in-session") is None
+
+
+def test_recipe_recording_uses_the_same_naming() -> None:
+    runner, _supply, _mfc = make_runner()
+    writer = InMemoryExperimentWriter()
+    runner._recorder = ExperimentRecorder(writer_factory=lambda _root: writer)
+    runner.start(Recipe("flow sweep", steps=(WaitStep(0),)), recording_root="unused",
+                 operator="TPS", electrolyser_id="B142")
+    runner.join(2)
+
+    initials, date, time, description = writer.metadata.experiment_id.split("_")
+    assert (initials, description) == ("TPS", "flow-sweep")
+    assert len(date) == 10 and len(time) == 5 and "h" in time
+    assert writer.metadata.electrolyser_id == "B142"
+
+
+# --- Pump flow (calibrated) ---
+
+def make_pump_runner(tmp_path, points=None):
+    from rig_control.devices.linear_calibration import CalibrationPoint
+    from rig_control.instrument_settings.calibration import PumpCalibrationService
+    from tests.test_operation_view_model import _StubPump
+
+    gc.collect()
+    calibrations = PumpCalibrationService(directory=tmp_path)
+    if points:
+        calibrations.accept(calibrations.fit_candidate(
+            "pump1", "2026-10-27", "operator", [CalibrationPoint(*point) for point in points]))
+    manager = DeviceManager()
+    manager.register(_StubPump("pump1", maximum_speed_rpm=150.0))
+    events = []
+    runner = RecipeRunner(RigControlService(manager), manager, sleeper=lambda _seconds: None,
+                          event_sink=events.append, pump_calibrations=calibrations)
+    return runner, events
+
+
+def test_pump_flow_is_sent_as_rpm_using_the_active_calibration(tmp_path):
+    # flow = 2 * rpm + 4
+    runner, events = make_pump_runner(tmp_path, [(10.0, 24.0), (50.0, 104.0)])
+    runner.start(Recipe("flow", steps=(
+        SetStep.one("pump1", "pump_flow", 44.0), SetStep.one("pump1", "pump_flow", 0.0))))
+    result = runner.join(2)
+
+    assert result.state is RecipeRunState.COMPLETED
+    assert commands(runner, "rpm")[:2] == [20.0, 0.0]
+    first = next(json.loads(e.message) for e in events if json.loads(e.message)["kind"] == "recipe_command")
+    assert (first["detail"], first["rpm"], first["calibration"]) == ("pump1.pump_flow=44.0", 20.0, "2026-10-27")
+
+
+def test_pump_flow_without_a_calibration_is_refused_before_the_run(tmp_path):
+    runner, _events = make_pump_runner(tmp_path)
+    with pytest.raises(RecipeValidationError, match="no accepted calibration"):
+        runner.validate(Recipe("flow", steps=(SetStep.one("pump1", "pump_flow", 44.0),)))
+
+
+def test_pump_flow_below_the_calibration_line_is_refused_before_the_run(tmp_path):
+    runner, _events = make_pump_runner(tmp_path, [(10.0, 24.0), (50.0, 104.0)])
+    with pytest.raises(RecipeValidationError, match="below what calibration"):
+        runner.validate(Recipe("flow", steps=(SetStep.one("pump1", "pump_flow", 2.0),)))

@@ -1,10 +1,11 @@
-"""Pump speed-to-flow calibration: fitting a measured (RPM, ml/min) curve.
+"""Linear calibrations: fitting a measured (x, y) line and applying it.
 
-Flow rate is not a quantity the pump itself reports or controls (see
-pump.py) - it is derived from an external, user-measured calibration that
-is expected to be replaced from time to time as tubing ages. This module
-holds that calibration's data model and fitting math; instrument_settings
-holds where it is stored and how it is reviewed and accepted.
+Used where the instrument's own number needs converting with an external,
+user-measured calibration that is expected to be replaced from time to time:
+pump speed to flow (tubing ages), and EZO-HUM reported RH to an estimate of
+the true RH in a CO2 ambient. This module holds the data model and fitting
+math; instrument_settings.calibration holds where calibrations are stored
+and how they are reviewed and accepted.
 """
 
 from collections.abc import Sequence
@@ -15,16 +16,13 @@ from math import isfinite
 
 @dataclass(frozen=True, slots=True)
 class CalibrationPoint:
-    """One measured (speed, flow) pair from a calibration run."""
+    """One measured (x, y) pair: the instrument's value and the true value."""
 
-    speed_rpm: float
-    flow_ml_per_min: float
+    x: float
+    y: float
 
     def __post_init__(self) -> None:
-        for name, value in (
-            ("speed_rpm", self.speed_rpm),
-            ("flow_ml_per_min", self.flow_ml_per_min),
-        ):
+        for name, value in (("x", self.x), ("y", self.y)):
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(value):
                 raise ValueError(f"{name} must be a finite number")
             if value < 0:
@@ -33,7 +31,7 @@ class CalibrationPoint:
 
 @dataclass(frozen=True, slots=True)
 class LinearFit:
-    """An ordinary-least-squares fit: flow_ml_per_min = slope * speed_rpm + intercept."""
+    """An ordinary-least-squares fit: y = slope * x + intercept."""
 
     slope: float
     intercept: float
@@ -49,56 +47,53 @@ class LinearFit:
                 raise ValueError(f"{name} must be a finite number")
         # Enforced here too, not only in fit_linear(): a fit loaded from a
         # hand-edited or corrupted history file must fail at load time, not
-        # divide by zero the first time speed_for_flow() is called.
+        # divide by zero the first time x_for_y() is called.
         if self.slope <= 0:
-            raise ValueError("Fit slope must be positive; flow should increase with speed")
+            raise ValueError("Fit slope must be positive; y should increase with x")
 
-    def flow_for_speed(self, speed_rpm: float) -> float:
-        return self.slope * speed_rpm + self.intercept
+    def y_for_x(self, x: float) -> float:
+        return self.slope * x + self.intercept
 
-    def speed_for_flow(self, flow_ml_per_min: float) -> float:
-        return (flow_ml_per_min - self.intercept) / self.slope
+    def x_for_y(self, y: float) -> float:
+        return (y - self.intercept) / self.slope
 
 
 def fit_linear(points: Sequence[CalibrationPoint]) -> LinearFit:
     """Ordinary least-squares fit, not forced through the origin.
 
     A free intercept is used deliberately: real tubing often has a small
-    dead zone at low speed, and forcing the line through zero would hide
-    that rather than reveal it in the R^2.
+    dead zone at low speed, and an RH probe's error is an offset as much as
+    a gain. Forcing the line through zero would hide that rather than
+    reveal it in the R^2.
     """
 
     if len(points) < 2:
         raise ValueError("At least two calibration points are required to fit a line")
 
-    speeds = [point.speed_rpm for point in points]
-    flows = [point.flow_ml_per_min for point in points]
+    xs = [point.x for point in points]
+    ys = [point.y for point in points]
     count = len(points)
-    mean_speed = sum(speeds) / count
-    mean_flow = sum(flows) / count
+    mean_x = sum(xs) / count
+    mean_y = sum(ys) / count
 
-    speed_variance = sum((speed - mean_speed) ** 2 for speed in speeds)
-    if speed_variance == 0:
-        raise ValueError("Calibration points must use more than one distinct speed")
+    x_variance = sum((x - mean_x) ** 2 for x in xs)
+    if x_variance == 0:
+        raise ValueError("Calibration points must use more than one distinct x value")
 
-    covariance = sum(
-        (speed - mean_speed) * (flow - mean_flow) for speed, flow in zip(speeds, flows)
-    )
-    slope = covariance / speed_variance
-    intercept = mean_flow - slope * mean_speed
+    covariance = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
+    slope = covariance / x_variance
+    intercept = mean_y - slope * mean_x
 
-    flow_variance = sum((flow - mean_flow) ** 2 for flow in flows)
-    if flow_variance == 0:
+    y_variance = sum((y - mean_y) ** 2 for y in ys)
+    if y_variance == 0:
         r_squared = 1.0
     else:
-        residual = sum(
-            (flow - (slope * speed + intercept)) ** 2 for speed, flow in zip(speeds, flows)
-        )
-        r_squared = 1.0 - residual / flow_variance
+        residual = sum((y - (slope * x + intercept)) ** 2 for x, y in zip(xs, ys))
+        r_squared = 1.0 - residual / y_variance
 
     if slope <= 0:
         raise ValueError(
-            "Fitted calibration has a non-positive slope; flow should increase with speed "
+            "Fitted calibration has a non-positive slope; y should increase with x "
             "-- check the entered points"
         )
 
@@ -106,10 +101,14 @@ def fit_linear(points: Sequence[CalibrationPoint]) -> LinearFit:
 
 
 @dataclass(frozen=True, slots=True)
-class PumpCalibration:
-    """One accepted calibration for one pump, kept in a per-pump history."""
+class Calibration:
+    """One accepted calibration for one device, kept in a per-device history.
 
-    calibration_id: str
+    ``name`` is chosen by the operator (by default the date) and is unique
+    within that device's history.
+    """
+
+    name: str
     device_id: str
     operator: str
     points: tuple[CalibrationPoint, ...]
@@ -118,8 +117,8 @@ class PumpCalibration:
     created_utc: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def __post_init__(self) -> None:
-        if not isinstance(self.calibration_id, str) or not self.calibration_id.strip():
-            raise ValueError("Calibration ID cannot be empty")
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise ValueError("Calibration name cannot be empty")
         if not isinstance(self.device_id, str) or not self.device_id.strip():
             raise ValueError("Device ID cannot be empty")
         if not isinstance(self.operator, str) or not self.operator.strip():

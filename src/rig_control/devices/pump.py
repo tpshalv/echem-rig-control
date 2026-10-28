@@ -1,9 +1,13 @@
 from abc import abstractmethod
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 from math import isfinite
 
 from rig_control.devices.base import Device
+from rig_control.devices.measurement_source import DeviceMeasurement, MeasurementSource
+from rig_control.models import DeviceStatus, Measurement
+from rig_control.power_supply_telemetry import OUTPUT_STATE_UNIT
 
 
 class PumpDirection(StrEnum):
@@ -31,7 +35,7 @@ class PumpLimits:
             raise ValueError("Maximum speed must be greater than zero")
 
 
-class Pump(Device):
+class Pump(Device, MeasurementSource):
     """Common capability required from a peristaltic pump.
 
     Speed is expressed in RPM, the pump's own controllable quantity.
@@ -41,6 +45,28 @@ class Pump(Device):
     belongs to the calibration service and the control layer built on top
     of it, not to the driver.
     """
+
+    def read_measurements(self) -> tuple[DeviceMeasurement, ...]:
+        """Report the last confirmed speed setpoint and run state for recording.
+
+        Pumps have no speed feedback, so this is the confirmed command state,
+        read without touching the bus. The calibrated flow is added on top by
+        the polling layer, not here.
+        """
+
+        if self.status is DeviceStatus.DISCONNECTED:
+            raise RuntimeError(f"Pump {self.device_id!r} is not connected")
+        timestamp = datetime.now(UTC)
+        readings = []
+        if self.speed_setpoint_rpm is not None:
+            readings.append(DeviceMeasurement(
+                "speed_setpoint", Measurement(self.speed_setpoint_rpm, "rpm", timestamp),
+            ))
+        if self.running is not None:
+            readings.append(DeviceMeasurement(
+                "running", Measurement(float(self.running), OUTPUT_STATE_UNIT, timestamp),
+            ))
+        return tuple(readings)
 
     @property
     @abstractmethod

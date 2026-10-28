@@ -317,7 +317,8 @@ interval and technical-log location.
 The Settings window separates **Application** preferences from **Instruments**.
 Detailed controller parameters, snapshots, and autotuning live in dedicated
 `ui/instrument_settings/` panels backed by UI-independent services in
-`instrument_settings/`. The RE72 is the first editor. Future potentiostats and
+`instrument_settings/`. The RE72 is the first editor; pump and humidity
+calibrations share another (see Calibrated channels). Future potentiostats and
 GCs can add their own editors and configuration services through the explicit
 catalogs in those packages; their parameters do not belong in Home or in the
 application-settings registry. Hardware writes require idle control and no
@@ -449,6 +450,20 @@ Standard-volume gas-flow units require extra care because the meaning of
 "standard" depends on reference temperature and pressure. Those reference
 conditions must be defined in the rig configuration or measurement metadata
 before conversions between standard-volume flow units are supported.
+
+### Calibrated channels
+
+Some instrument values need converting with a user-measured linear
+calibration (decisions/0023): pump rpm to mL/min, and EZO-HUM reported RH to
+an estimate of the true RH in a CO2 ambient. The fit and history are shared
+(`devices/linear_calibration.py`, `instrument_settings/calibration.py`), and
+each kind has a Settings panel built from `ui/instrument_settings/calibration_panel.py`.
+`calibrated_channels.py` is handed to the polling service and adds the
+calibrated value next to the raw one on every read (`flow_setpoint`,
+`humidity_co2_corrected`). Drivers stay calibration-free. The raw value is
+always recorded, and the active calibrations (name, notes, fit) are recorded
+in the run metadata as `calibrations_json` and summarised on the Excel
+overview.
 
 ## Simulation
 

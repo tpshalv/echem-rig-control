@@ -1,6 +1,7 @@
 from collections import deque
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+import json
 
 import pytest
 
@@ -17,8 +18,8 @@ from rig_control.devices.power_supply import (
 )
 from rig_control.experiment_recording import ExperimentRecorder
 from rig_control.devices.pump import Pump, PumpDirection, PumpLimits
-from rig_control.devices.pump_calibration import CalibrationPoint
-from rig_control.instrument_settings.pump_calibration import PumpCalibrationService
+from rig_control.devices.linear_calibration import CalibrationPoint
+from rig_control.instrument_settings.calibration import PumpCalibrationService
 from rig_control.models import DeviceStatus, Event, Measurement, Quality
 from rig_control.polling import PollingBatch, PollingFailure, PollingService
 from rig_control.control.service import RigControlService
@@ -212,8 +213,9 @@ def test_start_recording_attaches_active_pump_calibration(tmp_path) -> None:
     polling = PollingService(manager, interval_seconds=60.0, batch_handler=recorder.record_batch)
     calibration_service = PumpCalibrationService(directory=tmp_path)
     calibration_service.accept(calibration_service.fit_candidate(
-        "pump1", "operator",
+        "pump1", "2026-10-27", "operator",
         [CalibrationPoint(10.0, 20.0), CalibrationPoint(20.0, 42.0), CalibrationPoint(30.0, 61.0)],
+        "new tubing",
     ))
     model = OperationViewModel(
         manager, polling, recorder, RigControlService(manager),
@@ -225,9 +227,12 @@ def test_start_recording_attaches_active_pump_calibration(tmp_path) -> None:
     started = model.start_recording(experiment_id="EXP-1", operator="operator", output_directory="unused")
 
     assert started.succeeded is True
-    assert writer.metadata.extra["pump1_calibration_id"] == active.calibration_id
-    assert writer.metadata.extra["pump1_calibration_slope"] == pytest.approx(active.fit.slope)
-    assert writer.metadata.extra["pump1_calibration_intercept"] == pytest.approx(active.fit.intercept)
+    (recorded,) = json.loads(writer.metadata.extra["calibrations_json"])
+    assert recorded["device_id"] == "pump1"
+    assert recorded["kind"] == "pump"
+    assert (recorded["name"], recorded["notes"]) == ("2026-10-27", "new tubing")
+    assert recorded["slope"] == pytest.approx(active.fit.slope)
+    assert recorded["intercept"] == pytest.approx(active.fit.intercept)
 
 
 def test_start_recording_omits_pumps_with_no_accepted_calibration(tmp_path) -> None:
@@ -245,7 +250,7 @@ def test_start_recording_omits_pumps_with_no_accepted_calibration(tmp_path) -> N
     started = model.start_recording(experiment_id="EXP-1", operator="operator", output_directory="unused")
 
     assert started.succeeded is True
-    assert "pump1_calibration_id" not in writer.metadata.extra
+    assert "calibrations_json" not in writer.metadata.extra
 
 
 def test_monitoring_cannot_stop_while_recording() -> None:
@@ -753,7 +758,7 @@ def _calibrated_pump_model(tmp_path, points):
     calibration_service = PumpCalibrationService(directory=tmp_path)
     if points:
         calibration_service.accept(
-            calibration_service.fit_candidate("pump1", "operator", points)
+            calibration_service.fit_candidate("pump1", "2026-10-27", "operator", points)
         )
     model = OperationViewModel(
         manager, polling, recorder, RigControlService(manager),

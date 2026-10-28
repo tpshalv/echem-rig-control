@@ -37,6 +37,8 @@ SETTINGS: dict[DeviceCapability, tuple[SettingSpec, ...]] = {
     DeviceCapability.TEMPERATURE_CONTROLLER: (SettingSpec("temperature_setpoint", "Temperature setpoint", "°C"),),
     DeviceCapability.PERISTALTIC_PUMP: (
         SettingSpec("pump_speed", "Pump speed", "rpm"),
+        # Converted to rpm with the pump's active calibration when it runs.
+        SettingSpec("pump_flow", "Pump flow (calibrated)", "mL/min"),
         SettingSpec("pump_direction", "Pump direction", kind="choice", choices=("forward", "reverse")),
         SettingSpec("pump_running", "Pump running", kind="bool"),
     ),

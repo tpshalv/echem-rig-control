@@ -188,6 +188,21 @@ def _channel_labels(metadata: dict[str, Any]) -> dict[str, dict[str, str]]:
     return labels
 
 
+def _calibrations(metadata: dict[str, Any]) -> list[dict[str, Any]]:
+    """Calibrations active at recording start, for the overview summary.
+
+    Only a readable summary - the raw JSON row stays in the metadata listing
+    - so an unreadable value shows nothing rather than failing the export.
+    """
+    try:
+        calibrations = json.loads(metadata.get("extra", {}).get("calibrations_json", "[]"))
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(calibrations, list):
+        return []
+    return [calibration for calibration in calibrations if isinstance(calibration, dict)]
+
+
 def _iter_jsonl(path: Path, end: int):
     with path.open("rb") as stream:
         while stream.tell() < end:
@@ -289,6 +304,12 @@ def _write_xlsx(
         overview.append(cells(overview, [
             "Reviewed at (UTC)", _excel_datetime(review.reviewed_at.isoformat())]))
     overview.append(cells(overview, ["Notes during run", len(annotations)]))
+    for calibration in _calibrations(metadata):
+        notes = str(calibration.get("notes") or "").strip()
+        overview.append(cells(overview, [
+            f"Calibration: {calibration.get('device_name') or calibration.get('device_id')}",
+            str(calibration.get("name", "")) + (f" — {notes}" if notes else ""),
+        ]))
     for key, value in metadata.items():
         if key in {"notes", "experiment_id", "electrolyser_id"}:
             continue

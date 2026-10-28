@@ -5,6 +5,7 @@ from time import perf_counter
 from traceback import format_exc
 
 from rig_control.devices.measurement_source import MeasurementSource
+from rig_control.devices.pump import Pump
 from rig_control.diagnostics.device_dump import (
     dump_device,
     dump_unavailable_reason,
@@ -206,7 +207,9 @@ class DiagnosticViewModel:
             if device.status not in (DeviceStatus.CONNECTED, DeviceStatus.READY):
                 raise RuntimeError("Connect the device before testing communication")
 
-            if isinstance(device, MeasurementSource):
+            # A pump's readings are its cached setpoint and never touch the
+            # bus, so timing them would report a meaningless ~0 ms.
+            if isinstance(device, MeasurementSource) and not isinstance(device, Pump):
                 probe_name = "read_measurements"
                 probe = device.read_measurements
             else:

@@ -9,7 +9,7 @@ from time import monotonic
 
 from rig_control.data.records import MeasurementRecord
 from rig_control.devices.manager import DeviceManager
-from rig_control.devices.measurement_source import MeasurementSource
+from rig_control.devices.measurement_source import DeviceMeasurement, MeasurementSource
 from rig_control.devices.power_supply import PowerSupply
 from rig_control.models import Event, EventSeverity, EventSink
 
@@ -56,6 +56,9 @@ class PollingService:
         batch_handler: Callable[[PollingBatch], None] | None = None,
         event_sink: EventSink | None = None,
         results_queue_capacity: int = 120,
+        derived_readings: Callable[
+            [object, tuple[DeviceMeasurement, ...]], tuple[DeviceMeasurement, ...]
+        ] | None = None,
     ) -> None:
         self._default_device_interval = self._validate_interval(
             interval_seconds,
@@ -110,6 +113,7 @@ class PollingService:
         self._worker_count = max(max_workers or 1, len(self._source_ids), 1)
         self._batch_handler = batch_handler
         self._event_sink = event_sink
+        self._derived_readings = derived_readings
         self._results: Queue[PollingBatch] = Queue(
             maxsize=results_queue_capacity
         )
@@ -507,6 +511,14 @@ class PollingService:
                 return ()
             readings = (device.read_telemetry() if isinstance(device, PowerSupply)
                         else device.read_measurements())
+
+        if self._derived_readings is not None:
+            try:
+                readings = self._derived_readings(device, tuple(readings))
+            except Exception:
+                # A derived value (e.g. a calibrated channel whose history
+                # file cannot be read) must never cost the raw readings.
+                pass
 
         return tuple(
             MeasurementRecord(

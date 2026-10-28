@@ -9,7 +9,10 @@ from rig_control.devices.manager import DeviceManager
 from rig_control.models import EventSink
 from rig_control.rig_profile import RigProfile
 from rig_control.instrument_settings.re72 import Re72SettingsService
-from rig_control.instrument_settings.pump_calibration import PumpCalibrationSettingsService
+from rig_control.instrument_settings.calibration import (
+    HumidityCalibrationSettingsService,
+    PumpCalibrationSettingsService,
+)
 
 
 class InstrumentSettingsCatalog:
@@ -22,6 +25,10 @@ class InstrumentSettingsCatalog:
             event_sink=event_sink,
         )
         self.pump_calibration = PumpCalibrationSettingsService(
+            manager, profile, require_write_access=require_write_access,
+            event_sink=event_sink,
+        )
+        self.humidity_calibration = HumidityCalibrationSettingsService(
             manager, profile, require_write_access=require_write_access,
             event_sink=event_sink,
         )

@@ -31,8 +31,13 @@ from rig_control.data.experiment_naming import (
 )
 from rig_control.devices.manager import DeviceManager
 from rig_control.experiment_recording import ExperimentRecorder
-from rig_control.devices.pump_calibration import PumpCalibration
-from rig_control.instrument_settings.pump_calibration import PumpCalibrationService
+from rig_control.devices.atlas_ezo_hum.driver import AtlasEzoHum
+from rig_control.devices.linear_calibration import Calibration
+from rig_control.instrument_settings.calibration import (
+    CalibrationService,
+    HumidityCalibrationService,
+    PumpCalibrationService,
+)
 from rig_control.models import Event, Measurement, Quality
 from rig_control.polling import PollingService
 from rig_control.power_supply_telemetry import state_label
@@ -369,7 +374,8 @@ class OperationViewModel:
         history_limit: int = 120,
         event_limit: int = 1_000,
         power_supply_safety: PowerSupplyManualSafety | None = None,
-        pump_calibration_service: PumpCalibrationService | None = None,
+        pump_calibration_service: CalibrationService | None = None,
+        humidity_calibration_service: CalibrationService | None = None,
         display_units: DisplayUnits | None = None,
         recipe_runner: RecipeRunner | None = None,
     ) -> None:
@@ -380,6 +386,9 @@ class OperationViewModel:
         self._polling_service = polling_service
         self._experiment_recorder = experiment_recorder
         self._pump_calibration_service = pump_calibration_service or PumpCalibrationService()
+        self._humidity_calibration_service = (
+            humidity_calibration_service or HumidityCalibrationService()
+        )
         self.manual_control = ManualControlViewModel(
             device_manager,
             control_service,
@@ -602,10 +611,10 @@ class OperationViewModel:
                     rows[(device_id, "flow_setpoint")] = OperationChannelRow(
                         device_id, device_name, "flow_setpoint", "Flow setpoint (calibrated)",
                         None if device.speed_setpoint_rpm is None
-                        else round(fit.flow_for_speed(device.speed_setpoint_rpm), 3),
+                        else round(fit.y_for_x(device.speed_setpoint_rpm), 3),
                         "mL/min", "good", None, device_system, True, "number",
                         max(fit.intercept, 0.0),
-                        fit.flow_for_speed(device.limits.maximum_speed_rpm),
+                        fit.y_for_x(device.limits.maximum_speed_rpm),
                     )
                 rows[(device_id, "direction")] = OperationChannelRow(
                     device_id, device_name, "direction", "Direction",
@@ -868,6 +877,8 @@ class OperationViewModel:
             "current": "Current draw",
             "voltage": "Voltage",
             "regulation_mode": "Actual regulation mode",
+            "humidity_co2_corrected": "Humidity (CO2 corrected)",
+            "flow_setpoint": "Flow setpoint (calibrated)",
         }
         return names.get(channel, channel.replace("_", " ").capitalize())
 
@@ -1007,7 +1018,7 @@ class OperationViewModel:
             return self._failure("stop monitoring", error)
         return OperationActionResult(True, "Background monitoring stopped.")
 
-    def _active_pump_calibration(self, device_id: str) -> PumpCalibration | None:
+    def _active_pump_calibration(self, device_id: str) -> Calibration | None:
         try:
             return self._pump_calibration_service.active_calibration(device_id)
         except Exception:
@@ -1024,18 +1035,18 @@ class OperationViewModel:
                 f"Pump {device_id!r} has no readable calibration; set its speed in rpm instead.",
             )
         fit = calibration.fit
-        rpm = round(fit.speed_for_flow(flow_ml_per_min), 2)
+        rpm = round(fit.x_for_y(flow_ml_per_min), 2)
         if rpm < 0:
             return OperationActionResult(
                 False,
                 f"{flow_ml_per_min:g} mL/min is below what calibration "
-                f"{calibration.calibration_id} reaches: its line gives "
+                f"{calibration.name} reaches: its line gives "
                 f"{fit.intercept:g} mL/min at 0 rpm.",
             )
         result = self.manual_control.set_pump_speed(device_id, rpm)
         if not result.succeeded:
             return OperationActionResult(False, result.summary, result.technical_details)
-        speeds = [point.speed_rpm for point in calibration.points]
+        speeds = [point.x for point in calibration.points]
         note = (
             "" if min(speeds) <= rpm <= max(speeds)
             else f" That is outside the calibrated {min(speeds):g}-{max(speeds):g} rpm, "
@@ -1044,37 +1055,51 @@ class OperationViewModel:
         return OperationActionResult(
             True,
             f"Set pump {device_id!r} to {flow_ml_per_min:g} mL/min ({rpm:g} rpm, "
-            f"calibration {calibration.calibration_id}).{note}",
+            f"calibration {calibration.name}).{note}",
         )
 
-    def _pump_calibration_metadata(self) -> dict[str, str | float]:
-        """Record which calibration was active for each pump at run start.
+    def _calibration_metadata(self) -> dict[str, str]:
+        """Record which calibration was active for each device at run start.
 
-        Stores the calibration ID rather than a bare file path: each pump's
-        calibration history file is append-only, so a path alone would not
-        say which entry inside it was active for this particular run. The
-        fitted slope/intercept are also copied in directly, so a run's
-        recorded flow stays self-describing even if the history file is
-        later edited or lost. A pump with no accepted calibration, or a
+        Stores the calibration name rather than a bare file path: each
+        device's calibration history file is append-only, so a path alone
+        would not say which entry inside it was active for this particular
+        run. The fit and notes are also copied in directly, so a run's
+        calibrated channels stay self-describing even if the history file is
+        later edited or lost. A device with no accepted calibration, or a
         calibration history that cannot be read, is simply omitted - this
         is traceability metadata, not something that should block starting
         a recording.
         """
 
-        extra: dict[str, str | float] = {}
+        calibrations = []
         for device_id in self._device_manager.device_ids:
-            if not isinstance(self._device_manager.get(device_id), Pump):
+            device = self._device_manager.get(device_id)
+            if isinstance(device, Pump):
+                service = self._pump_calibration_service
+            elif isinstance(device, AtlasEzoHum):
+                service = self._humidity_calibration_service
+            else:
                 continue
             try:
-                calibration = self._pump_calibration_service.active_calibration(device_id)
+                calibration = service.active_calibration(device_id)
             except Exception:
                 continue
             if calibration is None:
                 continue
-            extra[f"{device_id}_calibration_id"] = calibration.calibration_id
-            extra[f"{device_id}_calibration_slope"] = calibration.fit.slope
-            extra[f"{device_id}_calibration_intercept"] = calibration.fit.intercept
-        return extra
+            calibrations.append({
+                "device_id": device_id,
+                "device_name": self._device_name(device_id),
+                "kind": service.kind.label,
+                "name": calibration.name,
+                "notes": calibration.notes,
+                "slope": calibration.fit.slope,
+                "intercept": calibration.fit.intercept,
+                "r_squared": calibration.fit.r_squared,
+            })
+        if not calibrations:
+            return {}
+        return {"calibrations_json": json.dumps(calibrations, ensure_ascii=False)}
 
     def start_recording(
         self,
@@ -1130,7 +1155,7 @@ class OperationViewModel:
                         role.device_id: dict(role.channel_labels)
                         for role in self._profile.enabled_roles if role.channel_labels
                     }, ensure_ascii=False)} if self._profile is not None else {}),
-                    **self._pump_calibration_metadata(),
+                    **self._calibration_metadata(),
                 },
             )
             self._experiment_recorder.start(

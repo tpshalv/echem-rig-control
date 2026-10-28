@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from rig_control.app_settings import AppSettings
+from rig_control.calibrated_channels import CalibratedChannels
 from rig_control.control.service import RigControlService
 from rig_control.data.directory_writer import DirectoryExperimentWriter
 from rig_control.data.run_context import capture_run_context
@@ -72,6 +73,7 @@ class ApplicationSession:
             },
             batch_handler=self.experiment_recorder.record_batch,
             event_sink=self.technical_log.record,
+            derived_readings=CalibratedChannels().add_to,
         )
         diagnostic_path = log_path.with_name("runtime-health.jsonl")
         self.runtime_diagnostics = RuntimeDiagnostics(

@@ -1,6 +1,7 @@
 """Background recipe execution using the shared control service."""
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 import json
 from pathlib import Path
@@ -15,6 +16,7 @@ from rig_control.control.commands import (
 )
 from rig_control.control.service import RigControlService
 from rig_control.data.experiment import ExperimentMetadata
+from rig_control.data.experiment_naming import make_experiment_id
 from rig_control.devices.manager import DeviceManager
 from rig_control.devices.mass_flow_controller import MassFlowController
 from rig_control.devices.power_supply import PowerSupply, PowerSupplyOperatingMode
@@ -25,6 +27,7 @@ from rig_control.devices.ohaus_guardian_5000.driver import OhausGuardian5000
 from rig_control.devices.esp32_controller import Esp32Controller
 from rig_control.devices.pump import PumpDirection
 from rig_control.experiment_recording import ExperimentRecorder
+from rig_control.instrument_settings.calibration import CalibrationService, PumpCalibrationService
 from rig_control.models import Event, EventSeverity
 from rig_control.devices.safe_state import SafeStateCapable
 from rig_control.recipes.model import (
@@ -68,8 +71,10 @@ class RecipeRunner:
     """Own one recipe thread. Stop is cooperative and leaves safe state to control."""
     def __init__(self, control_service: RigControlService, device_manager: DeviceManager, *,
                  recorder: ExperimentRecorder | None = None, event_sink: Callable[[Event], None] | None = None,
-                 sleeper: Callable[[float], None] = sleep, clock: Callable[[], float] = monotonic) -> None:
+                 sleeper: Callable[[float], None] = sleep, clock: Callable[[], float] = monotonic,
+                 pump_calibrations: CalibrationService | None = None) -> None:
         self._control = control_service; self._devices = device_manager; self._recorder = recorder
+        self._pump_calibrations = pump_calibrations or PumpCalibrationService()
         self._event_sink = event_sink; self._sleeper = sleeper; self._clock = clock
         self._cancel = ThreadEvent(); self._lock = Lock(); self._thread: Thread | None = None
         self._status = RecipeRunStatus(RecipeRunState.IDLE); self._result: RecipeRunResult | None = None
@@ -120,7 +125,8 @@ class RecipeRunner:
                 raise RecipeValidationError(f"Invalid {write.device_id}.{write.setting}: {error}") from error
 
     def start(self, recipe: Recipe, *, recording_root: str | Path | None = None,
-              experiment_id: str | None = None, operator: str = "recipe", notes: str | None = None) -> None:
+              experiment_id: str | None = None, operator: str = "recipe", notes: str | None = None,
+              electrolyser_id: str | None = None) -> None:
         self.validate(recipe)
         with self._lock:
             if self._thread is not None and self._thread.is_alive(): raise RuntimeError("A recipe is already running")
@@ -131,7 +137,8 @@ class RecipeRunner:
             estimate = estimate_recipe(recipe)
             self._started_at = self._clock(); self._estimated_seconds = estimate.duration_seconds
             self._status = RecipeRunStatus(RecipeRunState.RUNNING, estimated_remaining_seconds=estimate.duration_seconds)
-            self._thread = Thread(target=self._run, args=(recipe, recording_root, experiment_id, operator, notes), name="recipe-runner", daemon=True)
+            self._thread = Thread(target=self._run, args=(recipe, recording_root, experiment_id, operator, notes, electrolyser_id),
+                                  name="recipe-runner", daemon=True)
             self._thread.start()
 
     def stop(self) -> None: self._cancel.set()
@@ -140,13 +147,17 @@ class RecipeRunner:
         if thread is not None: thread.join(timeout)
         return self.result
 
-    def _run(self, recipe: Recipe, root: str | Path | None, experiment_id: str | None, operator: str, notes: str | None) -> None:
+    def _run(self, recipe: Recipe, root: str | Path | None, experiment_id: str | None, operator: str, notes: str | None,
+             electrolyser_id: str | None = None) -> None:
         started_recording = False; safe_failures: tuple[str, ...] = (); failure: str | None = None; state = RecipeRunState.COMPLETED; started = self._clock()
         try:
             if self._recorder is not None:
                 if root is None: raise RuntimeError("Recipe recording needs an output folder")
                 extra = {"recipe_snapshot_json": json.dumps(recipe_to_dict(recipe), sort_keys=True), "recipe_name": recipe.name}
-                self._recorder.start(metadata=ExperimentMetadata(experiment_id=experiment_id or recipe.name, operator=operator, notes=notes,
+                recording_started = datetime.now(UTC)
+                experiment_id = experiment_id or make_experiment_id(operator, recording_started, recipe.name)
+                self._recorder.start(metadata=ExperimentMetadata(experiment_id=experiment_id, operator=operator, notes=notes,
+                    started_at=recording_started, electrolyser_id=electrolyser_id or None,
                     experiment_type="recipe", extra=extra), root_directory=root)
                 started_recording = True
             self._control.begin_recipe_control()
@@ -208,8 +219,30 @@ class RecipeRunner:
             self._supply_modes[step.device_id] = mode
             self._emit("power_supply_mode", f"{step.device_id}={mode.value}")
         self._set_status(name or f"Set {step.setting}", position)
-        self._control.execute(self._command(step))
-        self._emit("recipe_command", f"{step.device_id}.{step.setting}={step.value}")
+        command = self._command(step)
+        self._control.execute(command)
+        # A flow is sent as rpm; record which rpm and calibration it became.
+        extra = ({"rpm": command.rpm, "calibration": self._pump_calibration(step.device_id).name}
+                 if step.setting == "pump_flow" else {})
+        self._emit("recipe_command", f"{step.device_id}.{step.setting}={step.value}", **extra)
+
+    def _pump_calibration(self, device_id: str):
+        calibration = self._pump_calibrations.active_calibration(device_id)
+        if calibration is None:
+            raise ValueError(f"pump {device_id!r} has no accepted calibration; calibrate it in "
+                             "Settings or set its speed in rpm")
+        return calibration
+
+    def _rpm_for_flow(self, device_id: str, flow_ml_per_min: float) -> float:
+        """Convert with the pump's calibration as it is when the step runs."""
+        if flow_ml_per_min == 0:
+            return 0.0  # Off, even when the calibration line does not pass through zero.
+        calibration = self._pump_calibration(device_id)
+        rpm = round(calibration.fit.x_for_y(flow_ml_per_min), 2)
+        if rpm < 0:
+            raise ValueError(f"{flow_ml_per_min:g} mL/min is below what calibration {calibration.name} "
+                             f"reaches: its line gives {calibration.fit.intercept:g} mL/min at 0 rpm")
+        return rpm
 
     def _command(self, p: Assignment):
         source = CommandSource.RECIPE; setting = p.setting; value = p.value
@@ -223,6 +256,7 @@ class RecipeRunner:
         if setting == "output_enabled": return SetPowerSupplyOutput(p.device_id, bool(value), source)
         if setting == "temperature_setpoint": return SetTemperatureSetpoint(p.device_id, float(value), source)
         if setting == "pump_speed": return SetPumpSpeed(p.device_id, float(value), source)
+        if setting == "pump_flow": return SetPumpSpeed(p.device_id, self._rpm_for_flow(p.device_id, float(value)), source)
         if setting == "pump_direction": return SetPumpDirection(p.device_id, PumpDirection(str(value)), source)
         if setting == "pump_running": return SetPumpRunning(p.device_id, bool(value), source)
         if setting == "hotplate_temperature": return SetHotplateTemperature(p.device_id, float(value), source)
@@ -238,7 +272,7 @@ class RecipeRunner:
             "flow": MassFlowController, "pressure": PressureController,
             "voltage": PowerSupply, "current_limit": PowerSupply, "output_enabled": PowerSupply,
             "current_setpoint": PowerSupply, "voltage_limit": PowerSupply,
-            "temperature_setpoint": LumelRe72, "pump_speed": Pump, "pump_direction": Pump,
+            "temperature_setpoint": LumelRe72, "pump_speed": Pump, "pump_flow": Pump, "pump_direction": Pump,
             "pump_running": Pump, "hotplate_temperature": OhausGuardian5000,
             "hotplate_speed": OhausGuardian5000, "hotplate_heating": OhausGuardian5000,
             "hotplate_stirring": OhausGuardian5000,

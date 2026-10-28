@@ -1,4 +1,5 @@
-from datetime import UTC, datetime
+from dataclasses import replace
+import json
 from pathlib import Path
 from threading import Barrier, Thread
 from unittest.mock import patch
@@ -8,13 +9,14 @@ import pytest
 from rig_control.devices.base import Device
 from rig_control.devices.manager import DeviceManager
 from rig_control.devices.pump import Pump, PumpDirection, PumpLimits
-from rig_control.devices.pump_calibration import (
+from rig_control.devices.linear_calibration import (
+    Calibration,
     CalibrationPoint,
     LinearFit,
-    PumpCalibration,
     fit_linear,
 )
-from rig_control.instrument_settings.pump_calibration import (
+from rig_control.instrument_settings.calibration import (
+    HumidityCalibrationService,
     PumpCalibrationService,
     PumpCalibrationSettingsService,
 )
@@ -97,8 +99,8 @@ def test_fit_linear_scores_noisy_points_below_perfect():
 
 def test_fit_linear_round_trips_speed_and_flow():
     fit = LinearFit(slope=1.5, intercept=2.0, r_squared=1.0)
-    assert fit.flow_for_speed(10.0) == pytest.approx(17.0)
-    assert fit.speed_for_flow(17.0) == pytest.approx(10.0)
+    assert fit.y_for_x(10.0) == pytest.approx(17.0)
+    assert fit.x_for_y(17.0) == pytest.approx(10.0)
 
 
 def test_fit_linear_requires_at_least_two_points():
@@ -127,13 +129,13 @@ def test_calibration_point_rejects_negative_or_non_finite_values():
 def test_calibration_requires_at_least_two_retained_points():
     fit = LinearFit(1.0, 0.0, 1.0)
     with pytest.raises(ValueError):
-        PumpCalibration("id1", "pump1", "operator", (CalibrationPoint(10.0, 10.0),), fit)
+        Calibration("2026-10-27", "pump1", "operator", (CalibrationPoint(10.0, 10.0),), fit)
 
 
 @pytest.mark.parametrize("slope", [0.0, -1.0])
 def test_linear_fit_rejects_non_positive_slope_even_off_the_fitting_path(slope):
     # Guards a calibration history file that was hand-edited or corrupted:
-    # this must fail at load time, not divide by zero in speed_for_flow().
+    # this must fail at load time, not divide by zero in x_for_y().
     with pytest.raises(ValueError):
         LinearFit(slope, 0.0, 1.0)
 
@@ -161,7 +163,7 @@ def test_new_pump_has_no_history_or_active_calibration(tmp_path):
 
 def test_accepted_candidate_becomes_active_and_is_persisted(tmp_path):
     service = make_service(tmp_path)
-    candidate = service.fit_candidate("pump1", "operator", points())
+    candidate = service.fit_candidate("pump1", "cal-1", "operator", points())
     result = service.accept(candidate)
     assert result.succeeded
     active = service.active_calibration("pump1")
@@ -172,12 +174,12 @@ def test_accepted_candidate_becomes_active_and_is_persisted(tmp_path):
 
     # A fresh service instance reading the same directory sees the same history.
     reloaded = make_service(tmp_path)
-    assert reloaded.active_calibration("pump1").calibration_id == active.calibration_id
+    assert reloaded.active_calibration("pump1").name == active.name
 
 
 def test_declining_a_candidate_writes_nothing(tmp_path):
     service = make_service(tmp_path)
-    service.fit_candidate("pump1", "operator", points())
+    service.fit_candidate("pump1", "cal-2", "operator", points())
     # Never call accept() -- simulates the operator declining after review.
     assert service.history("pump1") == ()
     assert service.active_calibration("pump1") is None
@@ -185,29 +187,29 @@ def test_declining_a_candidate_writes_nothing(tmp_path):
 
 def test_most_recently_accepted_calibration_is_active(tmp_path):
     service = make_service(tmp_path)
-    first = service.fit_candidate("pump1", "operator", points())
+    first = service.fit_candidate("pump1", "cal-3", "operator", points())
     service.accept(first)
     second_points = [CalibrationPoint(rpm, 3.0 * rpm) for rpm in (10.0, 20.0, 30.0)]
-    second = service.fit_candidate("pump1", "operator", second_points)
+    second = service.fit_candidate("pump1", "cal-4", "operator", second_points)
     service.accept(second)
 
     history = service.history("pump1")
     assert len(history) == 2
     active = service.active_calibration("pump1")
     assert active.fit.slope == pytest.approx(3.0)
-    assert active.calibration_id == history[-1].calibration_id
+    assert active.name == history[-1].name
 
 
 def test_fit_candidate_rejects_bad_points_before_anything_is_saved(tmp_path):
     service = make_service(tmp_path)
     with pytest.raises(ValueError):
-        service.fit_candidate("pump1", "operator", [CalibrationPoint(10.0, 10.0)])
+        service.fit_candidate("pump1", "cal-5", "operator", [CalibrationPoint(10.0, 10.0)])
     assert service.history("pump1") == ()
 
 
 def test_calibrations_for_different_pumps_do_not_collide(tmp_path):
     service = make_service(tmp_path)
-    service.accept(service.fit_candidate("pump1", "operator", points()))
+    service.accept(service.fit_candidate("pump1", "cal-6", "operator", points()))
     assert service.history("pump2") == ()
     assert service.active_calibration("pump1") is not None
 
@@ -217,8 +219,7 @@ def test_concurrent_accepts_do_not_lose_a_calibration(tmp_path):
     barrier = Barrier(2)
 
     def accept_one(intercept: float) -> None:
-        candidate = service.fit_candidate(
-            "pump1", "operator",
+        candidate = service.fit_candidate("pump1", f"cal-{intercept}", "operator",
             [CalibrationPoint(rpm, 2.0 * rpm + intercept) for rpm in (10.0, 20.0, 30.0)],
         )
         barrier.wait()  # Maximize the chance both threads race the same read-modify-write.
@@ -242,7 +243,7 @@ def test_history_file_rejects_wrong_format(tmp_path):
 
 def test_write_leaves_no_temp_file_behind_on_success(tmp_path):
     service = make_service(tmp_path)
-    service.accept(service.fit_candidate("pump1", "operator", points()))
+    service.accept(service.fit_candidate("pump1", "cal-8", "operator", points()))
     assert list(tmp_path.iterdir()) == [tmp_path / "pump1.json"]
 
 
@@ -251,7 +252,7 @@ def test_a_crash_mid_write_never_leaves_a_corrupted_history_file(tmp_path):
     # the real history file must still hold the last successfully accepted
     # calibration, not a truncated or missing one.
     service = make_service(tmp_path)
-    service.accept(service.fit_candidate("pump1", "operator", points()))
+    service.accept(service.fit_candidate("pump1", "cal-9", "operator", points()))
     good_contents = (tmp_path / "pump1.json").read_text(encoding="utf-8")
 
     real_write_text = Path.write_text
@@ -262,7 +263,7 @@ def test_a_crash_mid_write_never_leaves_a_corrupted_history_file(tmp_path):
         return real_write_text(self, *args, **kwargs)
 
     with patch.object(Path, "write_text", crash_after_partial_write):
-        result = service.accept(service.fit_candidate("pump1", "operator", points()))
+        result = service.accept(service.fit_candidate("pump1", "cal-10", "operator", points()))
     assert result.succeeded is False
 
     assert (tmp_path / "pump1.json").read_text(encoding="utf-8") == good_contents
@@ -270,21 +271,92 @@ def test_a_crash_mid_write_never_leaves_a_corrupted_history_file(tmp_path):
     assert len(service.history("pump1")) == 1
 
 
-def test_duplicate_calibration_ids_are_disambiguated(tmp_path, monkeypatch):
+def test_a_name_already_in_the_history_is_refused(tmp_path):
     service = make_service(tmp_path)
-    fixed_time = datetime(2026, 9, 22, 10, 0, 0, tzinfo=UTC)
+    service.accept(service.fit_candidate("pump1", "2026-10-27", "operator", points()))
 
-    class _FixedDatetime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return fixed_time
+    with pytest.raises(ValueError, match="already has a calibration named"):
+        service.fit_candidate("pump1", "2026-10-27 ", "operator", points())
+    # Re-checked on accept too, e.g. for a candidate fitted before the clash.
+    stale = service.fit_candidate("pump1", "other", "operator", points())
+    result = service.accept(replace(stale, name="2026-10-27"))
 
-    monkeypatch.setattr("rig_control.instrument_settings.pump_calibration.datetime", _FixedDatetime)
-    service.accept(service.fit_candidate("pump1", "operator", points()))
-    service.accept(service.fit_candidate("pump1", "operator", points()))
-    history = service.history("pump1")
-    assert len(history) == 2
-    assert history[0].calibration_id != history[1].calibration_id
+    assert result.succeeded is False
+    assert "already has a calibration named" in result.summary
+    assert [calibration.name for calibration in service.history("pump1")] == ["2026-10-27"]
+
+
+def test_the_same_name_can_be_used_for_different_devices(tmp_path):
+    service = make_service(tmp_path)
+    service.accept(service.fit_candidate("pump1", "2026-10-27", "operator", points()))
+    result = service.accept(service.fit_candidate("pump2", "2026-10-27", "operator", points()))
+    assert result.succeeded
+
+
+def test_an_empty_name_is_refused(tmp_path):
+    with pytest.raises(ValueError, match="name cannot be empty"):
+        make_service(tmp_path).fit_candidate("pump1", "  ", "operator", points())
+
+
+def test_version_1_pump_histories_still_load_with_their_ids_as_names(tmp_path):
+    (tmp_path / "pump1.json").write_text(json.dumps({
+        "format": "rig-control.pump-calibration-history",
+        "format_version": 1,
+        "device_id": "pump1",
+        "calibrations": [{
+            "calibration_id": "20261014T093000Z",
+            "device_id": "pump1",
+            "operator": "TS",
+            "created_utc": "2026-10-14T09:30:00+00:00",
+            "notes": "new tubing",
+            "points": [
+                {"speed_rpm": 10.0, "flow_ml_per_min": 21.0},
+                {"speed_rpm": 20.0, "flow_ml_per_min": 41.0},
+            ],
+            "fit": {"slope": 2.0, "intercept": 1.0, "r_squared": 1.0},
+        }],
+    }), encoding="utf-8")
+    service = make_service(tmp_path)
+
+    active = service.active_calibration("pump1")
+    assert active.name == "20261014T093000Z"
+    assert active.points[1] == CalibrationPoint(20.0, 41.0)
+
+    # Adding to it rewrites the file as version 2, keeping the old entry.
+    service.accept(service.fit_candidate("pump1", "2026-10-27", "operator", points()))
+    payload = json.loads((tmp_path / "pump1.json").read_text(encoding="utf-8"))
+    assert payload["format_version"] == 2
+    assert [entry["name"] for entry in payload["calibrations"]] == [
+        "20261014T093000Z", "2026-10-27",
+    ]
+
+
+def test_humidity_histories_use_their_own_format_and_point_names(tmp_path):
+    service = HumidityCalibrationService(directory=tmp_path)
+    service.accept(service.fit_candidate(
+        "ezo1", "2026-10-27", "operator",
+        [CalibrationPoint(28.0, 33.0), CalibrationPoint(68.0, 75.0), CalibrationPoint(78.0, 85.0)],
+        "MgCl2, NaCl, KCl under CO2",
+    ))
+
+    payload = json.loads((tmp_path / "ezo1.json").read_text(encoding="utf-8"))
+    assert payload["format"] == "rig-control.humidity-calibration-history"
+    assert payload["calibrations"][0]["points"][0] == {"reported_rh": 28.0, "reference_rh": 33.0}
+    assert service.active_calibration("ezo1").notes == "MgCl2, NaCl, KCl under CO2"
+    # A pump service refuses to read it as a pump history.
+    with pytest.raises(ValueError):
+        make_service(tmp_path).history("ezo1")
+
+
+def test_history_is_re_read_when_the_file_changes(tmp_path):
+    first = make_service(tmp_path)
+    second = make_service(tmp_path)
+    first.accept(first.fit_candidate("pump1", "a", "operator", points()))
+    assert second.active_calibration("pump1").name == "a"
+
+    # Another instance (e.g. the Settings window) accepts a newer one.
+    first.accept(first.fit_candidate("pump1", "b", "operator", points()))
+    assert second.active_calibration("pump1").name == "b"
 
 
 # --- Settings-layer wrapper: pump listing, write-access gating, audit log ---
@@ -333,7 +405,7 @@ class _NonPumpDevice(Device):
 
 def test_settings_service_accept_is_blocked_without_write_access(tmp_path):
     service, _ = make_settings_service(tmp_path, allow_write=False)
-    candidate = service.fit_candidate("pump1", "operator", points())
+    candidate = service.fit_candidate("pump1", "cal-13", "operator", points())
 
     result = service.accept(candidate)
 
@@ -346,7 +418,7 @@ def test_settings_service_accept_logs_an_audit_event(tmp_path):
     service, _ = make_settings_service(
         tmp_path, event_sink=lambda event, details: logged.append(event)
     )
-    candidate = service.fit_candidate("pump1", "operator", points())
+    candidate = service.fit_candidate("pump1", "cal-14", "operator", points())
 
     result = service.accept(candidate)
 
@@ -363,7 +435,7 @@ def test_settings_service_reports_a_logging_failure_without_losing_the_save(tmp_
         raise RuntimeError("log unavailable")
 
     service, _ = make_settings_service(tmp_path, event_sink=failing_sink)
-    candidate = service.fit_candidate("pump1", "operator", points())
+    candidate = service.fit_candidate("pump1", "cal-15", "operator", points())
 
     result = service.accept(candidate)
 

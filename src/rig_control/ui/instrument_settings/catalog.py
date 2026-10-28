@@ -9,7 +9,11 @@ import tkinter as tk
 
 from rig_control.instrument_settings.catalog import InstrumentSettingsCatalog
 from rig_control.ui.instrument_settings.re72_panel import Re72SettingsPanel
-from rig_control.ui.instrument_settings.pump_calibration_panel import PumpCalibrationPanel
+from rig_control.ui.instrument_settings.calibration_panel import (
+    HUMIDITY_PANEL_TEXT,
+    PUMP_PANEL_TEXT,
+    CalibrationPanel,
+)
 from rig_control.ui.instrument_settings.base import InstrumentSettingsPanel
 
 
@@ -22,7 +26,12 @@ def create_instrument_panels(
         "RE72 controllers": Re72SettingsPanel(
             parent, lambda: catalog_provider().re72, scroll_from_event,
         ),
-        "Pump calibration": PumpCalibrationPanel(
+        "Pump calibration": CalibrationPanel(
             parent, lambda: catalog_provider().pump_calibration, scroll_from_event,
+            PUMP_PANEL_TEXT,
+        ),
+        "Humidity calibration": CalibrationPanel(
+            parent, lambda: catalog_provider().humidity_calibration, scroll_from_event,
+            HUMIDITY_PANEL_TEXT,
         ),
     }

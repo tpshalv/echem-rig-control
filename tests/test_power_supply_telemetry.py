@@ -59,7 +59,7 @@ def test_supply_history_reaches_raw_csv_and_excel_with_readable_states(tmp_path)
     expected_raw = [measurement_record_to_dict(r) for b in batches for r in b.measurements]
     assert raw == expected_raw
     headers, expected = build_wide_rows(raw)
-    with (directory / "measurements-wide.csv").open(encoding="utf-8-sig", newline="") as stream:
+    with (directory / f"{directory.name}.csv").open(encoding="utf-8-sig", newline="") as stream:
         assert list(csv.reader(stream)) == [headers, *[[str(v) for v in row] for row in expected]]
     first = dict(zip(headers[1:], expected[0][1:]))
     assert first["supply.voltage [V]"] == (0.505 + 0.6) / 2
@@ -72,7 +72,7 @@ def test_supply_history_reaches_raw_csv_and_excel_with_readable_states(tmp_path)
     assert off["supply.current [A]"] == off["supply.voltage [V]"] == ""
     assert off["supply.output_enabled [0=OFF,1=ON]"] == "OFF"
     assert off["supply.regulation_mode [0=OFF,1=CC,2=CV]"] == "OFF"
-    workbook = load_workbook(directory / "experiment.xlsx", read_only=True)
+    workbook = load_workbook(directory / f"{directory.name}.xlsx", read_only=True)
     try:
         data = list(workbook["Data"].values)
         assert list(data[0]) == headers

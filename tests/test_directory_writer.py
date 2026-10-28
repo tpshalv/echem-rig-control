@@ -136,7 +136,7 @@ def test_open_creates_self_contained_experiment_directory(
     writer.open_experiment(make_metadata())
 
     expected_directory = (
-        tmp_path / "20260814T123045Z_EXP-001"
+        tmp_path / "EXP-001"
     )
 
     assert writer.is_open is True
@@ -226,7 +226,7 @@ def test_live_wide_csv_is_refreshed_while_recording(tmp_path: Path) -> None:
     writer.write_measurement(make_measurement_record())
 
     assert writer.experiment_directory is not None
-    csv_path = writer.experiment_directory / "measurements-wide.csv"
+    csv_path = writer.experiment_directory / f"{writer.experiment_directory.name}.csv"
     assert writer._live_export_future is not None
     writer._live_export_future.result(timeout=2)
     assert csv_path.is_file()
@@ -303,7 +303,7 @@ def test_experiment_id_is_made_safe_for_folder_name(
 
     assert writer.experiment_directory is not None
     assert writer.experiment_directory.name == (
-        "20260814T123045Z_EXP_001_catalyst_test"
+        "EXP_001_catalyst_test"
     )
 
 

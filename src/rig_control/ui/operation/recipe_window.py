@@ -10,6 +10,7 @@ everything else.  Hardware work stays in ``RecipeRunner``.
 """
 from collections.abc import Callable
 from dataclasses import replace
+from datetime import UTC, datetime
 import tkinter as tk
 import tkinter.font as tkfont
 from pathlib import Path
@@ -18,6 +19,9 @@ from tkinter import filedialog, messagebox, ttk
 from rig_control.recipes import (
     LoopStep, Recipe, RepeatStep, SetStep, WaitPurpose, WaitStep, estimate_recipe, load_recipe,
     preview_recipe, recipe_problems, save_recipe, step_times,
+)
+from rig_control.data.experiment_naming import (
+    describe_recording, existing_recording, make_experiment_id, remove_recording,
 )
 from rig_control.recipes.execution import RecipeRunner
 from rig_control.recipes import Assignment, Ramp, RampKind
@@ -50,8 +54,11 @@ class RecipeBuilderWindow:
     """Edits an in-memory list of outline rows; hardware work remains in ``RecipeRunner``."""
 
     def __init__(self, root: tk.Toplevel, runner: RecipeRunner, profile: RigProfile, *,
-                 default_output_directory: str = "", current_unit: str = "mA") -> None:
+                 default_output_directory: str = "", current_unit: str = "mA",
+                 recording_details: Callable[[], dict[str, str]] | None = None) -> None:
         self._root, self._runner, self._profile = root, runner, profile
+        #: Operator, electrolyser, description and notes from Operation's panel.
+        self._recording_details = recording_details or (lambda: {})
         self._rows: list[OutlineRow] = []
         self._selected: int | None = None
         #: With a Set step selected: one device's line, or None for the whole step.
@@ -818,8 +825,25 @@ class RecipeBuilderWindow:
         if not messagebox.askokcancel("Start recipe", message, icon="warning" if warnings else "question",
                                       parent=self._root):
             return
+        details = self._recording_details()
+        recipe = self._recipe()
+        root = Path(self._output.get())
         try:
-            self._runner.start(self._recipe(), recording_root=Path(self._output.get()), operator="operator")
+            # Same naming as a manual recording; the description falls back
+            # to the recipe's name.
+            experiment_id = make_experiment_id(details.get("operator", ""), datetime.now(UTC),
+                                               details.get("description") or recipe.name)
+            existing = existing_recording(root, experiment_id)
+            if existing is not None:
+                if not messagebox.askyesno(
+                        "Replace recording?",
+                        f"A recording named {experiment_id} already exists ({describe_recording(existing)}).\n\n"
+                        "Replace it? The existing recording will be deleted.", icon="warning", parent=self._root):
+                    return
+                remove_recording(existing)
+            self._runner.start(recipe, recording_root=root, experiment_id=experiment_id,
+                               operator=details["operator"], notes=details.get("notes") or None,
+                               electrolyser_id=details.get("electrolyser") or None)
         except Exception as error:
             messagebox.showerror("Start recipe", str(error), parent=self._root)
 

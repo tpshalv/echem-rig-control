@@ -9,6 +9,12 @@ from typing import TYPE_CHECKING
 
 from rig_control.ui.common.theme import HAIRLINE, INFO_TEXT, MUTED_TEXT, SECTION_FONT
 from rig_control.ui.operation.annotation_overlay import PlotMapping
+from rig_control.ui.operation.graph_reader import (
+    GraphFrame,
+    GraphReader,
+    TraceGeometry,
+    ValueAxis,
+)
 from rig_control.ui.operation.trend_window import (
     TIME_RANGES,
     padded_value_range,
@@ -30,6 +36,13 @@ TRACE_COLOURS = (
     "#596157",
 )
 RANGE_RELAX_FACTOR = 0.15
+MODE_HINTS = {
+    "reader": (
+        "Double-click a trace to follow it (again to cycle)  •  "
+        "Shift-click two points to measure  •  Esc clears"
+    ),
+    "note": "Double-click the graph to add a note at that time",
+}
 TIME_TICK_INTERVALS = (
     1,
     2,
@@ -50,6 +63,15 @@ TIME_TICK_INTERVALS = (
 
 
 NICE_STEP_FACTORS = (1, 2, 2.5, 5, 10)
+
+
+def faded(colour: str, amount: float = 0.65) -> str:
+    """Mix a #RRGGBB colour towards white, for traces behind a selected one."""
+
+    channels = (int(colour[index:index + 2], 16) for index in (1, 3, 5))
+    return "#" + "".join(
+        f"{round(channel + (255 - channel) * amount):02X}" for channel in channels
+    )
 
 
 def value_axis_ticks(
@@ -179,6 +201,8 @@ class MultiTraceCanvasRenderer:
         self._lines: dict[tuple[str, str], int] = {}
         self._displayed_ranges: dict[str, tuple[float, float]] = {}
         self.mapping: PlotMapping | None = None
+        #: What the graph reader needs about the last drawn frame.
+        self.frame: GraphFrame | None = None
 
     @property
     def item_count(self) -> int:
@@ -252,10 +276,12 @@ class MultiTraceCanvasRenderer:
         ],
         view_start: float | None,
         view_end: float | None,
+        active: tuple[str, str] | None = None,
     ) -> tuple[float, float] | None:
         for item in self._lines.values():
             self._canvas.itemconfigure(item, state="hidden")
         self.mapping = None
+        self.frame = None
         usable = tuple(
             (signal, readings, colour)
             for signal, readings, colour in traces
@@ -324,33 +350,38 @@ class MultiTraceCanvasRenderer:
             self._canvas.itemconfigure(self._right_axis, state="hidden")
 
         span = max(selected_end - selected_start, 1e-9)
+        geometries: dict[tuple[str, str], TraceGeometry] = {}
         for signal, readings, colour in visible:
             unit = signal.unit or "value"
             if unit not in ranges:
                 continue
             minimum, maximum = ranges[unit]
-            coordinates: list[float] = []
+            points: list[tuple[float, float, float, float]] = []
             for reading in readings:
-                x = left + (
-                    (reading.timestamp.timestamp() - selected_start) / span
-                ) * (right - left)
-                y = bottom - (
-                    (float(reading.value) - minimum) / (maximum - minimum)
-                ) * (bottom - top)
-                coordinates.extend((x, y))
+                timestamp = reading.timestamp.timestamp()
+                value = float(reading.value)
+                x = left + ((timestamp - selected_start) / span) * (right - left)
+                y = bottom - ((value - minimum) / (maximum - minimum)) * (bottom - top)
+                points.append((timestamp, value, x, y))
+            geometries[signal.key] = TraceGeometry(signal.label, unit, tuple(points))
             item = self._lines.get(signal.key)
             if item is None:
                 item = self._canvas.create_line(0, 0, 0, 0, state="hidden")
                 self._lines[signal.key] = item
-            if len(coordinates) >= 4:
-                self._canvas.coords(item, *coordinates)
+            if len(points) >= 2:
+                is_active = signal.key == active
+                self._canvas.coords(
+                    item, *(value for point in points for value in point[2:])
+                )
                 self._canvas.itemconfigure(
                     item,
-                    fill=colour,
-                    width=2,
+                    fill=colour if active is None or is_active else faded(colour),
+                    width=3 if is_active else 2,
                     dash=(6, 4) if signal.is_setpoint else (),
                     state="normal",
                 )
+        if active in self._lines and active in geometries:
+            self._canvas.tag_raise(self._lines[active])
 
         left_min, left_max = ranges[left_unit]
         self._set_text(
@@ -410,6 +441,11 @@ class MultiTraceCanvasRenderer:
             self._canvas.itemconfigure(mark, fill=MUTED_TEXT, state="normal")
             self._set_text(label, x, bottom + 7, text, "n")
         self.mapping = PlotMapping(left, top, right, bottom, selected_start, selected_end)
+        self.frame = GraphFrame(
+            self.mapping,
+            tuple(ValueAxis(unit, *ranges[unit]) for unit in units[:2]),
+            geometries,
+        )
         return (selected_start, selected_end)
 
     def _draw_value_ticks(
@@ -553,6 +589,25 @@ class DashboardPanel(ttk.LabelFrame):
             ).grid(row=0, column=7, padx=(8, 0))
         self._group.bind("<<ComboboxSelected>>", lambda _event: self._refresh_choices())
 
+        # What a double-click does depends on which mode button is pressed in;
+        # pressing one releases the other, and pressing it again turns it off.
+        modes = ttk.Frame(controls)
+        modes.grid(row=1, column=0, columnspan=8, sticky="ew", pady=(4, 0))
+        modes.columnconfigure(2, weight=1)
+        self._reader_on = tk.BooleanVar(value=False)
+        self._note_on = tk.BooleanVar(value=False)
+        self._mode_buttons = [
+            self._mode_button(modes, "Graph reader", self._reader_on, "reader")
+        ]
+        if annotations is not None:
+            self._mode_buttons.append(
+                self._mode_button(modes, "Add note", self._note_on, "note")
+            )
+        for column, button in enumerate(self._mode_buttons):
+            button.grid(row=0, column=column, padx=(0, 4))
+        self._mode_hint = ttk.Label(modes, foreground=MUTED_TEXT)
+        self._mode_hint.grid(row=0, column=2, sticky="w", padx=(8, 0))
+
         self._legend = ttk.Frame(self)
         self._legend.grid(row=1, column=0, sticky="ew", pady=(4, 2))
         self._canvas = tk.Canvas(
@@ -572,6 +627,11 @@ class DashboardPanel(ttk.LabelFrame):
             foreground=MUTED_TEXT,
         ).grid(row=3, column=0, sticky="w", pady=(3, 0))
         self._renderer = MultiTraceCanvasRenderer(self._canvas)
+        self._reader = GraphReader(
+            self._canvas,
+            lambda: self._renderer.frame,
+            on_selection=lambda _key: self.refresh(),
+        )
         self._notes = None
         if annotations is not None:
             from rig_control.ui.operation.annotation_ui import ChartAnnotations
@@ -583,6 +643,7 @@ class DashboardPanel(ttk.LabelFrame):
                     self._selected[key].label if key in self._selected else ".".join(key)
                 ),
             )
+            self._notes.adds_on_double_click = False
         self._canvas.bind("<Configure>", lambda _event: self.refresh())
         self._canvas.bind("<MouseWheel>", self._zoom)
         self._canvas.bind("<ButtonPress-1>", self._start_pan)
@@ -614,16 +675,51 @@ class DashboardPanel(ttk.LabelFrame):
             traces=tuple(traces),
             view_start=self._view_start,
             view_end=self._view_end,
+            active=self._reader.selected,
         )
         if selected is not None and not self._follow_live.get():
             self._view_start, self._view_end = selected
         if self._notes is not None:
             self._notes.draw(self._renderer.mapping)
+        self._reader.redraw()  # Last, so the crosshair sits above everything.
 
     def reset_view(self) -> None:
         self._view_start = None
         self._view_end = None
         self._follow_live.set(True)
+        self.refresh()
+
+    @property
+    def mode(self) -> str | None:
+        if self._reader_on.get():
+            return "reader"
+        if self._note_on.get():
+            return "note"
+        return None
+
+    def _mode_button(self, parent, text: str, variable: tk.BooleanVar, mode: str):
+        return tk.Checkbutton(
+            parent, text=text, variable=variable, indicatoron=False,
+            relief="raised", offrelief="raised", selectcolor="#CFE3F5",
+            padx=8, pady=1, command=lambda: self._mode_pressed(mode),
+        )
+
+    def _mode_pressed(self, mode: str) -> None:
+        if mode == "reader" and self._reader_on.get():
+            self._note_on.set(False)
+        if mode == "note" and self._note_on.get():
+            self._reader_on.set(False)
+        self._apply_mode()
+
+    def _apply_mode(self) -> None:
+        mode = self.mode
+        self._reader.set_enabled(mode == "reader")
+        cursor = {"reader": "crosshair", "note": "plus"}.get(mode, "")
+        if self._notes is not None:
+            self._notes.adds_on_double_click = mode == "note"
+            self._notes.idle_cursor = cursor
+        self._canvas.configure(cursor=cursor)
+        self._mode_hint.configure(text=MODE_HINTS.get(mode, ""))
         self.refresh()
 
     def diagnostic_metrics(self) -> dict[str, int]:
@@ -633,6 +729,7 @@ class DashboardPanel(ttk.LabelFrame):
                 variable.get() for variable in self._visible.values()
             ),
             "canvas_items": self._renderer.item_count
+            + self._reader.item_count
             + (self._notes.item_count if self._notes is not None else 0),
         }
 
@@ -695,6 +792,7 @@ class DashboardPanel(ttk.LabelFrame):
         self._visible.clear()
         self._rebuild_legend()
         self._renderer.reset()
+        self._reader.clear()
         self.reset_view()
 
     def _zoom(self, event: tk.Event) -> str:
@@ -771,10 +869,7 @@ class LiveDashboardWindow:
         count.bind("<Return>", lambda _event: self._apply_layout())
         ttk.Label(
             header,
-            text=(
-                "Mouse wheel: zoom time  •  drag: pan  •  Reset: return to live"
-                + ("  •  double-click: add note" if annotations is not None else "")
-            ),
+            text="Mouse wheel: zoom time  •  drag: pan  •  Reset: return to live",
         ).grid(row=0, column=3)
 
         self._body = ttk.Frame(self._window, padding=(8, 0, 8, 8))

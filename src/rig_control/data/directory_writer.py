@@ -333,10 +333,8 @@ class DirectoryExperimentWriter(ExperimentWriter):
     def _make_directory_name(
         metadata: ExperimentMetadata,
     ) -> str:
-        timestamp = metadata.started_at.astimezone(
-            timezone.utc
-        ).strftime("%Y%m%dT%H%M%SZ")
-
+        # The experiment ID already carries the date and time (see
+        # experiment_naming), so the folder is named after it alone.
         safe_experiment_id = re.sub(
             r"[^A-Za-z0-9._-]+",
             "_",
@@ -346,7 +344,7 @@ class DirectoryExperimentWriter(ExperimentWriter):
         if not safe_experiment_id:
             safe_experiment_id = "experiment"
 
-        return f"{timestamp}_{safe_experiment_id}"
+        return safe_experiment_id
 
     @staticmethod
     def _write_json_lines(

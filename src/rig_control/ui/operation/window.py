@@ -8,6 +8,12 @@ from traceback import format_exc
 from typing import Any
 
 from rig_control.data.annotations import ANNOTATION_KIND_LABELS, ANNOTATION_KINDS
+from rig_control.data.experiment_naming import (
+    describe_recording,
+    existing_recording,
+    make_experiment_id,
+)
+from rig_control.remembered_values import RememberedValues
 from rig_control.models import Event, EventSeverity, EventSink
 from rig_control.ui.common.theme import (
     ERROR_TEXT, MUTED_TEXT, SECTION_FONT, SUCCESS_BACKGROUND, SUCCESS_TEXT, TITLE_FONT,
@@ -46,8 +52,11 @@ class OperationWindow:
         profile_name: str,
         default_output_directory: str = "",
         event_sink: EventSink | None = None,
+        remembered: RememberedValues | None = None,
     ) -> None:
         self._root = root
+        self._remembered = remembered
+        self._id_preview_text = ""
         self._view_model = view_model
         self._event_sink = event_sink
         self._refresh_failed = False
@@ -96,6 +105,8 @@ class OperationWindow:
         self._create_widgets(profile_name)
         if default_output_directory:
             self._entries["output"].insert(0, default_output_directory)
+        if remembered is not None:
+            self._entries["operator"].insert(0, remembered.get("operator"))
         self._update_display()
         self._schedule_update()
 
@@ -229,28 +240,42 @@ class OperationWindow:
         recording = ttk.LabelFrame(body, text="EXPERIMENT RECORDING", padding=12)
         recording.grid(row=1, column=1, sticky="nsew")
         recording.columnconfigure(1, weight=1)
+        # The experiment ID is built from these (initials, date, time,
+        # description) and previewed below them, so nobody types it.
         fields = (
-            ("Experiment ID", "experiment_id"),
-            ("Operator", "operator"),
-            ("Output folder", "output"),
-            ("Start notes", "notes"),
+            (0, "Operator initials", "operator"),
+            (1, "Electrolyser ID", "electrolyser"),
+            (2, "Description", "description"),
+            (4, "Output folder", "output"),
+            (5, "Start notes", "notes"),
         )
         self._entries: dict[str, ttk.Entry] = {}
-        for row, (label, key) in enumerate(fields):
+        for row, label, key in fields:
             ttk.Label(recording, text=f"{label}:").grid(
                 row=row, column=0, sticky="w", pady=2
             )
             entry = ttk.Entry(recording)
             entry.grid(row=row, column=1, sticky="ew", padx=(8, 4), pady=2)
             self._entries[key] = entry
+        for key in ("operator", "description"):
+            self._entries[key].bind(
+                "<KeyRelease>", lambda _event: self._refresh_id_preview()
+            )
+        ttk.Label(recording, text="Experiment ID:").grid(
+            row=3, column=0, sticky="w", pady=2
+        )
+        self._id_preview = ttk.Label(recording, foreground=MUTED_TEXT)
+        self._id_preview.grid(
+            row=3, column=1, columnspan=2, sticky="w", padx=(8, 4), pady=2
+        )
         ttk.Button(recording, text="Browse…", command=self._browse_output).grid(
-            row=2, column=2, pady=2
+            row=4, column=2, pady=2
         )
 
-        self._create_note_box(recording, row=4)
+        self._create_note_box(recording, row=6)
 
         actions = ttk.Frame(recording)
-        actions.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        actions.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(8, 0))
         self._record_button = ttk.Button(
             actions, text="Start recording", command=self._toggle_recording
         )
@@ -272,7 +297,7 @@ class OperationWindow:
             text=("Every new reading is saved once. Measurement intervals "
                   "are configured per device in Device Setup."),
             wraplength=280,
-        ).grid(row=7, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        ).grid(row=9, column=0, columnspan=3, sticky="w", pady=(10, 0))
 
         for text, x, y, anchor in (("┌", 2, 2, "nw"), ("┐", 1, 2, "ne"),
                                     ("└", 2, 1, "sw"), ("┘", 1, 1, "se")):
@@ -397,6 +422,7 @@ class OperationWindow:
             self._view_model.profile,
             default_output_directory=self._entries["output"].get(),
             current_unit=self._view_model.display_units.current,
+            recording_details=self.recording_details,
         )
 
         def close() -> None:
@@ -496,19 +522,73 @@ class OperationWindow:
         if self._view_model.is_recording:
             self._stop_recording()
             return
-        experiment_id = self._entries["experiment_id"].get().strip()
         operator = self._entries["operator"].get().strip()
+        description = self._entries["description"].get().strip()
+        electrolyser_id = self._entries["electrolyser"].get().strip()
         output_directory = self._entries["output"].get().strip()
         notes = self._entries["notes"].get().strip()
+        # The time is fixed here, so the ID checked below is the one used.
+        started_at = datetime.now(UTC)
+        replace_existing = False
+        if output_directory:
+            try:
+                experiment_id = make_experiment_id(operator, started_at, description)
+            except ValueError as error:
+                messagebox.showerror("Start recording", str(error), parent=self._root)
+                return
+            existing = existing_recording(output_directory, experiment_id)
+            if existing is not None:
+                if not messagebox.askyesno(
+                    "Replace recording?",
+                    f"A recording named {experiment_id} already exists "
+                    f"({describe_recording(existing)}).\n\n"
+                    "Replace it? The existing recording will be deleted.",
+                    icon="warning",
+                    parent=self._root,
+                ):
+                    return
+                replace_existing = True
+        if self._remembered is not None and operator:
+            self._remembered.set("operator", operator)
         self._run_operation_action(
             "Starting recording",
             lambda: self._view_model.start_recording(
-                experiment_id=experiment_id,
                 operator=operator,
+                description=description,
+                electrolyser_id=electrolyser_id,
                 output_directory=output_directory,
                 notes=notes,
+                started_at=started_at,
+                replace_existing=replace_existing,
             ),
         )
+
+    def _refresh_id_preview(self) -> None:
+        """Show the ID a recording would get now, or the one being recorded."""
+        if not hasattr(self, "_id_preview"):
+            return
+        if self._view_model.is_recording:
+            directory = self._view_model.experiment_directory
+            text = directory.name if directory is not None else ""
+        else:
+            try:
+                text = make_experiment_id(
+                    self._entries["operator"].get(),
+                    datetime.now(UTC),
+                    self._entries["description"].get(),
+                )
+            except ValueError:
+                text = "Enter operator initials"
+        if text != self._id_preview_text:
+            self._id_preview.configure(text=text)
+            self._id_preview_text = text
+
+    def recording_details(self) -> dict[str, str]:
+        """Operator, electrolyser, description and notes, for recipe runs."""
+        return {
+            key: self._entries[key].get().strip()
+            for key in ("operator", "electrolyser", "description", "notes")
+        }
 
     def _stop_recording(self) -> None:
         """Stop without locking the window while long-run exports are written.
@@ -1059,6 +1139,7 @@ class OperationWindow:
             collected = self._view_model.collect_polling_results()
             if collected:
                 self._update_display(refresh_trends=True)
+            self._refresh_id_preview()  # Also ticks the previewed minute over.
         except Exception as error:
             self._ui_tick_failure_count += 1
             if not self._refresh_failed:

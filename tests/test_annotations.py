@@ -195,7 +195,7 @@ def add_records(directory, *records):
 
 
 def csv_rows(directory):
-    with (directory / "measurements-wide.csv").open(encoding="utf-8-sig", newline="") as stream:
+    with (directory / f"{directory.name}.csv").open(encoding="utf-8-sig", newline="") as stream:
         return list(csv.reader(stream))
 
 

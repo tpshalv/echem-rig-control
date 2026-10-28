@@ -76,7 +76,7 @@ def export_excel(
     refresh: bool = True,
 ) -> Path:
     """Export a snapshot without stopping recording or loading the run into RAM."""
-    from rig_control.data.incremental_export import IncrementalCsvExporter
+    from rig_control.data.incremental_export import IncrementalCsvExporter, export_file_stem
 
     directory = Path(experiment_directory)
     for name in ("metadata.json", "measurements.journal.jsonl", "events.journal.jsonl"):
@@ -105,7 +105,7 @@ def export_excel(
             state_path.read_text(encoding="utf-8")).get("state") == "recording")
         exporter.update(final=not recording)
     metadata = json.loads((directory / "metadata.json").read_text(encoding="utf-8"))
-    path = directory / "experiment.xlsx"
+    path = directory / f"{export_file_stem(directory)}.xlsx"
     # Capture an event boundary as well, so an active journal cannot keep an
     # on-demand export running indefinitely.
     events_path = directory / "events.journal.jsonl"
@@ -280,6 +280,9 @@ def _write_xlsx(
     # The run review leads, so the first sheet answers "was this run any good?"
     overview.append(cells(overview, [
         "Overall QC", review.overall_qc_label if review else "Not reviewed"]))
+    overview.append(cells(overview, ["Experiment ID", metadata.get("experiment_id") or ""]))
+    overview.append(cells(overview, [
+        "Electrolyser ID", metadata.get("electrolyser_id") or "not recorded"]))
     overview.append(cells(overview, ["Start notes", metadata.get("notes") or ""]))
     overview.append(cells(overview, ["End notes", review.end_notes if review else ""]))
     if review is not None:
@@ -287,7 +290,7 @@ def _write_xlsx(
             "Reviewed at (UTC)", _excel_datetime(review.reviewed_at.isoformat())]))
     overview.append(cells(overview, ["Notes during run", len(annotations)]))
     for key, value in metadata.items():
-        if key == "notes":
+        if key in {"notes", "experiment_id", "electrolyser_id"}:
             continue
         if key == "extra":
             for extra_key, extra_value in dict(value).items():

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Protocol
 
 from rig_control.ui.common.theme import ERROR_TEXT, INFO_TEXT, MUTED_TEXT, TITLE_FONT
 from rig_control.ui.operation.annotation_overlay import PlotMapping
+from rig_control.ui.operation.graph_reader import GraphFrame, GraphReader, ValueAxis
 
 if TYPE_CHECKING:
     from rig_control.ui.operation.annotation_ui import AnnotationHub
@@ -194,6 +195,11 @@ class TrendChart(ttk.Frame):
         )
         self._canvas.grid(row=1, column=0, sticky="nsew")
         self._renderer = TrendCanvasRenderer(self._canvas)
+        # A single trace needs no selecting, so the reader is always on and
+        # only reads the screen; double-click stays free for notes.
+        self._frame: GraphFrame | None = None
+        self._reader = GraphReader(self._canvas, lambda: self._frame, interactive=False)
+        self._reader.set_enabled(True)
         self._notes = None
         if annotations is not None:
             from rig_control.ui.operation.annotation_ui import ChartAnnotations
@@ -201,6 +207,7 @@ class TrendChart(ttk.Frame):
             self._notes = ChartAnnotations(
                 self._canvas, annotations, signal_at=lambda _x, _y: signal,
             )
+            self._notes.idle_cursor = "crosshair"
         self._canvas.bind("<Configure>", lambda _event: self.refresh())
 
     def refresh(self) -> None:
@@ -208,11 +215,13 @@ class TrendChart(ttk.Frame):
         width = max(self._canvas.winfo_width(), 100)
         height = max(self._canvas.winfo_height(), 100)
 
+        self._frame = None
         if not readings:
             self._renderer.show_empty(width, height)
             self._current.configure(text="No readings")
             if self._notes is not None:
                 self._notes.draw(None)
+            self._reader.redraw()
             return
 
         latest = readings[-1]
@@ -270,11 +279,15 @@ class TrendChart(ttk.Frame):
             .timestamp.astimezone()
             .strftime("%H:%M:%S"),
         )
+        mapping = (
+            PlotMapping(left, top, right, bottom, first_time, first_time + time_span)
+            if time_span > 0 else None
+        )
+        if mapping is not None:
+            self._frame = GraphFrame(mapping, (ValueAxis(latest.unit, minimum, maximum),))
         if self._notes is not None:
-            self._notes.draw(
-                PlotMapping(left, top, right, bottom, first_time, first_time + time_span)
-                if time_span > 0 else None
-            )
+            self._notes.draw(mapping)
+        self._reader.redraw()
 
 
 class TrendWindow:
@@ -343,6 +356,7 @@ class TrendWindow:
                 "Up to 500 representative points are displayed; full-resolution "
                 "data is retained in the experiment recording."
                 + ("  Double-click the graph to add a note." if annotations else "")
+                + "  The crosshair reads the time and value under the cursor."
             ),
             foreground=MUTED_TEXT,
         ).grid(row=2, column=0, sticky="w", padx=12, pady=(0, 8))

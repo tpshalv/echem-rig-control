@@ -124,11 +124,11 @@ def test_ui_graphs_and_exports_use_snapshot_labels_but_keep_raw_ids(tmp_path):
     raw = [json.loads(line) for line in (directory / "measurements.journal.jsonl").read_text().splitlines()]
     assert [record["channel"] for record in raw] == ["tc1", "tc2"]
     export_wide_csv(directory)
-    with (directory / "measurements-wide.csv").open(encoding="utf-8-sig", newline="") as stream:
+    with (directory / f"{directory.name}.csv").open(encoding="utf-8-sig", newline="") as stream:
         headers = next(csv.reader(stream))
     assert headers == ["timestamp_utc", "probe.tc1 (Water bath) [degC]", "probe.tc2 (Cell) [degC]",
                        "notes", "qc_flags"]
-    workbook = load_workbook(directory / "experiment.xlsx", read_only=True)
+    workbook = load_workbook(directory / f"{directory.name}.xlsx", read_only=True)
     try:
         assert [cell.value for cell in next(workbook["Data"].rows)] == headers
     finally:

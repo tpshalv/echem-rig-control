@@ -5,8 +5,9 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from rig_control.build_stamp import build_stamp
-from rig_control.app_paths import default_selection_path
+from rig_control.app_paths import default_selection_path, settings_directory
 from rig_control.app_selection import load_app_selection
+from rig_control.remembered_values import RememberedValues
 from rig_control.ui.common.theme import SECTION_FONT, TITLE_FONT, apply_blueprint_theme
 from rig_control.ui.device_setup.model import DeviceSetupViewModel
 from rig_control.ui.device_setup.window import DeviceSetupWindow
@@ -195,6 +196,7 @@ class HomeWindow:
             profile_name=session.profile.friendly_name,
             default_output_directory=session.settings.default_output_directory,
             event_sink=session.technical_log.record,
+            remembered=RememberedValues(settings_directory() / "remembered.json"),
         )
         session.runtime_diagnostics.register_metric_provider(
             "operation_ui",

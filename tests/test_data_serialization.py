@@ -56,6 +56,7 @@ def test_experiment_metadata_serialization() -> None:
         "experiment_type": "durability",
         "sequence_file": "sequence.toml",
         "notes": "Example test",
+        "electrolyser_id": None,
         "extra": {
             "catalyst_id": "CAT-42",
             "loading_mg_cm2": 0.5,

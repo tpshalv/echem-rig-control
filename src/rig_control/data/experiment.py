@@ -20,6 +20,9 @@ class ExperimentMetadata:
     experiment_type: str | None = None
     sequence_file: str | None = None
     notes: str | None = None
+    # The fully built electrolyser (MEA included) under test; None when
+    # not recorded.
+    electrolyser_id: str | None = None
     extra: Mapping[str, MetadataValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -51,6 +54,10 @@ class ExperimentMetadata:
         self._validate_optional_text(
             self.notes,
             "Notes",
+        )
+        self._validate_optional_text(
+            self.electrolyser_id,
+            "Electrolyser ID",
         )
 
         copied_extra = dict(self.extra)

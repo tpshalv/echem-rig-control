@@ -185,6 +185,11 @@ class ChartAnnotations:
         self._mapping: PlotMapping | None = None
         self._moving: Annotation | None = None
         self._marker_clicked = False
+        #: Whether a double-click adds a note; a chart with mode buttons
+        #: turns this on only while its Add note mode is active.
+        self.adds_on_double_click = True
+        #: Cursor to restore after moving a note, matching the chart's mode.
+        self.idle_cursor = ""
         self._overlay = AnnotationOverlay(canvas)
         self._overlay.on_enter = self._show_popup
         self._overlay.on_leave = lambda _cluster, _event: self._popup.hide()
@@ -217,7 +222,7 @@ class ChartAnnotations:
     def _on_double_click(self, event: tk.Event) -> str | None:
         # The time comes from the frame that was on screen when clicked.
         mapping = self._mapping
-        if self._moving is not None or mapping is None:
+        if not self.adds_on_double_click or self._moving is not None or mapping is None:
             return None
         if not mapping.contains(event.x, event.y):
             return None
@@ -255,7 +260,7 @@ class ChartAnnotations:
 
     def _cancel_move(self) -> None:
         self._moving = None
-        self._canvas.configure(cursor="")
+        self._canvas.configure(cursor=self.idle_cursor)
 
     def _show_popup(self, cluster: MarkerCluster, event: tk.Event) -> None:
         if self._popup.pinned:

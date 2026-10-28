@@ -33,7 +33,7 @@ def append(directory, records):
 
 
 def rows(directory):
-    with (directory / "measurements-wide.csv").open(encoding="utf-8-sig", newline="") as stream:
+    with (directory / f"{directory.name}.csv").open(encoding="utf-8-sig", newline="") as stream:
         return list(csv.reader(stream))
 
 
@@ -188,7 +188,7 @@ def test_on_demand_excel_does_not_block_recording(tmp_path, monkeypatch):
     assert not failures
     assert recorder.diagnostic_metrics()["measurement_records_written"] == 1
     recorder.stop()
-    assert (recorder.experiment_directory / "experiment.xlsx").exists()
+    assert (recorder.experiment_directory / f"{recorder.experiment_directory.name}.xlsx").exists()
 
 
 def test_export_rejects_non_experiment_folder_without_creating_cache(tmp_path):

@@ -21,6 +21,7 @@ def experiment_metadata_to_dict(
         "experiment_type": metadata.experiment_type,
         "sequence_file": metadata.sequence_file,
         "notes": metadata.notes,
+        "electrolyser_id": metadata.electrolyser_id,
         "extra": dict(metadata.extra),
     }
 

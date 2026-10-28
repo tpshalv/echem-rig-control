@@ -24,6 +24,11 @@ from rig_control.data.annotations import (
     resolve_annotations,
 )
 from rig_control.data.experiment import ExperimentMetadata
+from rig_control.data.experiment_naming import (
+    existing_recording,
+    make_experiment_id,
+    remove_recording,
+)
 from rig_control.devices.manager import DeviceManager
 from rig_control.experiment_recording import ExperimentRecorder
 from rig_control.devices.pump_calibration import PumpCalibration
@@ -1074,11 +1079,22 @@ class OperationViewModel:
     def start_recording(
         self,
         *,
-        experiment_id: str,
         operator: str,
         output_directory: str | Path,
+        description: str = "",
+        electrolyser_id: str | None = None,
         notes: str | None = None,
+        started_at: datetime | None = None,
+        replace_existing: bool = False,
+        experiment_id: str | None = None,
     ) -> OperationActionResult:
+        """Start recording under ``INITIALS_date_time_description``.
+
+        ``started_at`` lets the screen fix the time it previewed and checked
+        for a clash. ``replace_existing`` deletes a previous recording of the
+        same name, which the screen only passes after asking. An explicit
+        ``experiment_id`` skips naming altogether.
+        """
         if not self.is_monitoring:
             return OperationActionResult(
                 False,
@@ -1090,10 +1106,24 @@ class OperationViewModel:
                 "Choose an experiment output folder before recording.",
             )
         try:
+            started_at = started_at or datetime.now(UTC)
+            if experiment_id is None:
+                experiment_id = make_experiment_id(operator, started_at, description)
+            existing = existing_recording(output_directory, experiment_id)
+            if existing is not None:
+                if not replace_existing:
+                    return OperationActionResult(
+                        False,
+                        f"A recording named {experiment_id!r} already exists "
+                        f"in {output_directory}.",
+                    )
+                remove_recording(existing)
             metadata = ExperimentMetadata(
                 experiment_id=experiment_id,
                 operator=operator,
+                started_at=started_at,
                 notes=notes or None,
+                electrolyser_id=(electrolyser_id or "").strip() or None,
                 extra={
                     "rig_profile_id": self._profile_id,
                     **({"channel_labels_json": json.dumps({

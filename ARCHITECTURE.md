@@ -533,7 +533,7 @@ Run `python scripts/build_exe.py` (needs `pip install -e .[hardware,build]`). It
 ## Long-run recording exports
 
 The measurement and event journals retain original readings and timestamps.
-The live `measurements-wide.csv` uses the configured export interval (one second
+The live wide CSV, `<experiment ID>.csv`, uses the configured export interval (one second
 by default), averaging measurements within each nearest time bin and taking the
 latest setpoint/state value. Missing readings remain blank.
 
@@ -546,7 +546,9 @@ a streamed CSV rebuild to preserve the header and correct values. A failed write
 can be retried without counting readings twice. Keep journals as the authoritative
 record; the cache is derived data. The export cache is not a recording-resume feature.
 
-Stopping recording finishes the CSV and creates `experiment.xlsx`. Operation's
+Stopping recording finishes the CSV and creates `<experiment ID>.xlsx`. Both
+exports are named after the recording folder, so workbooks from different runs
+can be open in Excel at the same time. Operation's
 **Export Excel** button also creates a snapshot during recording, without holding
 the acquisition lock. When idle, it prompts for an existing experiment folder.
 The workbook contains Overview, Data, Events and Notes; original raw readings
@@ -557,8 +559,10 @@ on-demand snapshot may include the latest, still-incomplete time bin.
 
 ## Operator notes
 
-Notes and QC flags made during a run (typed in Operation or placed by
-double-clicking a live graph) are stored in `annotations.journal.jsonl` as
+Notes and QC flags made during a run (typed in Operation, or placed by
+double-clicking a live graph: on the dashboard only while its **Add note**
+mode is pressed in, which it shares exclusively with **Graph reader**; see
+decisions/0022) are stored in `annotations.journal.jsonl` as
 append-only create/edit/delete records keyed by note ID; the latest record per
 ID is the note's current state. Notes are linked to measurements only by time
 and never change a reading. The wide CSV carries them in trailing `notes` and

@@ -29,13 +29,23 @@ from rig_control.data.export import (
 from rig_control.power_supply_telemetry import state_label
 
 
+def export_file_stem(directory: str | Path) -> str:
+    """Exports are named after their recording folder, i.e. the experiment ID.
+
+    Excel refuses to open two workbooks with the same file name, so a fixed
+    name like ``experiment.xlsx`` stopped two runs being compared side by side.
+    """
+
+    return Path(directory).absolute().name or "experiment"
+
+
 class IncrementalCsvExporter:
     def __init__(self, directory: str | Path, bin_seconds: float = 1.0) -> None:
         if not isfinite(bin_seconds) or bin_seconds <= 0:
             raise ValueError("Export bin size must be finite and positive")
         self.directory = Path(directory)
         self.bin_seconds = bin_seconds
-        self.path = self.directory / "measurements-wide.csv"
+        self.path = self.directory / f"{export_file_stem(self.directory)}.csv"
         self.database = self.directory / "export-cache.sqlite3"
 
     @contextmanager

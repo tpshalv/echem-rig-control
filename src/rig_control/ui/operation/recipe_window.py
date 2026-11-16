@@ -20,9 +20,8 @@ from rig_control.recipes import (
     LoopStep, Recipe, RepeatStep, SetStep, WaitPurpose, WaitStep, estimate_recipe, load_recipe,
     preview_recipe, recipe_problems, save_recipe, step_times,
 )
-from rig_control.data.experiment_naming import (
-    describe_recording, existing_recording, make_experiment_id, remove_recording,
-)
+from rig_control.data.experiment import ExperimentMetadata
+from rig_control.data.experiment_naming import describe_recording, existing_recording
 from rig_control.recipes.execution import RecipeRunner
 from rig_control.recipes import Assignment, Ramp, RampKind
 from rig_control.recipes.plan import PlannedRamp, plan, values_before
@@ -33,7 +32,7 @@ from rig_control.recipes.outline import (
 from rig_control.rig_profile import RigProfile
 from rig_control.ui.common.theme import ERROR_TEXT, INFO_TEXT, MUTED_TEXT, SECTION_FONT, SUCCESS_TEXT
 from rig_control.ui.operation.recipe_settings import (
-    SETTINGS, default_value, group_by_device, group_mode, short_label, format_clock, format_duration, format_value, parse_duration,
+    SETTINGS, current_density_summary, default_value, group_by_device, recipe_turns_output_on, group_mode, short_label, format_clock, format_duration, format_value, parse_duration,
     ValueDisplay, capability_has_safe_state, default_end_state, describe_ramp, end_state_summary, end_state_warnings, parse_pass_names, spec_for, unit_for,
 )
 from rig_control.ui.operation.recipe_end_dialog import EndStateDialog
@@ -54,11 +53,16 @@ class RecipeBuilderWindow:
     """Edits an in-memory list of outline rows; hardware work remains in ``RecipeRunner``."""
 
     def __init__(self, root: tk.Toplevel, runner: RecipeRunner, profile: RigProfile, *,
-                 default_output_directory: str = "", current_unit: str = "mA",
-                 recording_details: Callable[[], dict[str, str]] | None = None) -> None:
+                 current_unit: str = "mA",
+                 recording_details: Callable[[], dict[str, str]] | None = None,
+                 plan_recording: Callable[[datetime], tuple[Path, ExperimentMetadata]] | None = None,
+                 recording_preview: Callable[[], str] | None = None) -> None:
         self._root, self._runner, self._profile = root, runner, profile
-        #: Operator, electrolyser, description and notes from Operation's panel.
+        #: Operator, electrolyser, description, notes and output from Operation's panel.
         self._recording_details = recording_details or (lambda: {})
+        #: Operation names and files every run, so recipe and manual runs match.
+        self._plan_recording = plan_recording
+        self._recording_preview = recording_preview or (lambda: "")
         self._rows: list[OutlineRow] = []
         self._selected: int | None = None
         #: With a Set step selected: one device's line, or None for the whole step.
@@ -79,7 +83,7 @@ class RecipeBuilderWindow:
         self._build_header()
         self._build_toolbar()
         self._build_body()
-        self._build_footer(default_output_directory)
+        self._build_footer()
         self._refresh(); self._show_quick()
         self._tick()
 
@@ -163,12 +167,13 @@ class RecipeBuilderWindow:
         self._quick.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
         self._quick.columnconfigure(1, weight=1)
 
-    def _build_footer(self, output: str) -> None:
+    def _build_footer(self) -> None:
         bottom = ttk.Frame(self._root, padding=12); bottom.grid(row=3, column=0, sticky="ew")
         bottom.columnconfigure(1, weight=1)
-        ttk.Label(bottom, text="Output folder").grid(row=0, column=0, sticky="w")
-        self._output = ttk.Entry(bottom); self._output.grid(row=0, column=1, sticky="ew", padx=5); self._output.insert(0, output)
-        ttk.Button(bottom, text="Browse…", command=self._browse).grid(row=0, column=2)
+        ttk.Label(bottom, text="Saves as").grid(row=0, column=0, sticky="w")
+        # Operator, electrolyser and output folder are set in Operation, as for manual runs.
+        self._destination = ttk.Label(bottom, foreground=MUTED_TEXT); self._destination.grid(row=0, column=1, sticky="w", padx=5)
+        ttk.Label(bottom, text="(set in Operation)", foreground=MUTED_TEXT).grid(row=0, column=2)
         ttk.Button(bottom, text="Validate", command=self._validate).grid(row=0, column=3, padx=(10, 3))
         self._start = ttk.Button(bottom, text="Start", command=self._start_recipe); self._start.grid(row=0, column=4, padx=3)
         ttk.Button(bottom, text="Stop → end state", command=self._runner.stop).grid(row=0, column=5, padx=3)
@@ -801,49 +806,57 @@ class RecipeBuilderWindow:
             try: self._load_rows(load_recipe(path))
             except Exception as error: messagebox.showerror("Load recipe", str(error), parent=self._root)
 
-    def _browse(self) -> None:
-        path = filedialog.askdirectory(parent=self._root)
-        if path: self._set_entry(self._output, path)
-
     def _validate(self) -> None:
         try:
             self._runner.validate(self._recipe())
         except Exception as error:
             messagebox.showerror("Validate recipe", str(error), parent=self._root)
         else:
-            messagebox.showinfo("Validate recipe", "The recipe is valid for the connected devices.", parent=self._root)
+            density = current_density_summary(self._recipe(), self._runner.cell_area.cm2)
+            messagebox.showinfo("Validate recipe", "The recipe is valid for the connected devices."
+                                + (f"\n\n{density}" if density else ""), parent=self._root)
 
     def _start_recipe(self) -> None:
-        if not self._output.get().strip():
-            messagebox.showerror("Start recipe", "Choose an output folder first.", parent=self._root); return
+        if self._plan_recording is None:
+            messagebox.showerror("Start recipe", "Open the recipe builder from Operation to record a run.",
+                                 parent=self._root); return
+        details = self._recording_details()
+        recipe = self._recipe()
+        area = self._runner.cell_area.cm2
+        try:
+            # Before any questions, so a recipe that cannot run, or a run that
+            # cannot be named (no initials or output folder), says so first.
+            self._runner.validate(recipe)
+            self._plan_recording(datetime.now(UTC))
+        except Exception as error:
+            messagebox.showerror("Start recipe", str(error), parent=self._root); return
+        if area is None and (details.get("electrolyser") or recipe_turns_output_on(recipe)) and not messagebox.askyesno(
+                "No active area", "No active area is entered, so this run will have no current density and its "
+                "record will not state the area.\n\nEnter it under Experiment Recording in Operation.\n\nRun anyway?",
+                icon="warning", parent=self._root):
+            return
         summary = "\n".join("   • " + line for line in end_state_summary(
             self._end_state, self._all_roles, self._units, self._has_safe_state))
         warnings = end_state_warnings(self._end_state, self._all_roles, self._has_safe_state)
-        message = ("When the run finishes, or if you press Stop:\n\n" + summary
+        density = current_density_summary(recipe, area)
+        message = ((f"{density}\n\n" if density else "")
+                   + "When the run finishes, or if you press Stop:\n\n" + summary
                    + ("\n\n" + "\n".join("⚠ " + w for w in warnings) if warnings else "")
                    + "\n\nStart the recipe?")
         if not messagebox.askokcancel("Start recipe", message, icon="warning" if warnings else "question",
                                       parent=self._root):
             return
-        details = self._recording_details()
-        recipe = self._recipe()
-        root = Path(self._output.get())
         try:
-            # Same naming as a manual recording; the description falls back
-            # to the recipe's name.
-            experiment_id = make_experiment_id(details.get("operator", ""), datetime.now(UTC),
-                                               details.get("description") or recipe.name)
-            existing = existing_recording(root, experiment_id)
-            if existing is not None:
-                if not messagebox.askyesno(
-                        "Replace recording?",
-                        f"A recording named {experiment_id} already exists ({describe_recording(existing)}).\n\n"
-                        "Replace it? The existing recording will be deleted.", icon="warning", parent=self._root):
-                    return
-                remove_recording(existing)
-            self._runner.start(recipe, recording_root=root, experiment_id=experiment_id,
-                               operator=details["operator"], notes=details.get("notes") or None,
-                               electrolyser_id=details.get("electrolyser") or None)
+            # Named now, after the questions, so the ID's time is the start time.
+            root, metadata = self._plan_recording(datetime.now(UTC))
+            existing = existing_recording(root, metadata.experiment_id)
+            if existing is not None and not messagebox.askyesno(
+                    "Replace recording?",
+                    f"A recording named {metadata.experiment_id} already exists ({describe_recording(existing)}).\n\n"
+                    "Replace it? The existing recording will be deleted.", icon="warning", parent=self._root):
+                return
+            self._runner.start(recipe, recording_root=root, metadata=metadata,
+                               replace_existing=existing is not None)
         except Exception as error:
             messagebox.showerror("Start recipe", str(error), parent=self._root)
 
@@ -861,5 +874,6 @@ class RecipeBuilderWindow:
         else:
             text = f"Recipe {status.state.value}" + (f": {status.failure}" if status.failure else "")
         self._status.configure(text=text)
+        self._destination.configure(text=self._recording_preview())
         self._start.configure(state="disabled" if self._runner.is_running else "normal")
         self._root.after(250, self._tick)

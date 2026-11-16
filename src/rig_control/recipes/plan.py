@@ -17,7 +17,7 @@ from typing import TypeAlias
 
 from rig_control.devices.power_supply import PowerSupplyOperatingMode
 from rig_control.recipes.model import (
-    POWER_SUPPLY_MODE_SETTINGS, POWER_SUPPLY_OUTPUT_SETTING, Assignment, LoopStep, Ramp, Recipe, RecipeStep,
+    CURRENT_DENSITY_SETTING, POWER_SUPPLY_MODE_SETTINGS, POWER_SUPPLY_OUTPUT_SETTING, Assignment, LoopStep, Ramp, Recipe, RecipeStep,
     RepeatStep, SetStep, WaitStep, power_supply_mode_of, ramp_holds, ramp_path,
 )
 
@@ -209,7 +209,7 @@ def power_supply_problems(recipe: Recipe) -> tuple[str, ...]:
                             "turn the output off first",)
                 mode[device] = step_mode
                 written[device] = set()
-            written[device].add(step.setting)
+            written[device].add("current_setpoint" if step.setting == CURRENT_DENSITY_SETTING else step.setting)
         elif step.setting == POWER_SUPPLY_OUTPUT_SETTING:
             if step.value is True and not output_on.get(device):
                 current = mode.get(device)

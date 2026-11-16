@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any
 
 from rig_control.atomic_replace import replace_atomically
+from rig_control.cell_area import AREA_METADATA_KEY
+from rig_control.data.electrolysers import AREA_FIELD, DETAIL_FIELDS, ELECTROLYSER_METADATA_KEY
 from rig_control.data.annotations import (
     Annotation,
     RunReview,
@@ -18,6 +20,7 @@ from rig_control.power_supply_telemetry import state_label
 
 
 LAST_VALUE_CHANNELS = {
+    "indicator_state",
     "active_setpoint",
     "target_setpoint",
     "alarm_state",
@@ -203,6 +206,30 @@ def _calibrations(metadata: dict[str, Any]) -> list[dict[str, Any]]:
     return [calibration for calibration in calibrations if isinstance(calibration, dict)]
 
 
+def _electrolyser_rows(metadata: dict[str, Any]) -> list[tuple[str, str]]:
+    """The electrolyser's build details as they were at run start, one row each.
+
+    Only filled-in fields are recorded, so only those show; the full record
+    stays in metadata.json. An unreadable value shows nothing.
+    """
+    try:
+        build = json.loads(metadata.get("extra", {}).get(ELECTROLYSER_METADATA_KEY, "{}"))
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(build, dict) or not build:
+        return []
+    labels = dict(DETAIL_FIELDS)
+    rows = [(f"Electrolyser {label}", str(build[key]))
+            for key, label in (("builder", "builder"), ("built_on", "build date"),
+                               ("copied_from", "copied from"))
+            if build.get(key)]
+    details = build.get("details")
+    for key, value in (details.items() if isinstance(details, dict) else ()):
+        if key != AREA_FIELD:  # Already shown as the run's active area.
+            rows.append((f"Electrolyser: {labels.get(key, key)}", str(value)))
+    return rows
+
+
 def _iter_jsonl(path: Path, end: int):
     with path.open("rb") as stream:
         while stream.tell() < end:
@@ -298,6 +325,10 @@ def _write_xlsx(
     overview.append(cells(overview, ["Experiment ID", metadata.get("experiment_id") or ""]))
     overview.append(cells(overview, [
         "Electrolyser ID", metadata.get("electrolyser_id") or "not recorded"]))
+    overview.append(cells(overview, [
+        "Active area (cm²)", metadata.get("extra", {}).get(AREA_METADATA_KEY) or "not recorded"]))
+    for label, value in _electrolyser_rows(metadata):
+        overview.append(cells(overview, [label, value]))
     overview.append(cells(overview, ["Start notes", metadata.get("notes") or ""]))
     overview.append(cells(overview, ["End notes", review.end_notes if review else ""]))
     if review is not None:
@@ -310,12 +341,33 @@ def _write_xlsx(
             f"Calibration: {calibration.get('device_name') or calibration.get('device_id')}",
             str(calibration.get("name", "")) + (f" — {notes}" if notes else ""),
         ]))
+    flow = json.loads(metadata.get("extra", {}).get("excess_flow_json", "{}"))
+    calibrations = _calibrations(metadata)
+    if flow.get("calibration"):
+        calibrations = [*calibrations, flow["calibration"]]
+    if calibrations or flow:
+        sheet = workbook.create_sheet("Calibrations")
+        sheet.column_dimensions["A"].width = 30
+        sheet.column_dimensions["B"].width = 45
+        sheet.column_dimensions["C"].width = 100
+        sheet.append(cells(sheet, ["Calibration / model", "Field", "Value"], header=True))
+        for entry in calibrations:
+            identity = entry.get("id") or entry.get("name") or entry.get("device_id", "")
+            for key, value in entry.items():
+                serialized = json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else str(value)
+                # Excel cells have a 32767-character limit. Preserve all chunks.
+                for offset in range(0, max(len(serialized), 1), 30000):
+                    sheet.append(cells(sheet, [identity, key if not offset else f"{key} continued", serialized[offset:offset+30000]]))
+        for key, value in flow.items():
+            if key != "calibration":
+                sheet.append(cells(sheet, ["Excess flow", key, json.dumps(value, ensure_ascii=False)]))
     for key, value in metadata.items():
         if key in {"notes", "experiment_id", "electrolyser_id"}:
             continue
         if key == "extra":
             for extra_key, extra_value in dict(value).items():
-                overview.append(cells(overview, [f"extra.{extra_key}", extra_value]))
+                if extra_key not in {AREA_METADATA_KEY, ELECTROLYSER_METADATA_KEY}:
+                    overview.append(cells(overview, [f"extra.{extra_key}", extra_value]))
         else:
             overview.append(cells(overview, [key, value]))
     overview.append(cells(overview, ["Time interval (seconds)", bin_seconds]))

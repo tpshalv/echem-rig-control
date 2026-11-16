@@ -555,18 +555,35 @@ def test_runner_reports_which_session_devices_have_a_safe_state():
     assert runner.has_safe_state("not-in-session") is None
 
 
-def test_recipe_recording_uses_the_same_naming() -> None:
+def test_recipe_recording_keeps_the_planned_name_and_adds_the_recipe() -> None:
+    from datetime import UTC, datetime
+    from rig_control.data.experiment import ExperimentMetadata
+
     runner, _supply, _mfc = make_runner()
     writer = InMemoryExperimentWriter()
     runner._recorder = ExperimentRecorder(writer_factory=lambda _root: writer)
-    runner.start(Recipe("flow sweep", steps=(WaitStep(0),)), recording_root="unused",
-                 operator="TPS", electrolyser_id="B142")
+    planned = ExperimentMetadata("TPS_2026-11-03_10h15", "TPS", started_at=datetime(2026, 11, 3, 10, 15, tzinfo=UTC),
+                                 experiment_type="recipe", electrolyser_id="TPS-E003-2026-10",
+                                 extra={"rig_profile_id": "rig"})
+    runner.start(Recipe("flow sweep", steps=(WaitStep(0),)), recording_root="unused", metadata=planned)
     runner.join(2)
 
-    initials, date, time, description = writer.metadata.experiment_id.split("_")
-    assert (initials, description) == ("TPS", "flow-sweep")
-    assert len(date) == 10 and len(time) == 5 and "h" in time
-    assert writer.metadata.electrolyser_id == "B142"
+    recorded = writer.metadata
+    assert (recorded.experiment_id, recorded.started_at, recorded.electrolyser_id) == (
+        planned.experiment_id, planned.started_at, "TPS-E003-2026-10")
+    assert recorded.experiment_type == "recipe"
+    assert recorded.extra["rig_profile_id"] == "rig" and recorded.extra["recipe_name"] == "flow sweep"
+
+
+def test_unplanned_recipe_recording_is_not_named_after_the_recipe() -> None:
+    runner, _supply, _mfc = make_runner()
+    writer = InMemoryExperimentWriter()
+    runner._recorder = ExperimentRecorder(writer_factory=lambda _root: writer)
+    runner.start(Recipe("flow sweep", steps=(WaitStep(0),)), recording_root="unused")
+    runner.join(2)
+
+    assert len(writer.metadata.experiment_id.split("_")) == 3
+    assert writer.metadata.operator == "recipe"
 
 
 # --- Pump flow (calibrated) ---

@@ -7,12 +7,20 @@ from threading import Thread
 from traceback import format_exc
 from typing import Any
 
+from rig_control.cell_area import parse_area
 from rig_control.data.annotations import ANNOTATION_KIND_LABELS, ANNOTATION_KINDS
+from rig_control.data.electrolysers import (
+    NO_ELECTROLYSER_FOLDER,
+    list_electrolysers,
+    load_electrolyser,
+    run_folder,
+)
 from rig_control.data.experiment_naming import (
     describe_recording,
     existing_recording,
     make_experiment_id,
 )
+from rig_control.ui.operation.electrolyser_dialog import ElectrolyserDialog
 from rig_control.remembered_values import RememberedValues
 from rig_control.models import Event, EventSeverity, EventSink
 from rig_control.ui.common.theme import (
@@ -76,6 +84,7 @@ class OperationWindow:
         self._trend_windows: dict[tuple[str, str], TrendWindow] = {}
         self._dashboard_window: LiveDashboardWindow | None = None
         self._recipe_window: tk.Toplevel | None = None
+        self._leak_check_window = None
         self._channel_trees: dict[str | None, ttk.Treeview] = {}
         self._tree_item_keys: dict[tuple[str | None, str], tuple[str, str]] = {}
         self._channel_rows: dict[tuple[str, str], OperationChannelRow] = {}
@@ -107,8 +116,16 @@ class OperationWindow:
             self._entries["output"].insert(0, default_output_directory)
         if remembered is not None:
             self._entries["operator"].insert(0, remembered.get("operator"))
+        self._refresh_electrolysers()
         self._update_display()
         self._schedule_update()
+
+    def _open_leak_check(self):
+        from rig_control.ui.operation.leak_check_window import LeakCheckWindow
+        if self._leak_check_window is not None and self._leak_check_window.window.winfo_exists():
+            self._leak_check_window.window.lift()
+        else:
+            self._leak_check_window = LeakCheckWindow(self._root, self._view_model.leak_check, self._view_model.excess_flow)
 
     def _create_widgets(self, profile_name: str) -> None:
         paper = "#EEF3F7"
@@ -140,7 +157,8 @@ class OperationWindow:
         body = ttk.Frame(main, style="Blueprint.TFrame")
         body.grid(row=2, column=0, sticky="nsew")
         body.columnconfigure(0, weight=4)
-        body.columnconfigure(1, weight=2)
+        # Wide enough for a full electrolyser name beside its New/Edit buttons.
+        body.columnconfigure(1, weight=2, minsize=390)
         body.rowconfigure(1, weight=1)
 
         controls = ttk.Frame(body, style="Blueprint.TFrame")
@@ -186,6 +204,9 @@ class OperationWindow:
         self._action_status.grid(
             row=1, column=0, columnspan=4, sticky="w", pady=(6, 0)
         )
+        if self._view_model.leak_check is not None and self._view_model.leak_check.available:
+            ttk.Button(controls, text="Leak check", command=self._open_leak_check).grid(
+                row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
         left = ttk.Frame(body, style="Blueprint.TFrame")
         left.grid(row=1, column=0, sticky="nsew", padx=(0, 12))
@@ -241,41 +262,73 @@ class OperationWindow:
         recording.grid(row=1, column=1, sticky="nsew")
         recording.columnconfigure(1, weight=1)
         # The experiment ID is built from these (initials, date, time,
-        # description) and previewed below them, so nobody types it.
+        # description) and previewed below them, so nobody types it. Runs
+        # are filed in the chosen electrolyser's folder inside the output.
         fields = (
             (0, "Operator initials", "operator"),
-            (1, "Electrolyser ID", "electrolyser"),
-            (2, "Description", "description"),
-            (4, "Output folder", "output"),
-            (5, "Start notes", "notes"),
+            (1, "Electrolyser", "electrolyser"),
+            (2, "Active area", "area"),
+            (3, "Description", "description"),
+            (5, "Output folder", "output"),
+            (6, "Start notes", "notes"),
         )
         self._entries: dict[str, ttk.Entry] = {}
         for row, label, key in fields:
             ttk.Label(recording, text=f"{label}:").grid(
                 row=row, column=0, sticky="w", pady=2
             )
-            entry = ttk.Entry(recording)
+            entry = (
+                # Picked from the list, so a typo never makes a second folder.
+                ttk.Combobox(recording, state="readonly", width=18,
+                             postcommand=self._refresh_electrolysers)
+                if key == "electrolyser" else ttk.Entry(recording)
+            )
             entry.grid(row=row, column=1, sticky="ew", padx=(8, 4), pady=2)
             self._entries[key] = entry
         for key in ("operator", "description"):
             self._entries[key].bind(
                 "<KeyRelease>", lambda _event: self._refresh_id_preview()
             )
-        ttk.Label(recording, text="Experiment ID:").grid(
-            row=3, column=0, sticky="w", pady=2
+        self._area_hint = ttk.Label(recording, text="cm²", foreground=MUTED_TEXT)
+        self._area_hint.grid(row=2, column=2, sticky="w", pady=2)
+        self._entries["area"].bind("<KeyRelease>", lambda _event: self._area_typed())
+        self._electrolyser_text = ""
+        self._entries["electrolyser"].set(NO_ELECTROLYSER_FOLDER)
+        self._entries["electrolyser"].bind(
+            "<<ComboboxSelected>>", lambda _event: self._electrolyser_chosen()
         )
-        self._id_preview = ttk.Label(recording, foreground=MUTED_TEXT)
+        self._entries["output"].bind(
+            "<FocusOut>", lambda _event: self._refresh_electrolysers()
+        )
+        electrolyser_buttons = ttk.Frame(recording)
+        electrolyser_buttons.grid(row=1, column=2, sticky="w", pady=2)
+        self._electrolyser_buttons = (
+            ttk.Button(electrolyser_buttons, text="New…", width=6,
+                       command=self._new_electrolyser),
+            ttk.Button(electrolyser_buttons, text="Edit…", width=5,
+                       command=self._edit_electrolyser),
+        )
+        for column, button in enumerate(self._electrolyser_buttons):
+            button.grid(row=0, column=column, padx=(0, 2))
+        area = self._view_model.cell_area.cm2
+        if area is not None:
+            self._entries["area"].insert(0, f"{area:g}")
+        ttk.Label(recording, text="Experiment ID:").grid(
+            row=4, column=0, sticky="w", pady=2
+        )
+        # Wraps after "electrolyser /" rather than cutting off the run's ID.
+        self._id_preview = ttk.Label(recording, foreground=MUTED_TEXT, wraplength=230)
         self._id_preview.grid(
-            row=3, column=1, columnspan=2, sticky="w", padx=(8, 4), pady=2
+            row=4, column=1, columnspan=2, sticky="w", padx=(8, 4), pady=2
         )
         ttk.Button(recording, text="Browse…", command=self._browse_output).grid(
-            row=4, column=2, pady=2
+            row=5, column=2, pady=2
         )
 
-        self._create_note_box(recording, row=6)
+        self._create_note_box(recording, row=7)
 
         actions = ttk.Frame(recording)
-        actions.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        actions.grid(row=9, column=0, columnspan=3, sticky="ew", pady=(8, 0))
         self._record_button = ttk.Button(
             actions, text="Start recording", command=self._toggle_recording
         )
@@ -297,13 +350,97 @@ class OperationWindow:
             text=("Every new reading is saved once. Measurement intervals "
                   "are configured per device in Device Setup."),
             wraplength=280,
-        ).grid(row=9, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        ).grid(row=10, column=0, columnspan=3, sticky="w", pady=(10, 0))
 
         for text, x, y, anchor in (("┌", 2, 2, "nw"), ("┐", 1, 2, "ne"),
                                     ("└", 2, 1, "sw"), ("┘", 1, 1, "se")):
             ttk.Label(main, text=text, style="Blueprint.TLabel").place(
                 relx=x if x == 1 else 0, rely=y if y == 1 else 0,
                 x=4 if x == 2 else -4, y=4 if y == 2 else -4, anchor=anchor)
+
+    def _area_typed(self) -> None:
+        """Keep the area in step with the box; anything unreadable counts as none."""
+        try:
+            area, problem = parse_area(self._entries["area"].get()), ""
+        except ValueError as error:
+            area, problem = None, str(error)
+        self._view_model.cell_area.set(area)
+        self._area_hint.configure(
+            text="must be > 0" if problem else "cm²",
+            foreground=ERROR_TEXT if problem else MUTED_TEXT,
+        )
+        self._update_display()
+
+    def _electrolyser_id(self) -> str:
+        text = self._entries["electrolyser"].get().strip()
+        return "" if text == NO_ELECTROLYSER_FOLDER else text
+
+    def _refresh_electrolysers(self) -> None:
+        """List the output folder's electrolysers; retired ones are left off."""
+        names = [item.name for item in list_electrolysers(self._entries["output"].get().strip())]
+        chosen = self._electrolyser_id()
+        if chosen and chosen not in names:
+            names.append(chosen)  # Retired, or the folder changed: keep showing it.
+        self._entries["electrolyser"].configure(values=(NO_ELECTROLYSER_FOLDER, *names))
+
+    def _electrolyser_chosen(self) -> None:
+        """A different build needs its own area: the old one never carries over,
+        and the build's own area, if it has one, is filled in."""
+        text = self._electrolyser_id()
+        if text == self._electrolyser_text or self._view_model.is_recording:
+            return
+        self._electrolyser_text = text
+        build = load_electrolyser(self._run_folder()) if text else None
+        area = build.area if build is not None else ""
+        if self._entries["area"].get() != area:
+            self._entries["area"].delete(0, "end")
+            self._entries["area"].insert(0, area)
+            self._area_typed()
+        self._refresh_id_preview()
+
+    def _run_folder(self):
+        return run_folder(self._entries["output"].get().strip(), self._electrolyser_id())
+
+    def _electrolyser_root(self) -> str | None:
+        output = self._entries["output"].get().strip()
+        if not output:
+            messagebox.showerror("Electrolyser", "Choose the output folder first; "
+                                 "electrolysers are kept inside it.", parent=self._root)
+            return None
+        return output
+
+    def _new_electrolyser(self) -> None:
+        output = self._electrolyser_root()
+        if output is None:
+            return
+        ElectrolyserDialog(
+            self._root, output, operator=self._entries["operator"].get(),
+            on_saved=self._electrolyser_saved,
+        )
+
+    def _edit_electrolyser(self) -> None:
+        output = self._electrolyser_root()
+        if output is None:
+            return
+        build = load_electrolyser(self._run_folder()) if self._electrolyser_id() else None
+        if build is None:
+            messagebox.showinfo(
+                "Electrolyser",
+                "Choose an electrolyser first, or press New… to add one.",
+                parent=self._root,
+            )
+            return
+        ElectrolyserDialog(
+            self._root, output, operator=self._entries["operator"].get(),
+            existing=build, on_saved=self._electrolyser_saved,
+        )
+
+    def _electrolyser_saved(self, build) -> None:
+        self._entries["electrolyser"].set(NO_ELECTROLYSER_FOLDER if build.retired else build.name)
+        self._refresh_electrolysers()
+        self._electrolyser_text = None  # Re-read the area even for the same name.
+        self._electrolyser_chosen()
+        self._set_status(f"Saved electrolyser {build.name}.")
 
     def _create_note_box(self, parent: ttk.Frame, *, row: int) -> None:
         """One line for notes during a run; the time is taken at the first key."""
@@ -420,9 +557,10 @@ class OperationWindow:
             self._recipe_window,
             self._view_model.recipe_runner,
             self._view_model.profile,
-            default_output_directory=self._entries["output"].get(),
             current_unit=self._view_model.display_units.current,
             recording_details=self.recording_details,
+            plan_recording=self.plan_recipe_recording,
+            recording_preview=self.recording_preview,
         )
 
         def close() -> None:
@@ -524,9 +662,18 @@ class OperationWindow:
             return
         operator = self._entries["operator"].get().strip()
         description = self._entries["description"].get().strip()
-        electrolyser_id = self._entries["electrolyser"].get().strip()
+        electrolyser_id = self._electrolyser_id()
         output_directory = self._entries["output"].get().strip()
         notes = self._entries["notes"].get().strip()
+        if self._view_model.active_area_forgotten(electrolyser_id) and not messagebox.askyesno(
+            "No active area",
+            "No active area is entered, so this run will have no current density "
+            "and its record will not state the area.\n\nRecord anyway?",
+            icon="warning",
+            parent=self._root,
+        ):
+            self._entries["area"].focus_set()
+            return
         # The time is fixed here, so the ID checked below is the one used.
         started_at = datetime.now(UTC)
         replace_existing = False
@@ -536,7 +683,9 @@ class OperationWindow:
             except ValueError as error:
                 messagebox.showerror("Start recording", str(error), parent=self._root)
                 return
-            existing = existing_recording(output_directory, experiment_id)
+            existing = existing_recording(
+                run_folder(output_directory, electrolyser_id), experiment_id
+            )
             if existing is not None:
                 if not messagebox.askyesno(
                     "Replace recording?",
@@ -563,32 +712,55 @@ class OperationWindow:
             ),
         )
 
-    def _refresh_id_preview(self) -> None:
-        """Show the ID a recording would get now, or the one being recorded."""
-        if not hasattr(self, "_id_preview"):
-            return
+    def recording_preview(self) -> str:
+        """``electrolyser / ID`` a recording would get now, or the one being recorded.
+
+        The recipe builder shows the same text, so both screens agree.
+        """
         if self._view_model.is_recording:
             directory = self._view_model.experiment_directory
-            text = directory.name if directory is not None else ""
-        else:
-            try:
-                text = make_experiment_id(
-                    self._entries["operator"].get(),
-                    datetime.now(UTC),
-                    self._entries["description"].get(),
-                )
-            except ValueError:
-                text = "Enter operator initials"
+            return f"{directory.parent.name} / {directory.name}" if directory is not None else ""
+        try:
+            experiment_id = make_experiment_id(
+                self._entries["operator"].get(),
+                datetime.now(UTC),
+                self._entries["description"].get(),
+            )
+        except ValueError:
+            return "Enter operator initials"
+        return f"{self._run_folder().name} / {experiment_id}"
+
+    def _refresh_id_preview(self) -> None:
+        if not hasattr(self, "_id_preview"):
+            return
+        text = self.recording_preview()
         if text != self._id_preview_text:
             self._id_preview.configure(text=text)
             self._id_preview_text = text
 
     def recording_details(self) -> dict[str, str]:
-        """Operator, electrolyser, description and notes, for recipe runs."""
-        return {
+        """Operator, electrolyser, description, notes and output folder, for recipe runs."""
+        details = {
             key: self._entries[key].get().strip()
-            for key in ("operator", "electrolyser", "description", "notes")
+            for key in ("operator", "description", "notes", "output")
         }
+        details["electrolyser"] = self._electrolyser_id()
+        return details
+
+    def plan_recipe_recording(self, started_at: datetime):
+        """(folder, metadata) for a recipe run: the same naming and filing as here."""
+        details = self.recording_details()
+        if self._remembered is not None and details["operator"]:
+            self._remembered.set("operator", details["operator"])
+        return self._view_model.plan_recording(
+            operator=details["operator"],
+            output_directory=details["output"],
+            started_at=started_at,
+            description=details["description"],
+            electrolyser_id=details["electrolyser"],
+            notes=details["notes"],
+            experiment_type="recipe",
+        )
 
     def _stop_recording(self) -> None:
         """Stop without locking the window while long-run exports are written.
@@ -694,6 +866,8 @@ class OperationWindow:
         if selected:
             self._entries["output"].delete(0, "end")
             self._entries["output"].insert(0, selected)
+            self._refresh_electrolysers()
+            self._refresh_id_preview()
 
     def _open_live_dashboard(self) -> None:
         if self._dashboard_window is not None and self._dashboard_window.exists:
@@ -729,7 +903,7 @@ class OperationWindow:
                 group = "Humidity"
             elif "pressure" in channel or unit in {"pa", "kpa", "bar", "psia"}:
                 group = "Pressure"
-            elif channel in {"voltage", "current", "power"} or unit in {
+            elif channel in {"voltage", "current", "current_density", "power"} or unit in {
                 "v",
                 "a",
                 "w",
@@ -899,14 +1073,19 @@ class OperationWindow:
         except ValueError as error:
             messagebox.showerror("Invalid value", str(error), parent=self._root)
             return "break"
+        amps = (
+            value if row.channel == "current_limit"
+            else self._view_model.amps_for_density(value)
+            if row.channel == "current_density_setpoint" and isinstance(value, float)
+            else None
+        )
         if (
-            row.channel == "current_limit"
-            and isinstance(value, float)
-            and value > DEFAULT_WIRING_CURRENT_CEILING_AMPS
+            isinstance(amps, float)
+            and amps > DEFAULT_WIRING_CURRENT_CEILING_AMPS
             and self._view_model.manual_control.high_current_mode
             and not messagebox.askyesno(
                 "Exceeding normal wiring rating",
-                f"{value:g} A exceeds the normal "
+                f"{amps:g} A exceeds the normal "
                 f"{DEFAULT_WIRING_CURRENT_CEILING_AMPS:g} A wiring rating "
                 "for this rig.\n\nOnly continue if the cables in use are "
                 "actually rated for this current.\n\nContinue?",
@@ -1273,6 +1452,15 @@ class OperationWindow:
             text="Stop monitoring" if monitoring else "Start monitoring"
         )
         self._show_monitoring_state(monitoring)
+        if hasattr(self, "_entries") and "area" in self._entries:
+            # One area per run, so density and its recorded area always agree.
+            self._entries["area"].configure(state="disabled" if recording else "normal")
+        if hasattr(self, "_electrolyser_buttons"):
+            self._entries["electrolyser"].configure(
+                state="disabled" if recording else "readonly"
+            )
+            for button in self._electrolyser_buttons:
+                button.configure(state="disabled" if recording else "normal")
         finalising = getattr(self, "_recording_finalising", False)
         self._record_button.configure(
             text="Stop recording" if recording

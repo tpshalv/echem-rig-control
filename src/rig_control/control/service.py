@@ -5,6 +5,16 @@ import json
 from datetime import datetime, timezone
 from traceback import format_exc
 from enum import StrEnum
+from threading import RLock
+from functools import wraps
+
+
+def serialized(method):
+    @wraps(method)
+    def call(self, *args, **kwargs):
+        with self._control_lock:
+            return method(self, *args, **kwargs)
+    return call
 
 from rig_control.control.commands import (
     CommandSource,
@@ -45,6 +55,7 @@ class ControlMode(StrEnum):
 
     IDLE = "idle"
     RECIPE_ACTIVE = "recipe_active"
+    CALIBRATION_ACTIVE = "calibration_active"
     FAULT_LOCKED = "fault_locked"
 
 
@@ -103,6 +114,7 @@ class RigControlService:
         self, device_manager: DeviceManager, *, event_sink: EventSink | None = None,
     ) -> None:
         self._device_manager = device_manager
+        self._control_lock = RLock()
         self._mode = ControlMode.IDLE
         self._history: list[ExecutedCommand] = []
         self._event_sink = event_sink
@@ -120,6 +132,7 @@ class RigControlService:
     def history(self) -> tuple[ExecutedCommand, ...]:
         return tuple(self._history)
 
+    @serialized
     def begin_recipe_control(self) -> None:
         if self.mode is not ControlMode.IDLE:
             raise ControlAccessError(
@@ -129,6 +142,7 @@ class RigControlService:
 
         self._mode = ControlMode.RECIPE_ACTIVE
 
+    @serialized
     def end_recipe_control(self) -> None:
         if self.mode is not ControlMode.RECIPE_ACTIVE:
             raise ControlAccessError(
@@ -137,11 +151,24 @@ class RigControlService:
 
         self._mode = ControlMode.IDLE
 
+    @serialized
+    def begin_calibration_control(self) -> None:
+        if self.mode is not ControlMode.IDLE:
+            raise ControlAccessError("Calibration requires idle control")
+        self._mode = ControlMode.CALIBRATION_ACTIVE
+
+    @serialized
+    def end_calibration_control(self) -> None:
+        if self.mode is ControlMode.CALIBRATION_ACTIVE:
+            self._mode = ControlMode.IDLE
+
+    @serialized
     def enter_fault_lock(self) -> None:
         """Block ordinary control until explicitly cleared."""
 
         self._mode = ControlMode.FAULT_LOCKED
 
+    @serialized
     def clear_fault_lock(self) -> None:
         if self.mode is not ControlMode.FAULT_LOCKED:
             raise ControlAccessError(
@@ -150,6 +177,7 @@ class RigControlService:
 
         self._mode = ControlMode.IDLE
 
+    @serialized
     def enter_global_safe_state(
         self,
         source: CommandSource = CommandSource.SAFETY_SYSTEM,
@@ -164,7 +192,7 @@ class RigControlService:
 
         # A safe-state request stops recipe control, but it does not create
         # or clear a genuine fault lock.
-        if self.mode is ControlMode.RECIPE_ACTIVE:
+        if self.mode in {ControlMode.RECIPE_ACTIVE, ControlMode.CALIBRATION_ACTIVE}:
             self._mode = ControlMode.IDLE
 
         # Stop sources before isolating the downstream GC; attempt every device
@@ -214,6 +242,7 @@ class RigControlService:
             device_results=tuple(results),
         )
 
+    @serialized
     def execute(
         self,
         command: ControlCommand,
@@ -221,6 +250,13 @@ class RigControlService:
         """Authorize, execute and record one command."""
 
         self._validate_command_type(command)
+
+        # An individual safety command must revoke sweep ownership too; otherwise
+        # a later calibration step could undo a device's emergency shutdown.
+        if self.mode is ControlMode.CALIBRATION_ACTIVE and (
+            isinstance(command, EnterDeviceSafeState) or command.source is CommandSource.SAFETY_SYSTEM
+        ):
+            self._mode = ControlMode.IDLE
 
         try:
             self._authorize(command)
@@ -286,6 +322,13 @@ class RigControlService:
                 f"{type(command).__name__} is blocked because "
                 "the control service is fault-locked"
             )
+
+        if self.mode is ControlMode.CALIBRATION_ACTIVE:
+            if source is not CommandSource.CALIBRATION:
+                raise ControlAccessError("A flow calibration controls the rig")
+            return
+        if source is CommandSource.CALIBRATION:
+            raise ControlAccessError("Calibration control has ended")
 
         if self.mode is ControlMode.RECIPE_ACTIVE:
             if source is not CommandSource.RECIPE:

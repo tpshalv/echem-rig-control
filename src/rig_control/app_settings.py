@@ -61,6 +61,14 @@ def _history_limit(value: object) -> AppSettingValue:
     return value
 
 
+def _reconnect_attempts(value: object) -> AppSettingValue:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("must be an integer")
+    if value < 0 or value > 20:
+        raise ValueError("must be between 0 and 20")
+    return value
+
+
 def _non_empty_text(value: object) -> AppSettingValue:
     if not isinstance(value, str):
         raise TypeError("must be text")
@@ -246,6 +254,31 @@ SETTING_DEFINITIONS = (
         default=45.0,
         validator=_positive_number,
     ),
+    SettingDefinition(
+        key="device_reconnect_interval_minutes",
+        label="Automatic reconnect interval (minutes)",
+        description=(
+            "Wait after an Alicat flow meter or MFC faults during monitoring, "
+            "and between further attempts, before disconnecting and "
+            "connecting it again. Reconnecting only re-reads the instrument; "
+            "its setpoint is not changed."
+        ),
+        default=2.0,
+        validator=_positive_number,
+    ),
+    SettingDefinition(
+        key="device_reconnect_attempts",
+        label="Automatic reconnect attempts",
+        description=(
+            "How many times to try before leaving the device for a manual "
+            "reconnect. A successful reading resets the count. 0 turns "
+            "automatic reconnection off. Pumps, power supplies and other "
+            "devices whose disconnect applies a safe state are never "
+            "reconnected automatically."
+        ),
+        default=3,
+        validator=_reconnect_attempts,
+    ),
 )
 _DEFINITIONS_BY_KEY = {
     definition.key: definition for definition in SETTING_DEFINITIONS
@@ -348,6 +381,14 @@ class AppSettings:
     @property
     def power_supply_wiring_current_ceiling_amps(self) -> float:
         return float(self.values["power_supply_wiring_current_ceiling_amps"])
+
+    @property
+    def device_reconnect_interval_seconds(self) -> float:
+        return float(self.values["device_reconnect_interval_minutes"]) * 60.0
+
+    @property
+    def device_reconnect_attempts(self) -> int:
+        return int(self.values["device_reconnect_attempts"])
 
 
 def default_app_settings() -> AppSettings:

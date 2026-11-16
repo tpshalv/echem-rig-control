@@ -6,9 +6,11 @@ from dataclasses import dataclass
 from math import isclose
 import re
 
+from rig_control.cell_area import DENSITY_UNIT
 from rig_control.recipes import Assignment
 from rig_control.devices.power_supply import PowerSupplyOperatingMode
-from rig_control.recipes.model import power_supply_mode_of
+from rig_control.recipes.model import CURRENT_DENSITY_SETTING, POWER_SUPPLY_OUTPUT_SETTING, power_supply_mode_of
+from rig_control.recipes.plan import PlannedSet, plan
 from rig_control.rig_profile import DeviceCapability
 
 
@@ -24,11 +26,17 @@ class SettingSpec:
 
 ON_OFF = ("On", "Off")
 SETTINGS: dict[DeviceCapability, tuple[SettingSpec, ...]] = {
-    DeviceCapability.MASS_FLOW_CONTROLLER: (SettingSpec("flow", "Flow setpoint", "native unit"),),
+    # The setting states the unit, so a value can never be read in the wrong one.
+    DeviceCapability.MASS_FLOW_CONTROLLER: (
+        SettingSpec("flow_sccm", "Flow setpoint", "SCCM"),
+        SettingSpec("flow", "Flow setpoint (device's unit)", "native unit"),
+    ),
     DeviceCapability.BACK_PRESSURE_CONTROLLER: (SettingSpec("pressure", "Pressure setpoint", "bara"),),
     # The setting chosen states the supply mode; there is no separate mode.
     DeviceCapability.DC_POWER_SUPPLY: (
         SettingSpec("current_setpoint", "Current setpoint (CC)", "A"),
+        # Converted to amperes with the active area entered for the run.
+        SettingSpec(CURRENT_DENSITY_SETTING, "Current density setpoint (CC)", DENSITY_UNIT),
         SettingSpec("voltage_limit", "Voltage limit (CC)", "V"),
         SettingSpec("voltage", "Voltage setpoint (CV)", "V"),
         SettingSpec("current_limit", "Current limit (CV)", "A"),
@@ -338,6 +346,31 @@ class ValueDisplay:
         return f"{shown} {suffix}" if suffix else shown
 
 
+# --- Current density ------------------------------------------------------------------
+
+def _all_writes(recipe) -> list[Assignment]:
+    """Every value the recipe can write, ramps and the end state included."""
+    steps = [w for item in plan(recipe.steps) if isinstance(item, PlannedSet) for w in item.writes]
+    return steps + [a for d in recipe.end_state.devices for a in d.assignments]
+
+
+def recipe_turns_output_on(recipe) -> bool:
+    return any(w.setting == POWER_SUPPLY_OUTPUT_SETTING and w.value is True for w in _all_writes(recipe))
+
+
+def current_density_summary(recipe, area_cm2: float | None) -> str:
+    """The amperes a recipe's densities become, to check before a run; empty if it has none."""
+    densities = [float(w.value) for w in _all_writes(recipe) if w.setting == CURRENT_DENSITY_SETTING]
+    if not densities or area_cm2 is None:
+        return ""
+    low, high = min(densities), max(densities)
+    def amps(density: float) -> str:
+        return f"{_clean(density * area_cm2 / 1000.0):g}"
+    if low == high:
+        return f"Active area {area_cm2:g} cm²: {low:g} {DENSITY_UNIT} is {amps(low)} A."
+    return f"Active area {area_cm2:g} cm²: {low:g} to {high:g} {DENSITY_UNIT} is {amps(low)} to {amps(high)} A."
+
+
 # --- Ramps ------------------------------------------------------------------------------
 
 #: How a ramp is described in the editor, in the order offered.
@@ -447,7 +480,7 @@ def end_state_warnings(end, roles, has_safe_state=capability_has_safe_state) -> 
     by_capability = lambda capability: [r for r in roles if r.capability is capability]
     flowing = [r.friendly_name for r in by_capability(DeviceCapability.MASS_FLOW_CONTROLLER)
                if (d := end.for_device(r.device_id)).action is EndAction.LEAVE
-               or (d.action is EndAction.SET and any(a.setting == "flow" and a.value for a in d.assignments))]
+               or (d.action is EndAction.SET and any(a.setting in ("flow", "flow_sccm") and a.value for a in d.assignments))]
     closing = [r.friendly_name for r in by_capability(DeviceCapability.BACK_PRESSURE_CONTROLLER)
                if end.for_device(r.device_id).action is EndAction.SAFE]
     if flowing and closing:

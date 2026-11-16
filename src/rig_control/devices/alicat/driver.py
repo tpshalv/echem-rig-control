@@ -24,6 +24,9 @@ class AlicatMassFlowController(
 ):
     """Rig-facing adapter for one addressed Alicat MFC."""
 
+    # Disconnect only releases the shared bus; the setpoint stays on the unit.
+    passive_reconnect = True
+
     def __init__(
         self,
         configuration: AlicatMfcConfiguration,

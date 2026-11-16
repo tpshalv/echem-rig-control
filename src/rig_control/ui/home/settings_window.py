@@ -24,6 +24,10 @@ class SettingsWindow:
     _CATEGORIES: tuple[tuple[str, tuple[str, ...]], ...] = (
         ("General", ("publish_interval_seconds",)),
         (
+            "Device reconnection",
+            ("device_reconnect_interval_minutes", "device_reconnect_attempts"),
+        ),
+        (
             "File save locations",
             (
                 "default_output_directory",

@@ -1,4 +1,6 @@
 from rig_control.devices.pressure_controller import PressureController
+from rig_control.calibrated_channels import CURRENT_DENSITY_CHANNEL
+from rig_control.cell_area import CellArea, CellAreaMissing, DENSITY_UNIT
 from rig_control.display_units import DisplayUnits
 from array import array
 from bisect import bisect_left
@@ -23,6 +25,7 @@ from rig_control.data.annotations import (
     read_annotations,
     resolve_annotations,
 )
+from rig_control.data.electrolysers import ELECTROLYSER_METADATA_KEY, load_electrolyser, run_folder
 from rig_control.data.experiment import ExperimentMetadata
 from rig_control.data.experiment_naming import (
     existing_recording,
@@ -31,6 +34,7 @@ from rig_control.data.experiment_naming import (
 )
 from rig_control.devices.manager import DeviceManager
 from rig_control.experiment_recording import ExperimentRecorder
+from rig_control.flow.indicator import SOURCE as EXCESS_FLOW_SOURCE, STATE_EXCESS, STATE_EXCESS_AND_FE
 from rig_control.devices.atlas_ezo_hum.driver import AtlasEzoHum
 from rig_control.devices.linear_calibration import Calibration
 from rig_control.instrument_settings.calibration import (
@@ -378,7 +382,11 @@ class OperationViewModel:
         humidity_calibration_service: CalibrationService | None = None,
         display_units: DisplayUnits | None = None,
         recipe_runner: RecipeRunner | None = None,
+        leak_check=None,
+        excess_flow=None,
+        cell_area: CellArea | None = None,
     ) -> None:
+        self._cell_area = cell_area or CellArea()
         self._validate_history_limit(history_limit)
         self._validate_event_limit(event_limit)
         self._device_manager = device_manager
@@ -397,6 +405,8 @@ class OperationViewModel:
         self._profile_id = profile_id
         self._profile = profile
         self.recipe_runner = recipe_runner
+        self.leak_check = leak_check
+        self.excess_flow = excess_flow
         self._measurements: dict[
             tuple[str, str], LiveMeasurementRow
         ] = {}
@@ -418,6 +428,23 @@ class OperationViewModel:
     def display_units(self) -> DisplayUnits:
         """Units the screens show and accept, e.g. mA for recipe currents."""
         return self._display_units
+
+    @property
+    def cell_area(self) -> CellArea:
+        """The active area entered for this cell; shared with recipes and recording."""
+        return self._cell_area
+
+    def amps_for_density(self, density: float) -> float:
+        return self._cell_area.amps_for(density)
+
+    def active_area_forgotten(self, electrolyser_id: str) -> bool:
+        """No area, yet this looks like a real cell: one is named or a supply is on."""
+        if self._cell_area.cm2 is not None:
+            return False
+        return bool(electrolyser_id.strip()) or any(
+            isinstance(device, PowerSupply) and device.output_enabled is True
+            for device in map(self._device_manager.get, self._device_manager.device_ids)
+        )
 
     @property
     def is_monitoring(self) -> bool:
@@ -464,7 +491,10 @@ class OperationViewModel:
 
         rows: dict[tuple[str, str], OperationChannelRow] = {}
         for reading in self.measurement_rows():
-            device = self._device_manager.get(reading.device_id)
+            if reading.channel == CURRENT_DENSITY_CHANNEL and self._cell_area.cm2 is None:
+                continue  # The area was cleared; the last density no longer means anything.
+            device = (self._device_manager.get(reading.device_id)
+                      if reading.device_id in self._device_manager.device_ids else None)
             writable = (
                 isinstance(device, MassFlowController)
                 and reading.channel == "setpoint"
@@ -588,6 +618,20 @@ class OperationViewModel:
                     device.current_limit, "A", "good", None, device_system,
                     True, "number", 0.0, device.limits.maximum_current,
                 )
+                # The same setting as the row above, entered per area; the
+                # supply is still commanded in amperes through that row's path.
+                density = (None if device.current_limit is None
+                           else self._cell_area.density_for(device.current_limit))
+                has_area = self._cell_area.cm2 is not None
+                rows[(device_id, "current_density_setpoint")] = OperationChannelRow(
+                    device_id, device_name, "current_density_setpoint",
+                    current_limit_name.replace("Current", "Current density")
+                    + ("" if has_area else " (enter active area)"),
+                    None if density is None else round(density, 3), DENSITY_UNIT,
+                    "good" if has_area else "bad", None, device_system,
+                    has_area, "number", 0.0,
+                    self._cell_area.density_for(device.limits.maximum_current),
+                )
                 rows[(device_id, "output_enabled")] = OperationChannelRow(
                     device_id, device_name, "output_enabled", "Output",
                     device.output_enabled, "", "good", None, device_system,
@@ -698,13 +742,15 @@ class OperationViewModel:
     #: Channels this preference covers. Volumetric flow and the totaliser
     #: are different quantities with their own units and are left alone.
     _PRESSURE_CHANNELS = frozenset({"absolute_pressure", "pressure_setpoint_absolute"})
-    _FLOW_CHANNELS = frozenset({"mass_flow", "setpoint"})
+    _FLOW_CHANNELS = frozenset({"mass_flow", "setpoint", "excess_flow"})
 
     def _for_display(self, channel: str, value, unit: str):
         """Convert one reading into the unit this rig is set to show."""
 
         if value is None or not isinstance(value, (int, float)) or isinstance(value, bool):
             return value, unit
+        if channel == CURRENT_DENSITY_CHANNEL:
+            return value, DENSITY_UNIT
         if channel in self._PRESSURE_CHANNELS:
             return self._display_units.show_pressure(float(value), unit)
         if channel in self._FLOW_CHANNELS:
@@ -740,6 +786,12 @@ class OperationViewModel:
             result = self.manual_control.set_power_supply_voltage(device_id, float(value))
         elif channel == "current_limit":
             result = self.manual_control.set_power_supply_current(device_id, float(value))
+        elif channel == "current_density_setpoint":
+            try:
+                amps = self._cell_area.amps_for(float(value))
+            except CellAreaMissing as error:
+                return OperationActionResult(False, str(error))
+            result = self.manual_control.set_power_supply_current(device_id, amps)
         elif channel == "output_enabled":
             result = self.manual_control.set_power_supply_output(device_id, bool(value))
         elif channel == "operating_mode":
@@ -775,6 +827,8 @@ class OperationViewModel:
         )
 
     def _device_name(self, device_id: str) -> str:
+        if device_id == EXCESS_FLOW_SOURCE:
+            return "Excess flow / rough FE"
         if self._profile is None:
             return device_id
         try:
@@ -788,7 +842,10 @@ class OperationViewModel:
             return tuple((channel, self._labelled_channel_name(device_id, channel), "degC")
                          for channel in device.channels)
         if isinstance(device, PowerSupply):
-            return (("voltage", "Voltage", "V"), ("current", "Current draw", "A"))
+            return (("voltage", "Voltage", "V"), ("current", "Current draw", "A")) + (
+                () if self._cell_area.cm2 is None
+                else ((CURRENT_DENSITY_CHANNEL, "Current density", DENSITY_UNIT),)
+            )
         if isinstance(device, MassFlowController):
             return (("mass_flow", "Measured mass flow", device.limits.flow_unit),)
         if isinstance(device, OhausGuardian5000):
@@ -821,6 +878,8 @@ class OperationViewModel:
         return ()
 
     def _system_for_device(self, device_id: str) -> str:
+        if device_id == EXCESS_FLOW_SOURCE:
+            return "Gas flow"
         if self._profile is None:
             return "Other"
         try:
@@ -879,6 +938,10 @@ class OperationViewModel:
             "regulation_mode": "Actual regulation mode",
             "humidity_co2_corrected": "Humidity (CO2 corrected)",
             "flow_setpoint": "Flow setpoint (calibrated)",
+            "excess_flow": "Excess flow (leak-corrected)",
+            "h2_fe": "Rough H2 FE",
+            "co_fe": "Rough CO FE",
+            "indicator_state": "Excess flow state",
         }
         return names.get(channel, channel.replace("_", " ").capitalize())
 
@@ -958,12 +1021,23 @@ class OperationViewModel:
     def connect_all(self) -> tuple[OperationActionResult, ...]:
         results: list[OperationActionResult] = []
         for device_id in self._device_manager.device_ids:
-            if self._device_manager.get(device_id).status is not DeviceStatus.DISCONNECTED:
+            device = self._device_manager.get(device_id)
+            status = device.status
+            if status is DeviceStatus.FAULTED and not device.passive_reconnect:
+                results.append(OperationActionResult(False, (
+                    f"{device_id!r} is faulted. Disconnect and connect it from "
+                    "Diagnostics; disconnecting applies its safe state.")))
+                continue
+            if status not in (DeviceStatus.DISCONNECTED, DeviceStatus.FAULTED):
                 # Pressing Connect again must not re-open ports already in use.
                 results.append(OperationActionResult(True, f"{device_id!r} is already connected."))
                 continue
             try:
-                self._device_manager.connect(device_id)
+                if status is DeviceStatus.FAULTED:
+                    # A faulted driver refuses use until it is cycled.
+                    self._device_manager.reconnect(device_id)
+                else:
+                    self._device_manager.connect(device_id)
             except Exception as error:
                 results.append(
                     OperationActionResult(
@@ -1007,6 +1081,8 @@ class OperationViewModel:
         return OperationActionResult(True, "Background monitoring started.")
 
     def stop_monitoring(self) -> OperationActionResult:
+        if self.leak_check is not None and self.leak_check.is_running:
+            return OperationActionResult(False, "Stop the leak check before stopping monitoring.")
         if self.is_recording:
             return OperationActionResult(
                 False,
@@ -1101,6 +1177,53 @@ class OperationViewModel:
             return {}
         return {"calibrations_json": json.dumps(calibrations, ensure_ascii=False)}
 
+    def plan_recording(
+        self,
+        *,
+        operator: str,
+        output_directory: str | Path,
+        started_at: datetime,
+        description: str = "",
+        electrolyser_id: str | None = None,
+        notes: str | None = None,
+        experiment_id: str | None = None,
+        experiment_type: str = "manual",
+        extra: dict[str, str] | None = None,
+    ) -> tuple[Path, ExperimentMetadata]:
+        """Where a run is saved and what it records, for manual and recipe runs alike.
+
+        The run is named ``INITIALS_date_time_description`` (an explicit
+        ``experiment_id`` skips naming) and filed in its electrolyser's
+        folder, whose build details are copied into the run as they are now.
+        Raises ``ValueError`` for missing initials or output folder.
+        """
+        if not str(output_directory).strip():
+            raise ValueError("Choose an experiment output folder before recording.")
+        electrolyser_id = (electrolyser_id or "").strip() or None
+        experiment_id = experiment_id or make_experiment_id(operator, started_at, description)
+        root = run_folder(output_directory, electrolyser_id)
+        build = load_electrolyser(root) if electrolyser_id else None
+        metadata = ExperimentMetadata(
+            experiment_id=experiment_id,
+            operator=operator,
+            started_at=started_at,
+            experiment_type=experiment_type,
+            notes=notes or None,
+            electrolyser_id=electrolyser_id,
+            extra={
+                "rig_profile_id": self._profile_id,
+                **({"channel_labels_json": json.dumps({
+                    role.device_id: dict(role.channel_labels)
+                    for role in self._profile.enabled_roles if role.channel_labels
+                }, ensure_ascii=False)} if self._profile is not None else {}),
+                **self._calibration_metadata(),
+                **({ELECTROLYSER_METADATA_KEY: json.dumps(build.to_dict(), ensure_ascii=False)}
+                   if build is not None else {}),
+                **(extra or {}),
+            },
+        )
+        return root, metadata
+
     def start_recording(
         self,
         *,
@@ -1113,12 +1236,11 @@ class OperationViewModel:
         replace_existing: bool = False,
         experiment_id: str | None = None,
     ) -> OperationActionResult:
-        """Start recording under ``INITIALS_date_time_description``.
+        """Start a manual recording, named and filed by ``plan_recording``.
 
         ``started_at`` lets the screen fix the time it previewed and checked
         for a clash. ``replace_existing`` deletes a previous recording of the
-        same name, which the screen only passes after asking. An explicit
-        ``experiment_id`` skips naming altogether.
+        same name, which the screen only passes after asking.
         """
         if not self.is_monitoring:
             return OperationActionResult(
@@ -1131,36 +1253,28 @@ class OperationViewModel:
                 "Choose an experiment output folder before recording.",
             )
         try:
-            started_at = started_at or datetime.now(UTC)
-            if experiment_id is None:
-                experiment_id = make_experiment_id(operator, started_at, description)
-            existing = existing_recording(output_directory, experiment_id)
+            root, metadata = self.plan_recording(
+                operator=operator,
+                output_directory=output_directory,
+                started_at=started_at or datetime.now(UTC),
+                description=description,
+                electrolyser_id=electrolyser_id,
+                notes=notes,
+                experiment_id=experiment_id,
+            )
+            experiment_id = metadata.experiment_id
+            existing = existing_recording(root, experiment_id)
             if existing is not None:
                 if not replace_existing:
                     return OperationActionResult(
                         False,
                         f"A recording named {experiment_id!r} already exists "
-                        f"in {output_directory}.",
+                        f"in {root}.",
                     )
                 remove_recording(existing)
-            metadata = ExperimentMetadata(
-                experiment_id=experiment_id,
-                operator=operator,
-                started_at=started_at,
-                notes=notes or None,
-                electrolyser_id=(electrolyser_id or "").strip() or None,
-                extra={
-                    "rig_profile_id": self._profile_id,
-                    **({"channel_labels_json": json.dumps({
-                        role.device_id: dict(role.channel_labels)
-                        for role in self._profile.enabled_roles if role.channel_labels
-                    }, ensure_ascii=False)} if self._profile is not None else {}),
-                    **self._calibration_metadata(),
-                },
-            )
             self._experiment_recorder.start(
                 metadata=metadata,
-                root_directory=output_directory,
+                root_directory=root,
             )
         except Exception as error:
             return self._failure("start experiment recording", error)
@@ -1386,6 +1500,14 @@ class OperationViewModel:
                         if key in self._measurements:
                             self._measurements[key] = replace(
                                 self._measurements[key], quality=Quality.STALE.value)
+                # A derived value that stopped being calculated must not look live.
+                if record.device_id == EXCESS_FLOW_SOURCE and record.channel == "indicator_state":
+                    stale = ("h2_fe", "co_fe") if record.measurement.value < STATE_EXCESS_AND_FE else ()
+                    stale += ("excess_flow",) if record.measurement.value < STATE_EXCESS else ()
+                    for channel in stale:
+                        key = (EXCESS_FLOW_SOURCE, channel)
+                        if key in self._measurements:
+                            self._measurements[key] = replace(self._measurements[key], quality=Quality.STALE.value)
 
             for device_id in successful_ids:
                 self._warnings.pop(device_id, None)
@@ -1414,6 +1536,11 @@ class OperationViewModel:
         """
 
         failures: list[str] = []
+        if self.leak_check is not None and self.leak_check.is_running:
+            self.leak_check.stop()
+            if not self.leak_check.join(10.0):
+                self.leak_check.control.enter_global_safe_state()
+                failures.append("Leak check did not stop; safe state requested.")
         if self.recipe_runner is not None and self.recipe_runner.is_running:
             self.recipe_runner.stop()
             if self.recipe_runner.join(10.0) is None:

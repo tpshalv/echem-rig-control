@@ -176,7 +176,7 @@ def test_excel_overview_lists_each_active_calibration_with_its_notes(tmp_path):
     finally:
         model.shutdown()
 
-    workbook = load_workbook(tmp_path / "runs" / "EXP-1" / "EXP-1.xlsx", read_only=True)
+    workbook = load_workbook(tmp_path / "runs" / "No-electrolyser" / "EXP-1" / "EXP-1.xlsx", read_only=True)
     try:
         overview = {row[0]: row[1] for row in workbook["Overview"].values if len(row) > 1}
     finally:

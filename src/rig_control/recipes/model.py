@@ -229,6 +229,11 @@ class SetStep:
         for key in keys:
             if keys.count(key) > 1:
                 raise ValueError(f"{key[0]}.{key[1]} is set twice in one step")
+        for device_id, setting in keys:
+            for pair in _SAME_TARGET_SETTINGS:
+                if setting == pair[0] and (device_id, pair[1]) in keys:
+                    raise ValueError(f"{device_id} has both {pair[0]} and {pair[1]} in one step; "
+                                     "they set the same thing, so use one")
 
     @classmethod
     def one(cls, device_id: str, setting: str, value: RecipeValue, unit: str = "", name: str = "") -> "SetStep":
@@ -429,9 +434,14 @@ POWER_SUPPLY_MODE_SETTINGS: dict[PowerSupplyOperatingMode, tuple[str, str]] = {
     PowerSupplyOperatingMode.CONSTANT_VOLTAGE: ("voltage", "current_limit"),
 }
 POWER_SUPPLY_OUTPUT_SETTING = "output_enabled"
+#: The CC setpoint stated per area; it writes the same register as current_setpoint.
+CURRENT_DENSITY_SETTING = "current_density_setpoint"
+_SAME_TARGET_SETTINGS = (("current_setpoint", CURRENT_DENSITY_SETTING), ("flow", "flow_sccm"))
 
 
 def power_supply_mode_of(setting: str) -> PowerSupplyOperatingMode | None:
+    if setting == CURRENT_DENSITY_SETTING:
+        return PowerSupplyOperatingMode.CONSTANT_CURRENT
     for mode, names in POWER_SUPPLY_MODE_SETTINGS.items():
         if setting in names:
             return mode

@@ -127,3 +127,16 @@ def test_recipe_currents_show_in_milliamps_by_default() -> None:
     with pytest.raises(ValueError, match="display current unit"):
         AppSettings(settings.settings_id, settings.friendly_name,
                     {**settings.values, "display_current_unit": "uA"})
+
+
+def test_device_reconnect_settings_default_and_validate() -> None:
+    settings = default_app_settings()
+    assert settings.device_reconnect_interval_seconds == 120.0
+    assert settings.device_reconnect_attempts == 3
+
+    assert parse_setting_text("device_reconnect_attempts", "0") == 0
+    assert parse_setting_text("device_reconnect_interval_minutes", "5") == 5.0
+    with pytest.raises(ValueError):
+        parse_setting_text("device_reconnect_attempts", "21")
+    with pytest.raises(ValueError):
+        parse_setting_text("device_reconnect_interval_minutes", "0")

@@ -189,6 +189,11 @@ class HomeWindow:
                 default_voltage_volts=session.settings.power_supply_default_voltage_volts,
             ),
             recipe_runner=session.recipe_runner,
+            pump_calibration_service=session.calibrated_channels.pumps,
+            humidity_calibration_service=session.calibrated_channels.humidity,
+            leak_check=session.leak_check,
+            excess_flow=session.excess_flow,
+            cell_area=session.cell_area,
         )
         window = OperationWindow(
             child,

@@ -3,6 +3,7 @@ from datetime import datetime
 from pathlib import Path
 from dataclasses import replace
 from threading import Condition, Lock, RLock
+from contextlib import nullcontext
 
 from rig_control.data.annotations import AnnotationRecord
 from rig_control.data.directory_writer import DirectoryExperimentWriter
@@ -23,9 +24,11 @@ class ExperimentRecorder:
         *,
         writer_factory: WriterFactory = DirectoryExperimentWriter,
         context_provider: Callable[[], dict[str, str]] | None = None,
+        start_guard=None,
     ) -> None:
         self._writer_factory = writer_factory
         self._context_provider = context_provider
+        self._start_guard = start_guard or nullcontext
         self._lock = RLock()
         self._export_lock = Lock()
         self._finalised = Condition(self._lock)
@@ -62,6 +65,10 @@ class ExperimentRecorder:
         metadata: ExperimentMetadata,
         root_directory: str | Path,
     ) -> None:
+        with self._start_guard():
+            self._start(metadata=metadata, root_directory=root_directory)
+
+    def _start(self, *, metadata: ExperimentMetadata, root_directory: str | Path) -> None:
         """Create and open a new experiment recording."""
 
         # Capture outside the recorder lock: device operations can themselves

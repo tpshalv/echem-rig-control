@@ -9,6 +9,7 @@ class CommandSource(StrEnum):
     MANUAL = "manual"
     DIAGNOSTIC = "diagnostic"
     RECIPE = "recipe"
+    CALIBRATION = "calibration"
     SAFETY_SYSTEM = "safety_system"
 
 

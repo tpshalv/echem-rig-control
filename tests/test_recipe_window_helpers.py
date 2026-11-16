@@ -71,7 +71,7 @@ def test_pass_names_are_comma_separated_or_none():
 def test_supply_card_lists_one_mode_with_output_last():
     cc = [spec.name for spec in device_settings(DeviceCapability.DC_POWER_SUPPLY, CC)]
     cv = [spec.name for spec in device_settings(DeviceCapability.DC_POWER_SUPPLY, CV)]
-    assert cc == ["current_setpoint", "voltage_limit", "output_enabled"]
+    assert cc == ["current_setpoint", "current_density_setpoint", "voltage_limit", "output_enabled"]
     assert cv == ["voltage", "current_limit", "output_enabled"]
     assert [s.name for s in device_settings(DeviceCapability.HOTPLATE_STIRRER)] == [
         "hotplate_temperature", "hotplate_speed", "hotplate_heating", "hotplate_stirring"]
@@ -166,7 +166,7 @@ def test_end_state_default_summary_and_warnings():
     risky = EndState((EndDevice("mfc", EndAction.SET, (Assignment("mfc", "flow", 20),)),
                       EndDevice("psu", EndAction.LEAVE)))
     assert end_state_summary(risky, roles, ValueDisplay()) == [
-        "Left as it is: Keithley", "CO2 MFC: Flow setpoint 20", "Everything else: off (safe state)"]
+        "Left as it is: Keithley", "CO2 MFC: Flow setpoint (device's unit) 20", "Everything else: off (safe state)"]
     warnings = end_state_warnings(risky, roles)
     assert "can pressurise" in warnings[0] and "output stays on" in warnings[1]
 

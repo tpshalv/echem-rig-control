@@ -12,7 +12,7 @@ from rig_control.devices.measurement_source import (
 from rig_control.devices.power_supply import PowerSupplyLimits
 from rig_control.devices.simulated_power_supply import SimulatedPowerSupply
 from rig_control.devices.simulated_sensor import SimulatedSensor
-from rig_control.models import EventSeverity, Measurement
+from rig_control.models import DeviceStatus, EventSeverity, Measurement
 from rig_control.polling import PollingService
 
 
@@ -468,3 +468,150 @@ def test_non_device_measurement_source_is_not_a_registered_device() -> None:
 
     with pytest.raises(TypeError, match="Device interface"):
         manager.register(NonDeviceMeasurementSource())  # type: ignore[arg-type]
+
+
+class LatchingSensor(SimulatedSensor):
+    """Faults on a failed read and refuses use until reconnected, like Alicat."""
+
+    passive_reconnect = True
+
+    def __init__(self, device_id: str) -> None:
+        super().__init__(device_id, 3.0, "V")
+        self.read_fails = False
+        self.connect_fails = False
+        self.connect_count = 0
+
+    def connect(self) -> None:
+        self.connect_count += 1
+        if self.connect_fails:
+            self._status = DeviceStatus.FAULTED
+            raise OSError("simulated port missing")
+        super().connect()
+
+    def read_measurement(self) -> Measurement:
+        if self.status is DeviceStatus.READY and self.read_fails:
+            self._status = DeviceStatus.FAULTED
+            raise TimeoutError("simulated serial timeout")
+        return super().read_measurement()
+
+
+def _run_until(service: PollingService, condition, timeout: float = 2.0) -> None:
+    service.start()
+    deadline = monotonic() + timeout
+    try:
+        while not condition() and monotonic() < deadline:
+            Event().wait(0.005)
+    finally:
+        service.stop(timeout=1.0)
+
+
+def _messages(sink: list) -> list[str]:
+    return [event.message for event, _details in sink]
+
+
+def test_faulted_passive_device_is_reconnected_automatically() -> None:
+    sink: list = []
+    manager = DeviceManager()
+    sensor = LatchingSensor("meter")
+    sensor.connect()
+    sensor.read_fails = True
+    manager.register(sensor)
+    service = PollingService(
+        manager,
+        interval_seconds=0.01,
+        reconnect_delay_seconds=0.05,
+        event_sink=lambda event, details: sink.append((event, details)),
+    )
+
+    def glitch_clears() -> bool:
+        if sensor.status is DeviceStatus.FAULTED:
+            sensor.read_fails = False
+        return any("recovered" in message for message in _messages(sink))
+
+    _run_until(service, glitch_clears)
+
+    messages = _messages(sink)
+    assert sensor.status is DeviceStatus.READY
+    assert sensor.connect_count == 2
+    assert any("reconnect automatically in 0.05 s" in m for m in messages)
+    assert any("reconnected automatically on attempt 1 of 3" in m for m in messages)
+
+
+def test_automatic_reconnection_gives_up_after_configured_attempts() -> None:
+    sink: list = []
+    manager = DeviceManager()
+    sensor = LatchingSensor("meter")
+    sensor.connect()
+    sensor.read_fails = True
+    sensor.connect_fails = True
+    manager.register(sensor)
+    service = PollingService(
+        manager,
+        interval_seconds=0.01,
+        reconnect_delay_seconds=0.02,
+        reconnect_attempts=2,
+        event_sink=lambda event, details: sink.append((event, details)),
+    )
+
+    _run_until(
+        service,
+        lambda: any("Giving up" in m for m in _messages(sink)),
+    )
+    # Further polling must not start another round of attempts.
+    Event().wait(0.1)
+
+    messages = _messages(sink)
+    assert sensor.connect_count == 1 + 2
+    assert any("attempt 1 of 2 failed" in m and "Retrying" in m for m in messages)
+    assert any("attempt 2 of 2 failed" in m and "Giving up" in m for m in messages)
+
+
+def test_device_without_passive_reconnect_is_left_faulted() -> None:
+    manager = DeviceManager()
+    sensor = LatchingSensor("pump_like")
+    sensor.passive_reconnect = False
+    sensor.connect()
+    sensor.read_fails = True
+    manager.register(sensor)
+    service = PollingService(
+        manager,
+        interval_seconds=0.01,
+        reconnect_delay_seconds=0.01,
+    )
+
+    _run_until(service, lambda: False, timeout=0.15)
+
+    assert sensor.status is DeviceStatus.FAULTED
+    assert sensor.connect_count == 1
+
+
+def test_operator_disconnect_is_not_overridden_by_reconnection() -> None:
+    manager = DeviceManager()
+    sensor = LatchingSensor("meter")
+    sensor.connect()
+    sensor.read_fails = True
+    manager.register(sensor)
+    service = PollingService(
+        manager,
+        interval_seconds=0.01,
+        reconnect_delay_seconds=0.05,
+    )
+
+    def operator_disconnects() -> bool:
+        if sensor.status is DeviceStatus.FAULTED:
+            sensor.read_fails = False
+            manager.disconnect("meter")
+        return False
+
+    _run_until(service, operator_disconnects, timeout=0.2)
+
+    assert sensor.status is DeviceStatus.DISCONNECTED
+    assert sensor.connect_count == 1
+
+
+def test_invalid_reconnect_configuration_is_rejected() -> None:
+    manager = DeviceManager()
+    with pytest.raises(ValueError):
+        PollingService(manager, reconnect_delay_seconds=0)
+    with pytest.raises(ValueError):
+        PollingService(manager, reconnect_attempts=-1)

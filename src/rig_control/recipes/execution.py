@@ -1,6 +1,6 @@
 """Background recipe execution using the shared control service."""
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 import json
@@ -8,6 +8,7 @@ from pathlib import Path
 from threading import Event as ThreadEvent, Lock, Thread
 from time import monotonic, sleep
 
+from rig_control.cell_area import CellArea, CellAreaMissing
 from rig_control.control.commands import (
     CommandSource, EnterDeviceSafeState, SetControllerOutput, SetHotplateHeating, SetHotplateSpeed,
     SetHotplateStirring, SetHotplateTemperature, SetMfcFlow, SetPowerSupplyCurrentLimit,
@@ -16,9 +17,9 @@ from rig_control.control.commands import (
 )
 from rig_control.control.service import RigControlService
 from rig_control.data.experiment import ExperimentMetadata
-from rig_control.data.experiment_naming import make_experiment_id
+from rig_control.data.experiment_naming import existing_recording, make_experiment_id, remove_recording
 from rig_control.devices.manager import DeviceManager
-from rig_control.devices.mass_flow_controller import MassFlowController
+from rig_control.devices.mass_flow_controller import MassFlowController, convert_mass_flow
 from rig_control.devices.power_supply import PowerSupply, PowerSupplyOperatingMode
 from rig_control.devices.pressure_controller import PressureController
 from rig_control.devices.pump import Pump
@@ -31,7 +32,7 @@ from rig_control.instrument_settings.calibration import CalibrationService, Pump
 from rig_control.models import Event, EventSeverity
 from rig_control.devices.safe_state import SafeStateCapable
 from rig_control.recipes.model import (
-    EndAction, Assignment, LoopStep, Recipe, RepeatStep, WaitStep, iter_steps, power_supply_mode_of, recipe_to_dict,
+    CURRENT_DENSITY_SETTING, EndAction, Assignment, LoopStep, Recipe, RepeatStep, WaitStep, iter_steps, power_supply_mode_of, recipe_to_dict,
 )
 from rig_control.recipes.plan import PlannedRamp, PlannedSet, PlannedWait, plan, recipe_problems
 from rig_control.recipes.preview import estimate_recipe
@@ -72,15 +73,18 @@ class RecipeRunner:
     def __init__(self, control_service: RigControlService, device_manager: DeviceManager, *,
                  recorder: ExperimentRecorder | None = None, event_sink: Callable[[Event], None] | None = None,
                  sleeper: Callable[[float], None] = sleep, clock: Callable[[], float] = monotonic,
-                 pump_calibrations: CalibrationService | None = None) -> None:
+                 pump_calibrations: CalibrationService | None = None, cell_area: CellArea | None = None) -> None:
         self._control = control_service; self._devices = device_manager; self._recorder = recorder
         self._pump_calibrations = pump_calibrations or PumpCalibrationService()
+        self._cell_area = cell_area or CellArea()
         self._event_sink = event_sink; self._sleeper = sleeper; self._clock = clock
         self._cancel = ThreadEvent(); self._lock = Lock(); self._thread: Thread | None = None
         self._status = RecipeRunStatus(RecipeRunState.IDLE); self._result: RecipeRunResult | None = None
         self._started_at = 0.0; self._estimated_seconds = 0.0
         self._supply_modes: dict[str, PowerSupplyOperatingMode] = {}
 
+    @property
+    def cell_area(self) -> CellArea: return self._cell_area
     @property
     def is_running(self) -> bool: return self.status.state is RecipeRunState.RUNNING
     @property
@@ -121,23 +125,35 @@ class RecipeRunner:
                 device = self._devices.get(write.device_id)
                 self._command(write)
                 self._validate_capability_and_limits(device, write)
+            except CellAreaMissing as error:
+                raise RecipeValidationError(str(error)) from error
             except Exception as error:
                 raise RecipeValidationError(f"Invalid {write.device_id}.{write.setting}: {error}") from error
 
     def start(self, recipe: Recipe, *, recording_root: str | Path | None = None,
-              experiment_id: str | None = None, operator: str = "recipe", notes: str | None = None,
-              electrolyser_id: str | None = None) -> None:
+              metadata: ExperimentMetadata | None = None, replace_existing: bool = False) -> None:
+        """Run in the background, recording into ``recording_root``.
+
+        ``metadata`` comes from Operation's ``plan_recording``, so a recipe run
+        is named and filed exactly like a manual one; the recipe itself is
+        added to it. Without it (scripts, tests) the operator is "recipe".
+        ``replace_existing`` deletes a same-named recording, only once every
+        check has passed.
+        """
         self.validate(recipe)
         with self._lock:
             if self._thread is not None and self._thread.is_alive(): raise RuntimeError("A recipe is already running")
             if self._control.mode.value != "idle":
                 raise RuntimeError("Recipe control is unavailable while another control mode is active")
             if self._recorder is not None and self._recorder.is_recording: raise RuntimeError("An experiment is already being recorded; recipe will not replace it")
+            if replace_existing and metadata is not None and recording_root is not None:
+                existing = existing_recording(recording_root, metadata.experiment_id)
+                if existing is not None: remove_recording(existing)
             self._cancel.clear(); self._result = None; self._supply_modes = {}
             estimate = estimate_recipe(recipe)
             self._started_at = self._clock(); self._estimated_seconds = estimate.duration_seconds
             self._status = RecipeRunStatus(RecipeRunState.RUNNING, estimated_remaining_seconds=estimate.duration_seconds)
-            self._thread = Thread(target=self._run, args=(recipe, recording_root, experiment_id, operator, notes, electrolyser_id),
+            self._thread = Thread(target=self._run, args=(recipe, recording_root, metadata),
                                   name="recipe-runner", daemon=True)
             self._thread.start()
 
@@ -147,18 +163,16 @@ class RecipeRunner:
         if thread is not None: thread.join(timeout)
         return self.result
 
-    def _run(self, recipe: Recipe, root: str | Path | None, experiment_id: str | None, operator: str, notes: str | None,
-             electrolyser_id: str | None = None) -> None:
+    def _run(self, recipe: Recipe, root: str | Path | None, metadata: ExperimentMetadata | None) -> None:
         started_recording = False; safe_failures: tuple[str, ...] = (); failure: str | None = None; state = RecipeRunState.COMPLETED; started = self._clock()
         try:
             if self._recorder is not None:
                 if root is None: raise RuntimeError("Recipe recording needs an output folder")
+                if metadata is None:
+                    metadata = ExperimentMetadata(make_experiment_id("recipe", datetime.now(UTC)), "recipe")
                 extra = {"recipe_snapshot_json": json.dumps(recipe_to_dict(recipe), sort_keys=True), "recipe_name": recipe.name}
-                recording_started = datetime.now(UTC)
-                experiment_id = experiment_id or make_experiment_id(operator, recording_started, recipe.name)
-                self._recorder.start(metadata=ExperimentMetadata(experiment_id=experiment_id, operator=operator, notes=notes,
-                    started_at=recording_started, electrolyser_id=electrolyser_id or None,
-                    experiment_type="recipe", extra=extra), root_directory=root)
+                self._recorder.start(metadata=replace(metadata, experiment_type="recipe",
+                                                      extra={**metadata.extra, **extra}), root_directory=root)
                 started_recording = True
             self._control.begin_recipe_control()
             self._emit("recipe_started", recipe.name)
@@ -223,7 +237,10 @@ class RecipeRunner:
         self._control.execute(command)
         # A flow is sent as rpm; record which rpm and calibration it became.
         extra = ({"rpm": command.rpm, "calibration": self._pump_calibration(step.device_id).name}
-                 if step.setting == "pump_flow" else {})
+                 if step.setting == "pump_flow" else
+                 # Likewise a density is sent as amperes.
+                 {"amps": command.current, "area_cm2": self._cell_area.cm2}
+                 if step.setting == CURRENT_DENSITY_SETTING else {})
         self._emit("recipe_command", f"{step.device_id}.{step.setting}={step.value}", **extra)
 
     def _pump_calibration(self, device_id: str):
@@ -247,11 +264,14 @@ class RecipeRunner:
     def _command(self, p: Assignment):
         source = CommandSource.RECIPE; setting = p.setting; value = p.value
         if setting == "flow": return SetMfcFlow(p.device_id, float(value), source, p.unit)
+        if setting == "flow_sccm": return SetMfcFlow(p.device_id, float(value), source, "SCCM")
         if setting == "pressure": return SetPressureSetpoint(p.device_id, float(value), source, p.unit or "bara")
         if setting == "voltage": return SetPowerSupplyVoltage(p.device_id, float(value), source)
         if setting == "current_limit": return SetPowerSupplyCurrentLimit(p.device_id, float(value), source)
         # CC names drive the same two registers as CV, with the roles swapped.
         if setting == "current_setpoint": return SetPowerSupplyCurrentLimit(p.device_id, float(value), source)
+        if setting == CURRENT_DENSITY_SETTING:
+            return SetPowerSupplyCurrentLimit(p.device_id, self._cell_area.amps_for(float(value)), source)
         if setting == "voltage_limit": return SetPowerSupplyVoltage(p.device_id, float(value), source)
         if setting == "output_enabled": return SetPowerSupplyOutput(p.device_id, bool(value), source)
         if setting == "temperature_setpoint": return SetTemperatureSetpoint(p.device_id, float(value), source)
@@ -265,13 +285,12 @@ class RecipeRunner:
         if setting == "hotplate_stirring": return SetHotplateStirring(p.device_id, bool(value), source)
         if setting.startswith("controller_output:"): return SetControllerOutput(p.device_id, setting.split(":", 1)[1], bool(value), source)
         raise ValueError("Unsupported recipe setting; use an explicit supported setting")
-    @staticmethod
-    def _validate_capability_and_limits(device: object, step: Assignment) -> None:
+    def _validate_capability_and_limits(self, device: object, step: Assignment) -> None:
         setting = step.setting
         required = {
-            "flow": MassFlowController, "pressure": PressureController,
+            "flow": MassFlowController, "flow_sccm": MassFlowController, "pressure": PressureController,
             "voltage": PowerSupply, "current_limit": PowerSupply, "output_enabled": PowerSupply,
-            "current_setpoint": PowerSupply, "voltage_limit": PowerSupply,
+            "current_setpoint": PowerSupply, CURRENT_DENSITY_SETTING: PowerSupply, "voltage_limit": PowerSupply,
             "temperature_setpoint": LumelRe72, "pump_speed": Pump, "pump_flow": Pump, "pump_direction": Pump,
             "pump_running": Pump, "hotplate_temperature": OhausGuardian5000,
             "hotplate_speed": OhausGuardian5000, "hotplate_heating": OhausGuardian5000,
@@ -283,11 +302,18 @@ class RecipeRunner:
             raise ValueError(f"Setting {setting!r} requires {name}")
         value = step.value
         limits = getattr(device, "limits", None)
-        maximums = {"flow": "maximum_flow", "voltage": "maximum_voltage", "current_limit": "maximum_current",
-                    "voltage_limit": "maximum_voltage", "current_setpoint": "maximum_current"}
+        maximums = {"flow": "maximum_flow", "flow_sccm": "maximum_flow", "voltage": "maximum_voltage",
+                    "current_limit": "maximum_current", "voltage_limit": "maximum_voltage",
+                    "current_setpoint": "maximum_current", CURRENT_DENSITY_SETTING: "maximum_current"}
         maximum = getattr(limits, maximums.get(setting, ""), None)
-        if maximum is not None and isinstance(value, (int, float)) and float(value) > maximum:
-            raise ValueError(f"{setting} {value:g} exceeds configured maximum {maximum:g}")
+        if maximum is None or not isinstance(value, (int, float)):
+            return
+        # The maximum is in the device's own unit, not the setting's.
+        actual = (self._cell_area.amps_for(float(value)) if setting == CURRENT_DENSITY_SETTING
+                  else convert_mass_flow(float(value), "SCCM", limits.flow_unit) if setting == "flow_sccm"
+                  else float(value))
+        if actual > maximum:
+            raise ValueError(f"{setting} {value:g} ({actual:g} in the device's unit) exceeds configured maximum {maximum:g}")
     def _check_cancel(self) -> None:
         if self._cancel.is_set(): raise _Cancelled()
     def _set_status(self, label: str, position: tuple[str, ...]) -> None:

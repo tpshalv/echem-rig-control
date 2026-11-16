@@ -11,7 +11,7 @@ from rig_control.data.records import MeasurementRecord
 from rig_control.devices.manager import DeviceManager
 from rig_control.devices.measurement_source import DeviceMeasurement, MeasurementSource
 from rig_control.devices.power_supply import PowerSupply
-from rig_control.models import Event, EventSeverity, EventSink
+from rig_control.models import DeviceStatus, Event, EventSeverity, EventSink
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +40,15 @@ class _CompletedRead:
     device_id: str
     started_at: float
     future: Future[tuple[MeasurementRecord, ...]]
+    reconnect_attempt: bool = False
+
+
+@dataclass(slots=True)
+class _ReconnectState:
+    """Automatic reconnection progress for one FAULTED device."""
+
+    attempts_made: int
+    next_attempt_at: float
 
 
 class PollingService:
@@ -59,6 +68,9 @@ class PollingService:
         derived_readings: Callable[
             [object, tuple[DeviceMeasurement, ...]], tuple[DeviceMeasurement, ...]
         ] | None = None,
+        batch_transform: Callable[[PollingBatch], PollingBatch] | None = None,
+        reconnect_delay_seconds: float = 120.0,
+        reconnect_attempts: int = 3,
     ) -> None:
         self._default_device_interval = self._validate_interval(
             interval_seconds,
@@ -82,6 +94,17 @@ class PollingService:
             or results_queue_capacity <= 0
         ):
             raise ValueError("Polling results queue capacity must be positive")
+        self._reconnect_delay = self._validate_interval(
+            reconnect_delay_seconds,
+            "Automatic reconnect delay",
+        )
+        if (
+            isinstance(reconnect_attempts, bool)
+            or not isinstance(reconnect_attempts, int)
+            or reconnect_attempts < 0
+        ):
+            raise ValueError("Automatic reconnect attempts cannot be negative")
+        self._reconnect_attempts = reconnect_attempts
 
         self._device_manager = device_manager
         self._source_ids = tuple(
@@ -114,6 +137,7 @@ class PollingService:
         self._batch_handler = batch_handler
         self._event_sink = event_sink
         self._derived_readings = derived_readings
+        self._batch_transform = batch_transform
         self._results: Queue[PollingBatch] = Queue(
             maxsize=results_queue_capacity
         )
@@ -126,6 +150,7 @@ class PollingService:
         self._lifecycle_lock = Lock()
         self._thread: Thread | None = None
         self._failed_device_ids: set[str] = set()
+        self._reconnects: dict[str, _ReconnectState] = {}
         self._batch_handler_failed = False
         self._event_sink_failed = False
 
@@ -151,6 +176,7 @@ class PollingService:
             "results_overflow_active": self._results_overflow_active,
             "completed_reads_queue_size": self._completed_reads.qsize(),
             "failed_device_count": len(self._failed_device_ids),
+            "reconnecting_device_count": len(self._reconnects),
             "worker_count": self._worker_count,
             "source_count": len(self._source_ids),
         }
@@ -165,6 +191,7 @@ class PollingService:
             self._wake_scheduler.clear()
             self._clear_queue(self._completed_reads)
             self._failed_device_ids.clear()
+            self._reconnects.clear()
             self._batch_handler_failed = False
             self._event_sink_failed = False
             self._thread = Thread(
@@ -232,15 +259,29 @@ class PollingService:
                     if device_id in in_flight or now < next_due[device_id]:
                         continue
                     started_at = now
-                    future = executor.submit(self._read_device, device_id)
+                    reconnect = self._reconnects.get(device_id)
+                    reconnect_due = (
+                        reconnect is not None
+                        and now >= reconnect.next_attempt_at
+                    )
+                    if reconnect_due:
+                        reconnect.attempts_made += 1
+                        future = executor.submit(
+                            self._reconnect_and_read,
+                            device_id,
+                        )
+                    else:
+                        future = executor.submit(self._read_device, device_id)
                     in_flight.add(device_id)
                     future.add_done_callback(
                         lambda completed,
                         selected_id=device_id,
-                        selected_start=started_at: self._read_completed(
+                        selected_start=started_at,
+                        selected_reconnect=reconnect_due: self._read_completed(
                             selected_id,
                             selected_start,
                             completed,
+                            selected_reconnect,
                         )
                     )
 
@@ -338,8 +379,11 @@ class PollingService:
         device_id: str,
         started_at: float,
         future: Future[tuple[MeasurementRecord, ...]],
+        reconnect_attempt: bool = False,
     ) -> None:
-        self._completed_reads.put(_CompletedRead(device_id, started_at, future))
+        self._completed_reads.put(
+            _CompletedRead(device_id, started_at, future, reconnect_attempt)
+        )
         self._wake_scheduler.set()
 
     def _drain_completions(
@@ -378,13 +422,28 @@ class PollingService:
                     message=str(error),
                 )
                 active_failures[device_id] = failure
+                failure_events: list[Event] = []
                 if device_id not in self._failed_device_ids:
-                    event = self._failure_event(device_id, error)
+                    failure_events.append(self._failure_event(device_id, error))
+                reconnect_event = self._plan_reconnect(
+                    device_id,
+                    error,
+                    completed.reconnect_attempt,
+                )
+                if reconnect_event is not None:
+                    failure_events.append(reconnect_event)
+                if failure_events:
                     native_batch = self._native_batch(
-                        failures=(failure,),
-                        events=(event,),
+                        failures=(
+                            (failure,)
+                            if device_id not in self._failed_device_ids
+                            else ()
+                        ),
+                        events=tuple(failure_events),
                     )
                     native_batch = self._deliver_batch(native_batch)
+                    for record in native_batch.measurements:
+                        latest[(record.device_id, record.channel)] = record
                     self._publish_events(native_batch)
                     pending_events.extend(native_batch.events)
                 self._failed_device_ids.add(device_id)
@@ -397,8 +456,20 @@ class PollingService:
                         latest.pop((record.device_id, channel), None)
             active_failures.pop(device_id, None)
             events: tuple[Event, ...] = ()
+            reconnect = self._reconnects.pop(device_id, None)
+            if reconnect is not None and completed.reconnect_attempt:
+                events += (
+                    Event(
+                        source=device_id,
+                        message=(
+                            "Device reconnected automatically on attempt "
+                            f"{reconnect.attempts_made} of "
+                            f"{self._reconnect_attempts}."
+                        ),
+                    ),
+                )
             if device_id in self._failed_device_ids:
-                events = (self._recovery_event(device_id),)
+                events += (self._recovery_event(device_id),)
                 self._failed_device_ids.remove(device_id)
             if records or events:
                 native_batch = self._native_batch(
@@ -406,6 +477,8 @@ class PollingService:
                     events=events,
                 )
                 native_batch = self._deliver_batch(native_batch)
+                for record in native_batch.measurements:
+                    latest[(record.device_id, record.channel)] = record
                 self._publish_events(native_batch)
                 pending_events.extend(native_batch.events)
 
@@ -469,6 +542,12 @@ class PollingService:
         )
 
     def _deliver_batch(self, batch: PollingBatch) -> PollingBatch:
+        if self._batch_transform is not None:
+            try:
+                batch = self._batch_transform(batch)
+            except Exception as error:
+                batch = self._with_event(batch, Event(source="derived_signals",
+                    severity=EventSeverity.ERROR, message=f"Derived calculation failed; raw data preserved: {error}"))
         if self._batch_handler is None:
             return batch
 
@@ -501,6 +580,99 @@ class PollingService:
                 message="Polling result handler recovered.",
             ),
         )
+
+    def _plan_reconnect(
+        self,
+        device_id: str,
+        error: Exception,
+        was_attempt: bool,
+    ) -> Event | None:
+        """Schedule, reschedule or abandon automatic reconnection.
+
+        Only a FAULTED device whose driver reconnects passively is retried, a
+        few times and minutes apart: a transient serial glitch on a long run
+        should not cost the sensor for good, but a device that is really gone
+        is not hammered. A successful read resets the budget.
+        """
+
+        if self._device_manager.disconnected_on_request(device_id):
+            # The operator has taken over; never reconnect behind their back.
+            self._reconnects.pop(device_id, None)
+            return None
+
+        state = self._reconnects.get(device_id)
+        delay = self._format_delay(self._reconnect_delay)
+        if was_attempt and state is not None:
+            attempt = (
+                f"Automatic reconnection attempt {state.attempts_made} of "
+                f"{self._reconnect_attempts} failed: "
+                f"{type(error).__name__}: {error}"
+            )
+            if state.attempts_made >= self._reconnect_attempts:
+                # Kept, not removed, so it is not retried again until a read
+                # succeeds after a manual reconnect.
+                state.next_attempt_at = float("inf")
+                return Event(
+                    source=device_id,
+                    severity=EventSeverity.ERROR,
+                    message=(
+                        f"{attempt}. Giving up; disconnect and connect it "
+                        "manually once the fault is cleared."
+                    ),
+                )
+            state.next_attempt_at = monotonic() + self._reconnect_delay
+            return Event(
+                source=device_id,
+                severity=EventSeverity.WARNING,
+                message=f"{attempt}. Retrying in {delay}.",
+            )
+
+        if (
+            state is not None
+            or self._reconnect_attempts == 0
+            or not self._reconnects_passively(device_id)
+        ):
+            return None
+        self._reconnects[device_id] = _ReconnectState(
+            attempts_made=0,
+            next_attempt_at=monotonic() + self._reconnect_delay,
+        )
+        return Event(
+            source=device_id,
+            severity=EventSeverity.WARNING,
+            message=(
+                f"Device faulted; will try to reconnect automatically in "
+                f"{delay} (up to {self._reconnect_attempts} attempts)."
+            ),
+        )
+
+    def _reconnects_passively(self, device_id: str) -> bool:
+        device = self._device_manager.get(device_id)
+        return (
+            getattr(device, "passive_reconnect", False) is True
+            and device.status is DeviceStatus.FAULTED
+        )
+
+    def _reconnect_and_read(
+        self,
+        device_id: str,
+    ) -> tuple[MeasurementRecord, ...]:
+        device = self._device_manager.get(device_id)
+        # A manual reconnect may have beaten the timer, and the operator may
+        # have disconnected the device since; neither wants another cycle.
+        if (
+            device.status is not DeviceStatus.READY
+            and not self._device_manager.disconnected_on_request(device_id)
+        ):
+            self._device_manager.reconnect(device_id)
+        return self._read_device(device_id)
+
+    @staticmethod
+    def _format_delay(seconds: float) -> str:
+        if seconds >= 60 and seconds % 60 == 0:
+            minutes = int(seconds // 60)
+            return f"{minutes} minute{'s' if minutes != 1 else ''}"
+        return f"{seconds:g} s"
 
     def _read_device(
         self,

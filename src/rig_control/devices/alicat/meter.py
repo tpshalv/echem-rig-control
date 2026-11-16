@@ -7,15 +7,21 @@ from rig_control.devices.alicat.protocol import (
 from rig_control.devices.base import Device
 from rig_control.devices.measurement_source import DeviceMeasurement, MeasurementSource
 from rig_control.models import DeviceStatus, Measurement
+from rig_control.read_retry import retry_read
 
 
 class AlicatMassFlowMeter(AlicatSetupReport, Device, MeasurementSource):
     """Read-only rig adapter for one addressed Alicat mass-flow meter."""
 
+    passive_reconnect = True
+
     def __init__(
         self,
         configuration: AlicatMfcConfiguration,
         protocol: AlicatProtocolClient,
+        *,
+        read_attempts: int = 3,
+        read_retry_delay_seconds: float = 0.05,
     ) -> None:
         if configuration.is_controller:
             raise ValueError("Alicat meter configuration cannot be a controller")
@@ -23,6 +29,8 @@ class AlicatMassFlowMeter(AlicatSetupReport, Device, MeasurementSource):
         self._protocol = protocol
         self._status = DeviceStatus.DISCONNECTED
         self._state: AlicatInstrumentState | None = None
+        self._read_attempts = read_attempts
+        self._read_retry_delay_seconds = read_retry_delay_seconds
 
     @property
     def device_id(self) -> str:
@@ -60,7 +68,7 @@ class AlicatMassFlowMeter(AlicatSetupReport, Device, MeasurementSource):
 
     def read_measurements(self) -> tuple[DeviceMeasurement, ...]:
         self._require_ready()
-        state = self._read_state("read state")
+        state = self._read_state("read state", retry=True)
         self._state = state
         readings = [
             _reading("mass_flow", state.mass_flow, state.mass_flow_unit, state),
@@ -94,9 +102,16 @@ class AlicatMassFlowMeter(AlicatSetupReport, Device, MeasurementSource):
             )
         return tuple(readings)
 
-    def _read_state(self, operation: str) -> AlicatInstrumentState:
+    def _read_state(
+        self, operation: str, *, retry: bool = False
+    ) -> AlicatInstrumentState:
         try:
-            return self._protocol.read_state(self.unit_address)
+            read = lambda: self._protocol.read_state(self.unit_address)
+            return retry_read(
+                read,
+                attempts=self._read_attempts,
+                initial_delay_seconds=self._read_retry_delay_seconds,
+            ) if retry else read()
         except Exception as error:
             self._status = DeviceStatus.FAULTED
             connection = self._configuration.connection

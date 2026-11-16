@@ -95,10 +95,11 @@ def test_recording_folder_and_exports_are_named_after_the_id(tmp_path) -> None:
     finally:
         model.shutdown()
 
-    folder = tmp_path / "TPS_2026-10-22_14h09_humidity-tests"
+    folder = tmp_path / "B142" / "TPS_2026-10-22_14h09_humidity-tests"
     metadata = json.loads((folder / "metadata.json").read_text(encoding="utf-8"))
     assert metadata["experiment_id"] == folder.name
     assert metadata["electrolyser_id"] == "B142"
+    assert metadata["experiment_type"] == "manual"
     assert (folder / f"{folder.name}.csv").is_file()
     workbook = load_workbook(folder / f"{folder.name}.xlsx", read_only=True)
     try:
@@ -116,7 +117,7 @@ def test_blank_electrolyser_is_exported_as_not_recorded(tmp_path) -> None:
     finally:
         model.shutdown()
 
-    folder = tmp_path / "TPS_2026-10-22_14h09"
+    folder = tmp_path / "No-electrolyser" / "TPS_2026-10-22_14h09"
     workbook = load_workbook(folder / f"{folder.name}.xlsx", read_only=True)
     try:
         overview = {row[0]: row[1] for row in workbook["Overview"].values if len(row) > 1}
@@ -129,7 +130,7 @@ def test_existing_recording_is_kept_unless_replacement_is_confirmed(tmp_path) ->
     model = make_model()
     try:
         assert record(model, tmp_path, notes="first").succeeded
-        folder = existing_recording(tmp_path, "TPS_2026-10-22_14h09")
+        folder = existing_recording(tmp_path / "No-electrolyser", "TPS_2026-10-22_14h09")
         assert folder is not None
 
         refused = record(model, tmp_path, notes="second")

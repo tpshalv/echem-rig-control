@@ -348,3 +348,27 @@ def test_disconnect_all_times_out_a_hung_device_and_continues() -> None:
         assert healthy.status is DeviceStatus.DISCONNECTED
     finally:
         release_event.set()
+
+
+def test_reconnect_cycles_a_device_without_marking_it_operator_disconnected() -> None:
+    manager = DeviceManager()
+    supply = make_supply("supply")
+    manager.register(supply)
+    manager.connect("supply")
+
+    manager.reconnect("supply")
+
+    assert supply.status is DeviceStatus.READY
+    assert not manager.disconnected_on_request("supply")
+
+
+def test_operator_disconnect_is_remembered_until_the_next_connect() -> None:
+    manager = DeviceManager()
+    manager.register(make_supply("supply"))
+    manager.connect("supply")
+
+    manager.disconnect("supply")
+    assert manager.disconnected_on_request("supply")
+
+    manager.connect("supply")
+    assert not manager.disconnected_on_request("supply")

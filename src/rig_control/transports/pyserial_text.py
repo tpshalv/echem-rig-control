@@ -16,6 +16,9 @@ class _SerialPort(Protocol):
 
     def readline(self) -> bytes: ...
 
+    # Optional, like read_until below.
+    # def reset_input_buffer(self) -> None: ...
+
     # Optional. pyserial provides it; simple test doubles need not, and fall
     # back to readline().
     # def read_until(self, expected: bytes) -> bytes: ...
@@ -103,6 +106,13 @@ class PySerialTextTransport(SerialTextTransport):
         if "\r" in message or "\n" in message:
             raise ValueError("Serial request must not contain line terminators")
 
+        # A reply that arrived just after an earlier request timed out would
+        # otherwise be read as this request's answer, and every request after
+        # it would stay one reply behind. On a shared Alicat bus that turns
+        # one slow frame into address mismatches across every unit.
+        reset = getattr(self._serial, "reset_input_buffer", None)
+        if callable(reset):
+            reset()
         encoded = (message + self._line_ending).encode("ascii")
         written = self._serial.write(encoded)
         if written != len(encoded):

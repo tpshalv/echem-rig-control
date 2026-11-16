@@ -31,6 +31,30 @@ def test_session_owns_one_shared_runtime_graph(tmp_path: Path) -> None:
     assert (tmp_path / "session.log").exists()
 
 
+def test_session_wires_leak_check_and_excess_flow(tmp_path: Path, monkeypatch) -> None:
+    from datetime import UTC, datetime
+
+    from rig_control.polling import PollingBatch
+
+    monkeypatch.setenv("ECHEM_RIG_CONTROL_HOME", str(tmp_path / "home"))
+    session = ApplicationSession(
+        load_rig_profile("rig-profile.simulation.toml"),
+        AppSettings("test", "Test", {"technical_log_path": "session.log"}),
+        settings_directory=tmp_path,
+    )
+    try:
+        # The simulation has MFCs but nothing that measures the outlet.
+        assert session.leak_check.inlets()
+        assert not session.leak_check.available
+        assert session.excess_flow.supply_id == "main_power_supply"
+        now = datetime.now(UTC)
+        batch = PollingBatch(now, now, (), (), ())
+        assert session._process_flow_batch(batch) is batch
+        assert "excess_flow_json" in session._recording_context()
+    finally:
+        session.close()
+
+
 def test_close_stops_polling_and_disconnects(tmp_path: Path) -> None:
     session = ApplicationSession(
         load_rig_profile("rig-profile.simulation.toml"),

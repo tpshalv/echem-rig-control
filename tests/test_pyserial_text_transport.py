@@ -254,3 +254,24 @@ def test_read_line_times_out_when_nothing_further_arrives() -> None:
 
     with pytest.raises(TimeoutError):
         transport.read_line()
+
+
+def test_request_discards_a_late_reply_left_from_an_earlier_request() -> None:
+    class LateReplyPort(FakeSerialPort):
+        def __init__(self) -> None:
+            super().__init__(b"B 9.9\r")
+            self.queued = [b"A 0.0\r"]  # arrived after A's request timed out
+
+        def reset_input_buffer(self) -> None:
+            self.queued.clear()
+
+        def readline(self) -> bytes:
+            return self.queued.pop(0) if self.queued else self.response
+
+    port = LateReplyPort()
+    transport = PySerialTextTransport(
+        "COM5", 19200, 1.5, serial_factory=RecordingFactory(port)
+    )
+    transport.open()
+
+    assert transport.request("B") == "B 9.9"

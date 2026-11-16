@@ -29,6 +29,15 @@ class DeviceManager:
         self._operation_locks: dict[str, RLock] = {}
         self._event_sink = event_sink
         self._event_sink_failures: list[str] = []
+        self._disconnected_on_request: set[str] = set()
+
+    def disconnected_on_request(self, device_id: str) -> bool:
+        """Whether someone disconnected this device and has not reconnected it.
+
+        Automatic recovery must leave such a device alone.
+        """
+
+        return device_id in self._disconnected_on_request
 
     @property
     def device_ids(self) -> tuple[str, ...]:
@@ -96,6 +105,7 @@ class DeviceManager:
         """Connect one named device with detailed error context."""
 
         device = self.get(device_id)
+        self._disconnected_on_request.discard(device_id)
 
         try:
             with self.operation(device_id):
@@ -128,6 +138,11 @@ class DeviceManager:
     def disconnect(self, device_id: str) -> None:
         """Disconnect one named device with detailed error context."""
 
+        self.get(device_id)
+        self._disconnected_on_request.add(device_id)
+        self._disconnect(device_id)
+
+    def _disconnect(self, device_id: str) -> None:
         device = self.get(device_id)
 
         try:
@@ -157,6 +172,18 @@ class DeviceManager:
                 message="Device disconnected successfully.",
             )
         )
+
+    def reconnect(self, device_id: str) -> None:
+        """Disconnect then connect one device as a single operation.
+
+        A driver that latched FAULTED refuses further use until it has been
+        disconnected and connected again; holding the device's lock across
+        both steps keeps a polling read or UI action from slipping between.
+        """
+
+        with self.operation(device_id):
+            self._disconnect(device_id)
+            self.connect(device_id)
 
     def disconnect_all(
         self,

@@ -31,8 +31,8 @@ other users to as well.
     next step; the settings stay either way. A separate Wait step is still
     there for waiting without changing anything.
   - **Wait**: hold, marked **Settle** or **Measure**, with an optional label.
-  - **Loop**: for each value in order, set one setting, then run the steps
-    inside the loop.
+  - **Loop**: for each value in order (or a shuffled order; see 0027), set
+    one setting, then run the steps inside the loop.
   - **Repeat**: run the steps inside it N times.
 
   Loops nest by containing other loops. Fixed, startup and finishing

@@ -22,9 +22,9 @@ from rig_control.recipes import (
 )
 from rig_control.data.experiment import ExperimentMetadata
 from rig_control.data.experiment_naming import describe_recording, existing_recording
-from rig_control.recipes.execution import RecipeRunner
+from rig_control.recipes.execution import ORDER_SEED_LIMIT, RecipeRunner, new_order_seed
 from rig_control.recipes import Assignment, Ramp, RampKind
-from rig_control.recipes.plan import PlannedRamp, plan, values_before
+from rig_control.recipes.plan import PlannedRamp, has_shuffled_loops, plan, values_before
 from rig_control.recipes.outline import (
     LoopEnd, OutlineError, OutlineRow, delete, depths, duplicate, from_outline, insert, is_loop, move,
     partner, to_outline,
@@ -34,6 +34,7 @@ from rig_control.ui.common.theme import ERROR_TEXT, INFO_TEXT, MUTED_TEXT, SECTI
 from rig_control.ui.operation.recipe_settings import (
     SETTINGS, current_density_summary, default_value, group_by_device, recipe_turns_output_on, group_mode, short_label, format_clock, format_duration, format_value, parse_duration,
     ValueDisplay, capability_has_safe_state, default_end_state, describe_ramp, end_state_summary, end_state_warnings, parse_pass_names, spec_for, unit_for,
+    loop_order_short, next_loop_order,
 )
 from rig_control.ui.operation.recipe_end_dialog import EndStateDialog
 from rig_control.ui.operation.recipe_step_dialog import StepEditorDialog
@@ -77,6 +78,11 @@ class RecipeBuilderWindow:
         self._end_selected = False
         #: Currents show in mA (or A, per the app setting); recipes keep amperes.
         self._units = ValueDisplay(current_unit)
+        #: Sets the order of shuffled loops.  The timeline, checks and Start all
+        #: use it, so the order shown is the order that runs.  A new one is
+        #: drawn after each run, so running again gives a new order.
+        self._order_seed = new_order_seed()
+        self._was_running = False
         root.title("Recipe builder")
         root.geometry("1120x720"); root.minsize(860, 560)
         root.columnconfigure(0, weight=1); root.rowconfigure(2, weight=1)
@@ -177,8 +183,18 @@ class RecipeBuilderWindow:
         ttk.Button(bottom, text="Validate", command=self._validate).grid(row=0, column=3, padx=(10, 3))
         self._start = ttk.Button(bottom, text="Start", command=self._start_recipe); self._start.grid(row=0, column=4, padx=3)
         ttk.Button(bottom, text="Stop → end state", command=self._runner.stop).grid(row=0, column=5, padx=3)
+        self._order_row = ttk.Frame(bottom); self._order_row.grid(row=1, column=0, columnspan=6, sticky="w", pady=(8, 0))
+        ttk.Label(self._order_row, text="Shuffled loops use order no.").pack(side="left")
+        self._order_entry = ttk.Entry(self._order_row, width=9); self._order_entry.pack(side="left", padx=5)
+        self._order_entry.bind("<Return>", lambda _e: self._order_typed())
+        self._order_entry.bind("<KP_Enter>", lambda _e: self._order_typed())
+        self._order_entry.bind("<FocusOut>", lambda _e: self._order_typed())
+        ttk.Button(self._order_row, text="Reshuffle", command=self._reshuffle).pack(side="left", padx=3)
+        ttk.Label(self._order_row, foreground=MUTED_TEXT, text=(
+            "The timeline shows this order and Start runs it. Type a number from an earlier run to repeat its order."
+        )).pack(side="left", padx=(8, 0))
         self._status = ttk.Label(bottom, text="No recipe running", font=SECTION_FONT)
-        self._status.grid(row=1, column=0, columnspan=6, sticky="w", pady=(8, 0))
+        self._status.grid(row=2, column=0, columnspan=6, sticky="w", pady=(8, 0))
 
     # --- lookups ---
 
@@ -234,7 +250,9 @@ class RecipeBuilderWindow:
             shown += ", …" if len(row.values) > 8 else ""
             ramp = (f"   ·  {describe_ramp(row.ramp, spec, self._units, self._ramp_start(key, row.device_id, row.setting))}"
                     if row.ramp else "")
-            return [(None, f"┌ Loop  {self._target_text(row.device_id, row.setting)}:  {shown}   ({row.iterations}×){ramp}")], ""
+            order = f"   ·  {loop_order_short(row.order)}" if row.order.shuffled else ""
+            return [(None, f"┌ Loop  {self._target_text(row.device_id, row.setting)}:  {shown}   "
+                           f"({row.iterations}×){order}{ramp}")], ""
         if isinstance(row, RepeatStep):
             return [(None, f"┌ Repeat  {row.count}×")], ""
         loop = self._rows[partner(self._rows, index)]
@@ -270,11 +288,11 @@ class RecipeBuilderWindow:
         self._ramp_starts: dict[tuple, float] = {}
         self._plan_problem = ""
         try:
-            for item in plan(steps):
+            for item in plan(steps, seed=self._order_seed):
                 if isinstance(item, PlannedRamp):
                     where = (tuple(i for i, _ in item.trace), item.target.device_id, item.target.setting)
                     self._ramp_starts.setdefault(where, item.start)
-            self._times = step_times(steps)
+            self._times = step_times(steps, seed=self._order_seed)
         except ValueError as error:
             self._times, self._plan_problem = None, str(error)
 
@@ -321,6 +339,7 @@ class RecipeBuilderWindow:
             iid = self._selected_iid()
             self._tree.selection_set(iid); self._tree.see(iid)
         self._refresh_summary()
+        self._refresh_order_row()
         if self._tabs.select() == str(self._timeline_tab):
             self._refresh_timeline()
 
@@ -334,9 +353,9 @@ class RecipeBuilderWindow:
         if not self._rows:
             self._summary.configure(text="Empty recipe. Add a step to begin.", foreground=MUTED_TEXT); return
         recipe = self._recipe()
-        problems = list(recipe_problems(recipe))
+        problems = list(recipe_problems(recipe, seed=self._order_seed))
         try:
-            estimate = estimate_recipe(recipe)
+            estimate = estimate_recipe(recipe, seed=self._order_seed)
             text = (f"{estimate.measure_waits} measurements · {estimate.settle_waits} settles · "
                     f"about {format_duration(estimate.duration_seconds)} in total. "
                     "Then the end state applies (see its row).")
@@ -361,14 +380,18 @@ class RecipeBuilderWindow:
         self._timeline.delete(*self._timeline.get_children())
         limit = 500
         try:
-            rows = preview_recipe(self._recipe(), limit=limit, text=self._units.text) if self._rows else ()
+            rows = (preview_recipe(self._recipe(), limit=limit, text=self._units.text, seed=self._order_seed)
+                    if self._rows else ())
         except ValueError as error:
             self._timeline_note.configure(text=f"No timeline: {error}"); return
         for row in rows:
             self._timeline.insert("", "end", values=(format_clock(row.planned_start_seconds),
                                                      " › ".join(row.position) or "—", row.label))
-        self._timeline_note.configure(text=f"Showing the first {limit} rows." if len(rows) == limit else
-                                      "Planned start times exclude communication overhead.")
+        note = (f"Showing the first {limit} rows." if len(rows) == limit else
+                "Planned start times exclude communication overhead.")
+        if has_shuffled_loops(from_outline(self._rows)):
+            note += f" Shuffled loops in order no. {self._order_seed}."
+        self._timeline_note.configure(text=note)
 
     # --- selection ---
 
@@ -560,6 +583,8 @@ class RecipeBuilderWindow:
                 ("Pass names", ", ".join(row.pass_names) or "—", "", "text",
                  lambda text: replace(row, pass_names=parse_pass_names(text))),
                 ("Passes", str(row.iterations), "", "", None),
+                ("Order", loop_order_short(row.order).capitalize(), "", "toggle",
+                 lambda: replace(row, order=next_loop_order(row.order))),
                 ("Ramp", describe_ramp(row.ramp, spec, self._units,
                                        self._ramp_start(self._keys[self._selected], row.device_id, row.setting)
                                        ).removeprefix("ramp ") + ("; then from each value to the next" if row.ramp else "")
@@ -662,8 +687,8 @@ class RecipeBuilderWindow:
             """Problems this edit would add, judged in the step's place in the recipe."""
             rows = list(self._rows); rows[index] = draft
             try:
-                before = set(recipe_problems(self._recipe()))
-                return tuple(p for p in recipe_problems(self._recipe(rows)) if p not in before)
+                before = set(recipe_problems(self._recipe(), seed=self._order_seed))
+                return tuple(p for p in recipe_problems(self._recipe(rows), seed=self._order_seed) if p not in before)
             except (ValueError, TypeError):
                 return ()
 
@@ -678,7 +703,8 @@ class RecipeBuilderWindow:
 
         StepEditorDialog(self._root, original, roles=self._roles, check=check, on_done=done, is_new=is_new,
                          focus_device=focus_device, units=self._units,
-                         values_before=values_before(from_outline(self._rows), self._outline_keys()[index]))
+                         values_before=values_before(from_outline(self._rows), self._outline_keys()[index],
+                                                     seed=self._order_seed))
 
     # --- structure edits ---
 
@@ -787,6 +813,7 @@ class RecipeBuilderWindow:
         self._rows = to_outline(recipe.steps); self._selected = self._selected_device = None
         self._end_state, self._end_selected = recipe.end_state, False
         self._set_entry(self._name, recipe.name)
+        self._order_seed = new_order_seed()
         self._refresh(); self._show_quick()
 
     def _new(self) -> None:
@@ -808,7 +835,7 @@ class RecipeBuilderWindow:
 
     def _validate(self) -> None:
         try:
-            self._runner.validate(self._recipe())
+            self._runner.validate(self._recipe(), order_seed=self._order_seed)
         except Exception as error:
             messagebox.showerror("Validate recipe", str(error), parent=self._root)
         else:
@@ -826,7 +853,7 @@ class RecipeBuilderWindow:
         try:
             # Before any questions, so a recipe that cannot run, or a run that
             # cannot be named (no initials or output folder), says so first.
-            self._runner.validate(recipe)
+            self._runner.validate(recipe, order_seed=self._order_seed)
             self._plan_recording(datetime.now(UTC))
         except Exception as error:
             messagebox.showerror("Start recipe", str(error), parent=self._root); return
@@ -856,14 +883,51 @@ class RecipeBuilderWindow:
                     "Replace it? The existing recording will be deleted.", icon="warning", parent=self._root):
                 return
             self._runner.start(recipe, recording_root=root, metadata=metadata,
-                               replace_existing=existing is not None)
+                               replace_existing=existing is not None, order_seed=self._order_seed)
         except Exception as error:
             messagebox.showerror("Start recipe", str(error), parent=self._root)
+
+    # --- order of shuffled loops ---
+
+    def _refresh_order_row(self) -> None:
+        """Show the order number only when a loop is shuffled."""
+        if has_shuffled_loops(from_outline(self._rows)):
+            self._order_row.grid()
+            if self._root.focus_get() is not self._order_entry:
+                self._set_entry(self._order_entry, str(self._order_seed))
+        else:
+            self._order_row.grid_remove()
+
+    def _set_order_seed(self, seed: int) -> None:
+        if seed != self._order_seed:
+            self._order_seed = seed
+            self._refresh()
+        self._set_entry(self._order_entry, str(self._order_seed))
+
+    def _reshuffle(self) -> None:
+        self._set_order_seed(new_order_seed())
+
+    def _order_typed(self) -> None:
+        text = self._order_entry.get().strip()
+        try:
+            seed = int(text)
+            if not 0 <= seed < ORDER_SEED_LIMIT:
+                raise ValueError
+        except ValueError:
+            if text != str(self._order_seed):
+                messagebox.showerror("Order number", f"Enter a whole number from 0 to {ORDER_SEED_LIMIT - 1}.",
+                                     parent=self._root)
+            self._set_entry(self._order_entry, str(self._order_seed)); return
+        self._set_order_seed(seed)
 
     def _tick(self) -> None:
         if not self._root.winfo_exists():
             return
         status = self._runner.status
+        running = status.state.value == "running"
+        if self._was_running and not running:
+            self._reshuffle()  # The finished run's order is recorded; the next run gets a new one.
+        self._was_running = running
         if status.state.value == "running":
             where = " › ".join(status.position)
             text = (f"Running: {where + ' › ' if where else ''}{status.active_step or ''}   "

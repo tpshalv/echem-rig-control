@@ -10,18 +10,27 @@ walk knows exactly because recipes have no branching.  A ramp with a fixed
 ``start`` jumps there first instead.  If nothing earlier sets the value and
 no fixed start is given, the start is unknown and planning stops with
 ``RampStartUnknown``: the recipe never reads the instrument to guess.
+
+A shuffled loop's order comes from ``seed``, the run's order seed.  The
+same seed always gives the same orders, so a run, its timeline, estimate
+and checks agree, and a run can be repeated exactly.  Each loop draws its
+own order from the seed and where it is, so changing one loop leaves the
+others' orders alone.
 """
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
+from random import Random
 from typing import TypeAlias
 
 from rig_control.devices.power_supply import PowerSupplyOperatingMode
 from rig_control.recipes.model import (
-    CURRENT_DENSITY_SETTING, POWER_SUPPLY_MODE_SETTINGS, POWER_SUPPLY_OUTPUT_SETTING, Assignment, LoopStep, Ramp, Recipe, RecipeStep,
-    RepeatStep, SetStep, WaitStep, power_supply_mode_of, ramp_holds, ramp_path,
+    CURRENT_DENSITY_SETTING, POWER_SUPPLY_MODE_SETTINGS, POWER_SUPPLY_OUTPUT_SETTING, Assignment, LoopOrder, LoopStep, Ramp, Recipe, RecipeStep,
+    RepeatStep, SetStep, WaitStep, iter_steps, power_supply_mode_of, ramp_holds, ramp_path,
 )
 
 #: Where an item comes from: for each nesting level, (step index, pass index).
+#: For a loop the pass index is the value's place in the list, not in the run,
+#: so it still names the same value when the loop is shuffled.
 Trace: TypeAlias = tuple[tuple[int, int], ...]
 ValueText = Callable[[str, object, str], str]
 
@@ -34,14 +43,19 @@ def value_text(setting: str, value: object, unit: str) -> str:
 
 
 def loop_position_label(step: LoopStep | RepeatStep, iteration: int, value: object = None,
-                        text: ValueText = value_text) -> str:
-    """Human label for one loop iteration; ``iteration`` counts from 0."""
+                        text: ValueText = value_text, listed: int | None = None) -> str:
+    """Human label for one loop iteration; ``iteration`` counts from 0 in run order.
+
+    ``listed`` is the value's place in the loop's list, which picks its pass
+    name; it differs from ``iteration`` only when the loop is shuffled.
+    """
     count = f"({iteration + 1}/{step.iterations})"
     if isinstance(step, RepeatStep):
         return f"{step.name or 'repeat'} {count}"
     title = step.name or step.setting.replace("_", " ")
-    if step.pass_name(iteration):
-        return f"{title}: {step.pass_name(iteration)} {count}"
+    name = step.pass_name(iteration if listed is None else listed)
+    if name:
+        return f"{title}: {name} {count}"
     return f"{title} {text(step.setting, value, step.unit)} {count}"
 
 
@@ -80,20 +94,55 @@ class PlannedRamp:
     trace: Trace
 
 
-PlanItem: TypeAlias = PlannedSet | PlannedWait | PlannedRamp
+@dataclass(frozen=True, slots=True)
+class PlannedLoopOrder:
+    """Marks the start of a shuffled loop: the order its values will run in."""
+    loop: LoopStep
+    #: Indexes into ``loop.values``, in run order.
+    order: tuple[int, ...]
+    position: tuple[str, ...]
+    trace: Trace
+
+    @property
+    def values(self) -> tuple[object, ...]:
+        return tuple(self.loop.values[i] for i in self.order)
+
+
+PlanItem: TypeAlias = PlannedSet | PlannedWait | PlannedRamp | PlannedLoopOrder
 
 
 class RampStartUnknown(ValueError):
     pass
 
 
-def plan(steps: tuple[RecipeStep, ...], *, text: ValueText = value_text) -> Iterator[PlanItem]:
+def loop_order(step: LoopStep, seed: int, where: tuple[int, ...], occurrence: Trace) -> tuple[int, ...]:
+    """The order a loop runs its values in, as indexes into ``step.values``.
+
+    ``where`` is the loop's index path in the recipe and ``occurrence`` the
+    passes of the loops around it, so a loop shuffled each time gets a new
+    order at every outer pass, and one shuffled once reuses its order.
+    Text seeds hash the same in every process, so an order is repeatable.
+    """
+    order = list(range(len(step.values)))
+    if step.order is LoopOrder.SHUFFLE_ONCE:
+        Random(f"{seed}|{where}").shuffle(order)
+    elif step.order is LoopOrder.SHUFFLE_EACH:
+        Random(f"{seed}|{where}|{occurrence}").shuffle(order)
+    return tuple(order)
+
+
+def has_shuffled_loops(steps: tuple[RecipeStep, ...]) -> bool:
+    return any(isinstance(s, LoopStep) and s.order.shuffled for s in iter_steps(steps))
+
+
+def plan(steps: tuple[RecipeStep, ...], *, text: ValueText = value_text, seed: int = 0) -> Iterator[PlanItem]:
     """Everything the recipe writes and waits for, in order.  Lazy, so a
-    caller can stop early on a very long recipe."""
-    yield from _walk(steps, (), (), {}, text)
+    caller can stop early on a very long recipe.  ``seed`` sets the order of
+    shuffled loops and changes nothing else."""
+    yield from _walk(steps, (), (), {}, text, seed)
 
 
-def _walk(steps, position, trace, last: dict, text) -> Iterator[PlanItem]:
+def _walk(steps, position, trace, last: dict, text, seed: int) -> Iterator[PlanItem]:
     for index, step in enumerate(steps):
         here_trace = (*trace, (index, 0))
         if isinstance(step, SetStep):
@@ -116,9 +165,13 @@ def _walk(steps, position, trace, last: dict, text) -> Iterator[PlanItem]:
         elif isinstance(step, WaitStep):
             yield PlannedWait(step, position, here_trace)
         elif isinstance(step, LoopStep):
-            for i, value in enumerate(step.values):
-                pass_trace = (*trace, (index, i))
-                here = (*position, loop_position_label(step, i, value, text))
+            order = loop_order(step, seed, (*(i for i, _ in trace), index), trace)
+            if step.order.shuffled:
+                yield PlannedLoopOrder(step, order, position, (*trace, (index, order[0])))
+            for i, listed in enumerate(order):
+                value = step.values[listed]
+                pass_trace = (*trace, (index, listed))
+                here = (*position, loop_position_label(step, i, value, text, listed))
                 target = step.assignment(value)
                 if step.ramp is None:
                     yield PlannedSet((target,), here, pass_trace)
@@ -129,11 +182,11 @@ def _walk(steps, position, trace, last: dict, text) -> Iterator[PlanItem]:
                         last[target.key] = step.ramp.start
                     yield from _ramp(target, step.ramp, _start(target, step.ramp, last, step.name or "loop"),
                                      here, pass_trace, last, text)
-                yield from _walk(step.steps, here, pass_trace, last, text)
+                yield from _walk(step.steps, here, pass_trace, last, text, seed)
         else:
             for i in range(step.count):
                 yield from _walk(step.steps, (*position, loop_position_label(step, i)), (*trace, (index, i)),
-                                 last, text)
+                                 last, text, seed)
 
 
 def _start(target: Assignment, ramp: Ramp, last: dict, where: str) -> float:
@@ -159,7 +212,8 @@ def _ramp(target, ramp: Ramp, start: float, position, trace, last: dict, text) -
             yield PlannedWait(WaitStep(ramp.dwell_seconds, ramp.purpose, "Ramp hold"), here, trace)
 
 
-def values_before(steps: tuple[RecipeStep, ...], key: tuple[int, ...]) -> dict[tuple[str, str], object]:
+def values_before(steps: tuple[RecipeStep, ...], key: tuple[int, ...], *,
+                  seed: int = 0) -> dict[tuple[str, str], object]:
     """The value of every setting just before the step at ``key`` (its index path) first runs.
 
     Used by the editor to show where a ramp will start.  Planning stops at a
@@ -167,7 +221,7 @@ def values_before(steps: tuple[RecipeStep, ...], key: tuple[int, ...]) -> dict[t
     """
     known: dict[tuple[str, str], object] = {}
     try:
-        for item in plan(steps):
+        for item in plan(steps, seed=seed):
             if tuple(i for i, _ in item.trace[:len(key)]) == key:
                 break
             if isinstance(item, PlannedSet):
@@ -183,7 +237,7 @@ def _mode_text(mode: PowerSupplyOperatingMode) -> str:
     return mode.value.replace("_", " ")
 
 
-def power_supply_problems(recipe: Recipe) -> tuple[str, ...]:
+def power_supply_problems(recipe: Recipe, *, seed: int = 0) -> tuple[str, ...]:
     """Unsafe power-supply sequences, in the order they would happen.
 
     - Output may only turn on once the current mode's setpoint and limit
@@ -191,12 +245,14 @@ def power_supply_problems(recipe: Recipe) -> tuple[str, ...]:
     - Switching mode (writing the other mode's setting) while the output is
       on is refused, because the stale register would briefly act as the
       new mode's limit.  Turn the output off, set both, then turn it on.
+
+    Checked in ``seed``'s order; the runner checks the order it will run.
     """
     mode: dict[str, PowerSupplyOperatingMode] = {}
     written: dict[str, set[str]] = {}
     output_on: dict[str, bool] = {}
     try:
-        writes = [w for item in plan(recipe.steps) if isinstance(item, PlannedSet) for w in item.writes]
+        writes = [w for item in plan(recipe.steps, seed=seed) if isinstance(item, PlannedSet) for w in item.writes]
     except ValueError:
         return ()  # Reported by recipe_problems as its own problem.
     for step in writes:
@@ -223,11 +279,11 @@ def power_supply_problems(recipe: Recipe) -> tuple[str, ...]:
     return ()
 
 
-def recipe_problems(recipe: Recipe) -> tuple[str, ...]:
-    """Everything that stops a recipe from running as written, first problem first."""
+def recipe_problems(recipe: Recipe, *, seed: int = 0) -> tuple[str, ...]:
+    """Everything that stops a recipe from running as written (in ``seed``'s order), first problem first."""
     try:
-        for _item in plan(recipe.steps):
+        for _item in plan(recipe.steps, seed=seed):
             pass
     except ValueError as error:
         return (str(error),)
-    return power_supply_problems(recipe)
+    return power_supply_problems(recipe, seed=seed)

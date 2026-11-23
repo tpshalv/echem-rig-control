@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 import json
 from pathlib import Path
+from secrets import randbelow
 from threading import Event as ThreadEvent, Lock, Thread
 from time import monotonic, sleep
 
@@ -34,7 +35,7 @@ from rig_control.devices.safe_state import SafeStateCapable
 from rig_control.recipes.model import (
     CURRENT_DENSITY_SETTING, EndAction, Assignment, LoopStep, Recipe, RepeatStep, WaitStep, iter_steps, power_supply_mode_of, recipe_to_dict,
 )
-from rig_control.recipes.plan import PlannedRamp, PlannedSet, PlannedWait, plan, recipe_problems
+from rig_control.recipes.plan import PlannedLoopOrder, PlannedRamp, PlannedSet, PlannedWait, plan, recipe_problems
 from rig_control.recipes.preview import estimate_recipe
 
 
@@ -68,6 +69,15 @@ class RecipeValidationError(ValueError):
     pass
 
 
+#: Order seeds are drawn below this, so they stay short enough to read and type.
+ORDER_SEED_LIMIT = 1_000_000
+
+
+def new_order_seed() -> int:
+    """A fresh seed for the order of shuffled loops."""
+    return randbelow(ORDER_SEED_LIMIT)
+
+
 class RecipeRunner:
     """Own one recipe thread. Stop is cooperative and leaves safe state to control."""
     def __init__(self, control_service: RigControlService, device_manager: DeviceManager, *,
@@ -80,7 +90,7 @@ class RecipeRunner:
         self._event_sink = event_sink; self._sleeper = sleeper; self._clock = clock
         self._cancel = ThreadEvent(); self._lock = Lock(); self._thread: Thread | None = None
         self._status = RecipeRunStatus(RecipeRunState.IDLE); self._result: RecipeRunResult | None = None
-        self._started_at = 0.0; self._estimated_seconds = 0.0
+        self._started_at = 0.0; self._estimated_seconds = 0.0; self._order_seed = 0
         self._supply_modes: dict[str, PowerSupplyOperatingMode] = {}
 
     @property
@@ -101,17 +111,21 @@ class RecipeRunner:
         except Exception:
             return None
 
-    def validate(self, recipe: Recipe) -> None:
-        """Construct every command before taking ownership; drivers enforce limits."""
+    def validate(self, recipe: Recipe, *, order_seed: int = 0) -> None:
+        """Construct every command before taking ownership; drivers enforce limits.
+
+        Shuffled loops are checked in the order ``order_seed`` gives, which
+        is the order a run started with that seed follows.
+        """
         for step in iter_steps(recipe.steps):
             if isinstance(step, (LoopStep, RepeatStep)) and not step.steps:
                 name = "Repeat" if isinstance(step, RepeatStep) else f"Loop over {step.device_id}.{step.setting}"
                 raise RecipeValidationError(f"{name} has no steps inside it")
-        problems = recipe_problems(recipe)
+        problems = recipe_problems(recipe, seed=order_seed)
         if problems:
             raise RecipeValidationError(problems[0])
         # Every value the run will write, ramps included, checked once each.
-        writes = {(a.device_id, a.setting, a.value): a for item in plan(recipe.steps)
+        writes = {(a.device_id, a.setting, a.value): a for item in plan(recipe.steps, seed=order_seed)
                   if isinstance(item, PlannedSet) for a in item.writes}
         # The end state is checked like any step: it must be possible before the run starts.
         writes.update(((a.device_id, a.setting, a.value), a) for d in recipe.end_state.devices for a in d.assignments)
@@ -131,7 +145,8 @@ class RecipeRunner:
                 raise RecipeValidationError(f"Invalid {write.device_id}.{write.setting}: {error}") from error
 
     def start(self, recipe: Recipe, *, recording_root: str | Path | None = None,
-              metadata: ExperimentMetadata | None = None, replace_existing: bool = False) -> None:
+              metadata: ExperimentMetadata | None = None, replace_existing: bool = False,
+              order_seed: int | None = None) -> None:
         """Run in the background, recording into ``recording_root``.
 
         ``metadata`` comes from Operation's ``plan_recording``, so a recipe run
@@ -139,8 +154,12 @@ class RecipeRunner:
         added to it. Without it (scripts, tests) the operator is "recipe".
         ``replace_existing`` deletes a same-named recording, only once every
         check has passed.
+        ``order_seed`` sets the order of shuffled loops; without one a fresh
+        seed is drawn.  It is recorded, so the same order can be run again.
         """
-        self.validate(recipe)
+        if order_seed is None:
+            order_seed = new_order_seed()
+        self.validate(recipe, order_seed=order_seed)
         with self._lock:
             if self._thread is not None and self._thread.is_alive(): raise RuntimeError("A recipe is already running")
             if self._control.mode.value != "idle":
@@ -149,8 +168,8 @@ class RecipeRunner:
             if replace_existing and metadata is not None and recording_root is not None:
                 existing = existing_recording(recording_root, metadata.experiment_id)
                 if existing is not None: remove_recording(existing)
-            self._cancel.clear(); self._result = None; self._supply_modes = {}
-            estimate = estimate_recipe(recipe)
+            self._cancel.clear(); self._result = None; self._supply_modes = {}; self._order_seed = order_seed
+            estimate = estimate_recipe(recipe, seed=order_seed)
             self._started_at = self._clock(); self._estimated_seconds = estimate.duration_seconds
             self._status = RecipeRunStatus(RecipeRunState.RUNNING, estimated_remaining_seconds=estimate.duration_seconds)
             self._thread = Thread(target=self._run, args=(recipe, recording_root, metadata),
@@ -170,12 +189,13 @@ class RecipeRunner:
                 if root is None: raise RuntimeError("Recipe recording needs an output folder")
                 if metadata is None:
                     metadata = ExperimentMetadata(make_experiment_id("recipe", datetime.now(UTC)), "recipe")
-                extra = {"recipe_snapshot_json": json.dumps(recipe_to_dict(recipe), sort_keys=True), "recipe_name": recipe.name}
+                extra = {"recipe_snapshot_json": json.dumps(recipe_to_dict(recipe), sort_keys=True), "recipe_name": recipe.name,
+                         "recipe_order_seed": self._order_seed}
                 self._recorder.start(metadata=replace(metadata, experiment_type="recipe",
                                                       extra={**metadata.extra, **extra}), root_directory=root)
                 started_recording = True
             self._control.begin_recipe_control()
-            self._emit("recipe_started", recipe.name)
+            self._emit("recipe_started", recipe.name, order_seed=self._order_seed)
             self._execute(recipe)
             # Finishing, Stop and failure all leave the rig in the recipe's
             # end state.  Stop skips every remaining step, ramps and holds
@@ -201,7 +221,7 @@ class RecipeRunner:
 
     def _execute(self, recipe: Recipe) -> None:
         """Run the plan item by item: exactly what the timeline and estimate show."""
-        for item in plan(recipe.steps):
+        for item in plan(recipe.steps, seed=self._order_seed):
             self._check_cancel()
             if isinstance(item, PlannedSet):
                 if item.name and not item.ramping:
@@ -214,6 +234,12 @@ class RecipeRunner:
             elif isinstance(item, PlannedRamp):
                 self._emit("recipe_ramp", f"{item.target.device_id}.{item.target.setting}", start=item.start,
                            target=item.target.value, ramp_kind=item.ramp.kind.value, steps=item.steps,
+                           position=list(item.position))
+            elif isinstance(item, PlannedLoopOrder):
+                loop = item.loop
+                self._emit("recipe_loop_order", loop.name or f"{loop.device_id}.{loop.setting}",
+                           order=loop.order.value, values=list(item.values),
+                           pass_names=[loop.pass_name(i) for i in item.order] if loop.pass_names else [],
                            position=list(item.position))
 
     def _wait(self, step: WaitStep, position: tuple[str, ...]) -> None:

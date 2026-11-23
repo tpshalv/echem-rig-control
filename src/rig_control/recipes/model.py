@@ -6,7 +6,8 @@ A recipe is an ordered list of steps.  There are four kinds:
   then hold (wait) before the next step.
 - ``WaitStep`` holds for a duration, marked as a settle or a measurement.
 - ``LoopStep`` sets one setting to each of its values in turn and runs its
-  own steps after each value.
+  own steps after each value.  Its values run as listed or shuffled
+  (``LoopOrder``); a shuffled order comes from the run's order seed.
 - ``RepeatStep`` runs its own steps a fixed number of times.
 
 Loops nest by containing other loops, so the hierarchy is the data
@@ -64,6 +65,23 @@ class WaitPurpose(StrEnum):
     """Why a wait exists, so recorded data can tell settling from measuring."""
     SETTLE = "settle"
     MEASURE = "measure"
+
+
+class LoopOrder(StrEnum):
+    """The order a loop runs its values in.
+
+    A shuffled order is drawn from the run's order seed, so the planner,
+    timeline, estimates and checks all see the same order as the run.
+    """
+    AS_LISTED = "as_listed"
+    #: A new order every time the loop starts, e.g. at each outer value.
+    SHUFFLE_EACH = "shuffle_each"
+    #: One order, reused every time the loop starts.
+    SHUFFLE_ONCE = "shuffle_once"
+
+    @property
+    def shuffled(self) -> bool:
+        return self is not LoopOrder.AS_LISTED
 
 
 class RampKind(StrEnum):
@@ -269,7 +287,8 @@ class LoopStep:
     """For each value in order, set the setting, then run ``steps``.
 
     Repeated values are intentional and kept.  ``pass_names`` is either empty
-    or one name per value, e.g. ``("break in", "100 mA", "200 mA")``.
+    or one name per value, e.g. ``("break in", "100 mA", "200 mA")``; when
+    the loop is shuffled, each name moves with its value.
     """
     device_id: str
     setting: str
@@ -281,9 +300,11 @@ class LoopStep:
     #: Ramp to each value instead of jumping, each from the value before;
     #: the first from the last value set before the loop (or ``ramp.start``).
     ramp: Ramp | None = None
+    order: LoopOrder = LoopOrder.AS_LISTED
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "name", _name(self.name))
+        object.__setattr__(self, "order", LoopOrder(self.order))
         if self.ramp is not None:
             if not isinstance(self.ramp, Ramp):
                 raise TypeError("A ramp must be a Ramp or None")
@@ -485,7 +506,7 @@ def _step_to_dict(step: RecipeStep) -> dict[str, object]:
     if isinstance(step, LoopStep):
         return {"kind": "loop", "name": step.name, "device_id": step.device_id, "setting": step.setting,
                 "values": list(step.values), "pass_names": list(step.pass_names), "unit": step.unit,
-                "ramp": _ramp_to_dict(step.ramp),
+                "ramp": _ramp_to_dict(step.ramp), "order": step.order.value,
                 "steps": [_step_to_dict(s) for s in step.steps]}
     return {"kind": "repeat", "name": step.name, "count": step.count,
             "steps": [_step_to_dict(s) for s in step.steps]}
@@ -540,7 +561,7 @@ def _step_from_dict(raw: object) -> RecipeStep:
         return LoopStep(str(item["device_id"]), str(item["setting"]), tuple(_list(item["values"], "loop values")),
                         str(item.get("unit", "")), children(), name,
                         tuple(str(n) for n in _list(item.get("pass_names", []), "pass names")),
-                        _ramp_from_dict(item.get("ramp")))
+                        _ramp_from_dict(item.get("ramp")), LoopOrder(str(item.get("order", "as_listed"))))
     if kind == "repeat":
         count = item["count"]
         if isinstance(count, float) and count.is_integer():

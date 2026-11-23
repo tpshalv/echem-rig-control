@@ -494,3 +494,31 @@ def end_state_warnings(end, roles, has_safe_state=capability_has_safe_state) -> 
         elif d.action is EndAction.SET and any(a.setting == "output_enabled" and a.value is True for a in d.assignments):
             warnings.append(f"{r.friendly_name} output is turned ON in the end state.")
     return warnings
+
+
+# --- Loop order -------------------------------------------------------------------
+
+def _loop_order_labels():
+    from rig_control.recipes import LoopOrder
+    return {
+        LoopOrder.AS_LISTED: ("As listed", "as listed"),
+        LoopOrder.SHUFFLE_EACH: ("Shuffled, a new order each time the loop starts", "shuffled each time"),
+        LoopOrder.SHUFFLE_ONCE: ("Shuffled once, the same order every time", "shuffled once"),
+    }
+
+
+def loop_order_label(order) -> str:
+    """Long label for the editor, e.g. ``Shuffled once, the same order every time``."""
+    return _loop_order_labels()[order][0]
+
+
+def loop_order_short(order) -> str:
+    """Short label for the step list and panel, e.g. ``shuffled once``."""
+    return _loop_order_labels()[order][1]
+
+
+def next_loop_order(order):
+    """The order after ``order``, for clicking through them in the panel."""
+    from rig_control.recipes import LoopOrder
+    orders = list(LoopOrder)
+    return orders[(orders.index(order) + 1) % len(orders)]

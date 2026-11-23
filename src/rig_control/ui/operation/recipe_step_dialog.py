@@ -12,13 +12,14 @@ from tkinter import ttk
 from rig_control.devices.power_supply import PowerSupplyOperatingMode
 from rig_control.rig_profile import DeviceCapability
 from rig_control.recipes import Ramp, RampKind
-from rig_control.recipes import Assignment, LoopStep, RepeatStep, SetStep, WaitPurpose, WaitStep
+from rig_control.recipes import Assignment, LoopOrder, LoopStep, RepeatStep, SetStep, WaitPurpose, WaitStep
 from rig_control.recipes.outline import OutlineRow
 from rig_control.ui.common.theme import ERROR_TEXT, INFO_TEXT, MUTED_TEXT, SECTION_FONT, WARNING_TEXT
 from rig_control.ui.common.widgets import VerticalScrolledFrame
 from rig_control.ui.operation.recipe_settings import (
     ON_OFF, SETTINGS, TIME_UNITS, SettingSpec, as_range, default_value, expand_range, format_value,
-    CURRENT_UNITS, RAMP_METHODS, ValueDisplay, device_settings, group_by_device, group_mode, next_device, parse_pass_names,
+    CURRENT_UNITS, RAMP_METHODS, ValueDisplay, device_settings, group_by_device, group_mode, loop_order_label, next_device,
+    parse_pass_names,
     spec_for, unit_for,
 )
 
@@ -582,7 +583,7 @@ class StepEditorDialog:
         self._loop_target = _TargetPicker(frame, self._roles, self._loop_target_changed)
         self._loop_target.frame.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(2, 10))
         self._loop_target.select(row.device_id, row.setting)
-        ttk.Label(frame, text="To each of these values, in order", font=SECTION_FONT).grid(row=2, column=0, columnspan=3, sticky="w")
+        ttk.Label(frame, text="To each of these values", font=SECTION_FONT).grid(row=2, column=0, columnspan=3, sticky="w")
         spec = spec_for(row.setting)
         #: The unit the loop's values are typed in (mA or A for currents).
         self._loop_units = self._units
@@ -624,6 +625,16 @@ class StepEditorDialog:
         self._loop_ramp_hint = ttk.Label(frame, foreground=MUTED_TEXT, wraplength=_WRAP, justify="left", text=(
             "Each step on the way is held; the value reached is not, so the steps inside the loop follow on."))
         self._loop_ramp_hint.grid(row=15, column=0, columnspan=3, sticky="w")
+        ttk.Label(frame, text="Order", font=SECTION_FONT).grid(row=16, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        self._loop_order = tk.StringVar(value=row.order.value)
+        for r, order in enumerate(LoopOrder, start=17):
+            ttk.Radiobutton(frame, text=loop_order_label(order), variable=self._loop_order, value=order.value,
+                            command=self._changed).grid(row=r, column=0, columnspan=3, sticky="w")
+        ttk.Label(frame, foreground=MUTED_TEXT, wraplength=_WRAP, justify="left", text=(
+            "A shuffled order is drawn from the order number shown at the bottom of the builder, so the "
+            "timeline shows the order that will run. Pass names move with their values. Use As listed "
+            "where the order matters, e.g. currents rising from low to high.")
+                  ).grid(row=20, column=0, columnspan=3, sticky="w")
         self._show_loop_spec(spec)
         self._loop_ramp_toggled(check=False)
         self._show_loop_spec(spec)
@@ -773,7 +784,8 @@ class StepEditorDialog:
             except ValueError as error:
                 raise ValueError(f"Ramp: {error}") from None
             return LoopStep(self._loop_target.device_id(), spec.name, values, unit_for(spec),
-                            name=name, pass_names=parse_pass_names(self._pass_names.get()), ramp=ramp)
+                            name=name, pass_names=parse_pass_names(self._pass_names.get()), ramp=ramp,
+                            order=LoopOrder(self._loop_order.get()))
         if isinstance(row, WaitStep):
             try:
                 amount = float(self._duration.get())

@@ -26,11 +26,11 @@ class PreviewRow:
     parameters: tuple[tuple[str, str, object], ...] = ()
 
 
-def estimate_recipe(recipe: Recipe) -> RecipeEstimate:
+def estimate_recipe(recipe: Recipe, *, seed: int = 0) -> RecipeEstimate:
     """Raises ``RampStartUnknown`` if a ramp has nothing to start from."""
     counts = {WaitPurpose.MEASURE: 0, WaitPurpose.SETTLE: 0}
     total = 0.0
-    for item in plan(recipe.steps):
+    for item in plan(recipe.steps, seed=seed):
         if isinstance(item, PlannedWait):
             counts[item.wait.purpose] += 1
             total += item.wait.duration_seconds
@@ -42,7 +42,8 @@ class StepTimes:
     """Planned seconds per step and per loop pass, keyed by the step's index path.
 
     A top-level step is ``(i,)``; the j-th step inside it is ``(i, j)``.
-    Times include every pass, every ramp and every hold.
+    Times include every pass, every ramp and every hold.  ``passes`` is in
+    the order of the loop's list, so pass ``i`` is always value ``i``.
     """
     totals: dict[tuple[int, ...], float] = field(default_factory=dict)
     passes: dict[tuple[int, ...], list[float]] = field(default_factory=dict)
@@ -51,11 +52,11 @@ class StepTimes:
         return self.totals.get(key, 0.0)
 
 
-def step_times(steps: tuple[RecipeStep, ...]) -> StepTimes:
+def step_times(steps: tuple[RecipeStep, ...], *, seed: int = 0) -> StepTimes:
     """Raises ``RampStartUnknown`` if a ramp has nothing to start from."""
     totals: dict[tuple[int, ...], float] = defaultdict(float)
     passes: dict[tuple[int, ...], dict[int, float]] = defaultdict(lambda: defaultdict(float))
-    for item in plan(steps):
+    for item in plan(steps, seed=seed):
         if isinstance(item, PlannedWait):
             seconds = item.wait.duration_seconds
             for depth in range(1, len(item.trace) + 1):
@@ -66,7 +67,7 @@ def step_times(steps: tuple[RecipeStep, ...]) -> StepTimes:
 
 
 def preview_recipe(recipe: Recipe, *, limit: int = 500, offset: int = 0,
-                   text: ValueText = value_text) -> tuple[PreviewRow, ...]:
+                   text: ValueText = value_text, seed: int = 0) -> tuple[PreviewRow, ...]:
     """Return a bounded page of planned actions, preserving duplicate values.
 
     ``text`` formats values for labels; the builder passes one that shows its
@@ -79,7 +80,7 @@ def preview_recipe(recipe: Recipe, *, limit: int = 500, offset: int = 0,
     elapsed = 0.0
     index = 0
     targets: dict[tuple[str, str], object] = {}
-    for item in plan(recipe.steps, text=text):
+    for item in plan(recipe.steps, text=text, seed=seed):
         if len(rows) >= limit:
             break
         if isinstance(item, PlannedSet):

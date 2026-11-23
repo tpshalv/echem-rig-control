@@ -171,3 +171,31 @@ def test_split_typed_and_show_round_trip() -> None:
     assert units.show_current(0.0123) == (12.3, "mA")
     assert units.show_density(300.0) == (0.3, "A/cm²")
     assert DisplayUnits(density="mA/cm2").density == "mA/cm²"
+
+
+def test_density_channel_name_matches_the_recorded_channel() -> None:
+    from rig_control.calibrated_channels import CURRENT_DENSITY_CHANNEL
+    from rig_control.display_units import DENSITY_CHANNEL
+
+    assert DENSITY_CHANNEL == CURRENT_DENSITY_CHANNEL
+
+
+def test_a_recording_fixes_its_export_units_when_it_starts() -> None:
+    import json
+    from types import SimpleNamespace
+    from rig_control.application_session import ApplicationSession
+    from rig_control.devices.manager import DeviceManager
+    from rig_control.rig_profile_loading import load_rig_profile
+
+    # The session's own recording context, without starting its threads.
+    session = SimpleNamespace(
+        profile=load_rig_profile("rig-profile.simulation.toml"),
+        settings=settings_with(display_current_unit="A", display_flow_unit="SLPM"),
+        device_manager=DeviceManager(),
+        calibrated_channels=SimpleNamespace(snapshot=lambda _manager: {}),
+        excess_flow=SimpleNamespace(snapshot=lambda: {}),
+        cell_area=SimpleNamespace(snapshot=lambda: {}),
+    )
+    context = ApplicationSession._recording_context(session)
+    assert json.loads(context["export_units"]) == {"pressure": "psia", "flow": "SLPM", "current": "A",
+                                                   "density": "mA/cm²"}

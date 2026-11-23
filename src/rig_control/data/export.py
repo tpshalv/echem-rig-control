@@ -79,7 +79,9 @@ def export_excel(
     refresh: bool = True,
 ) -> Path:
     """Export a snapshot without stopping recording or loading the run into RAM."""
-    from rig_control.data.incremental_export import IncrementalCsvExporter, export_file_stem
+    from rig_control.data.incremental_export import (
+        IncrementalCsvExporter, export_file_stem, export_unit, export_units,
+    )
 
     directory = Path(experiment_directory)
     for name in ("metadata.json", "measurements.journal.jsonl", "events.journal.jsonl"):
@@ -115,7 +117,10 @@ def export_excel(
     events_end = events_path.stat().st_size
     annotations = read_annotations(directory)
     with exporter.snapshot() as (signals, rows):
-        _write_xlsx(path, metadata=metadata,
+        units = export_units(metadata)
+        unit_rows = [(header, export_unit(units, channel, unit), unit)
+                     for header, (_device, channel, unit) in zip(exporter.headers(signals, metadata)[1:], signals)]
+        _write_xlsx(path, metadata=metadata, unit_rows=unit_rows,
                     wide_headers=exporter.headers(signals, metadata), wide_rows=rows,
                     events=_iter_jsonl(events_path, events_end), bin_seconds=bin_seconds,
                     annotations=annotations, review=latest_run_review(directory))
@@ -257,6 +262,7 @@ def _write_xlsx(
     bin_seconds: float,
     annotations: tuple[Annotation, ...] = (),
     review: RunReview | None = None,
+    unit_rows: list[tuple[str, str, str]] = (),
 ) -> None:
     from openpyxl import Workbook
     from openpyxl.cell import WriteOnlyCell
@@ -378,6 +384,9 @@ def _write_xlsx(
     overview.append(cells(overview, ["Exported at (UTC)", datetime.now(timezone.utc).replace(tzinfo=None)]))
     table("Data", wide_headers,
           ([_excel_datetime(row[0]), *row[1:]] for row in wide_rows))
+    # Each column's unit here, and the instrument's own unit kept in the raw log.
+    table("Units", ["column", "unit in this file", "unit recorded (measurements.journal.jsonl)"],
+          ([header, shown, recorded] for header, shown, recorded in unit_rows))
     event_headers = ["timestamp", "severity", "source", "message"]
     table("Events", event_headers,
           ([_excel_datetime(event.get("timestamp")),

@@ -117,7 +117,7 @@ def test_excel_has_no_raw_sheet_splits_data_and_preserves_subsecond_interval(tmp
     path = export_excel(tmp_path)  # Infer saved half-second interval after restart.
     workbook = load_workbook(path, read_only=True)
     try:
-        assert workbook.sheetnames == ["Overview", "Data", "Data 2", "Data 3", "Events", "Notes"]
+        assert workbook.sheetnames == ["Overview", "Data", "Data 2", "Data 3", "Units", "Events", "Notes"]
         data = [row for name in ("Data", "Data 2", "Data 3")
                 for row in list(workbook[name].values)[1:]]
         assert len(data) == 8
@@ -195,3 +195,52 @@ def test_export_rejects_non_experiment_folder_without_creating_cache(tmp_path):
     with pytest.raises(ValueError, match="Choose an experiment folder"):
         export_excel(tmp_path)
     assert not (tmp_path / "export-cache.sqlite3").exists()
+
+
+def _supply_and_flow(second):
+    stamp = (START + timedelta(seconds=second)).isoformat()
+    return [
+        dict(device_id="supply", channel="current", unit="A", value=0.25, timestamp=stamp, quality="good"),
+        dict(device_id="supply", channel="current_density", unit="mA/cm2", value=50.0, timestamp=stamp,
+             quality="good"),
+        dict(device_id="mfc", channel="mass_flow", unit="SLPM", value=0.2, timestamp=stamp, quality="good"),
+        dict(device_id="bpr", channel="absolute_pressure", unit="bara", value=1.0, timestamp=stamp, quality="good"),
+        dict(device_id="probe", channel="temperature", unit="degC", value=25.0, timestamp=stamp, quality="good"),
+    ]
+
+
+def test_exports_use_the_units_fixed_when_the_run_started_with_current_and_density(tmp_path):
+    exporter = prepare(tmp_path)
+    units = {"pressure": "psia", "flow": "SCCM", "current": "mA", "density": "mA/cm²"}
+    (tmp_path / "metadata.json").write_text(json.dumps(
+        {"experiment_id": "test", "extra": {"export_units": json.dumps(units)}}), encoding="utf-8")
+    append(tmp_path, _supply_and_flow(0) + _supply_and_flow(1))
+    exporter.update(final=True)
+    header, first = rows(tmp_path)[:2]
+    cells = dict(zip(header, first))
+    assert float(cells["supply.current [mA]"]) == 250.0
+    assert float(cells["supply.current_density [mA/cm2]"]) == 50.0
+    assert float(cells["mfc.mass_flow [SCCM]"]) == 200.0
+    assert float(cells["bpr.absolute_pressure [psia]"]) == pytest.approx(14.503774, rel=1e-6)
+    assert float(cells["probe.temperature [degC]"]) == 25.0
+    # The raw log keeps the instrument's units.
+    assert '"unit": "A"' in (tmp_path / "measurements.journal.jsonl").read_text(encoding="utf-8")
+
+    workbook = load_workbook(export_excel(tmp_path, bin_seconds=1.0, refresh=False), read_only=True)
+    try:
+        units_sheet = [tuple(row) for row in workbook["Units"].iter_rows(values_only=True)]
+        assert ("supply.current [mA]", "mA", "A") in units_sheet
+        assert ("mfc.mass_flow [SCCM]", "SCCM", "SLPM") in units_sheet
+        data_header = next(workbook["Data"].iter_rows(values_only=True))
+        assert "supply.current_density [mA/cm2]" in data_header
+    finally:
+        workbook.close()
+
+
+def test_runs_recorded_before_export_units_keep_their_instrument_units(tmp_path):
+    exporter = prepare(tmp_path)
+    append(tmp_path, _supply_and_flow(0))
+    exporter.update(final=True)
+    header, first = rows(tmp_path)[:2]
+    cells = dict(zip(header, first))
+    assert float(cells["supply.current [A]"]) == 0.25 and float(cells["mfc.mass_flow [SLPM]"]) == 0.2

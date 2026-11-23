@@ -260,7 +260,7 @@ def test_excel_has_notes_sheet_and_review_on_overview(tmp_path):
     append_run_review(tmp_path, RunReview("minor", "switched to testing leaks", at(60)))
     workbook = load_workbook(export_excel(tmp_path), read_only=True)
     try:
-        assert workbook.sheetnames == ["Overview", "Data", "Events", "Notes"]
+        assert workbook.sheetnames == ["Overview", "Data", "Units", "Events", "Notes"]
         overview = {row[0]: row[1] for row in workbook["Overview"].values if len(row) > 1}
         assert overview["Overall QC"] == "Minor"
         assert overview["Start notes"] == "testing flow"

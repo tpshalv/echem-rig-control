@@ -1,4 +1,5 @@
 import csv
+import gc
 from datetime import UTC, datetime, timedelta
 import json
 from threading import Event, Thread
@@ -34,6 +35,9 @@ from rig_control.ui.operation.leak_check_window import (
 
 
 def bench(tmp_path, *, supply=False):
+    # Tk objects left by earlier UI tests must not be collected on a check's
+    # thread: Tk refuses calls off the main thread (as in test_recipes).
+    gc.collect()
     manager = DeviceManager()
     mfc = SimulatedMassFlowController("inlet", MassFlowControllerLimits(0.2, "SLPM"))
     meter = SimulatedSensor("outlet", 0.09, "SLPM")

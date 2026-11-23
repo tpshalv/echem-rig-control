@@ -46,6 +46,18 @@ _DENSITY_FACTORS = {"ma/cm²": 1.0, "ma/cm2": 1.0, "a/cm²": 1000.0, "a/cm2": 10
 _TYPED_PRESSURE = {"bara", "psia", "kpaa", "mbara", "paa"}
 
 
+#: Which recorded channels are which quantity, for the screens, graphs and exports
+#: alike.  Volumetric flow and the totaliser are different quantities and are
+#: left alone, as are differential pressures.
+ABSOLUTE_PRESSURE_CHANNELS = frozenset({"absolute_pressure", "pressure_setpoint_absolute"})
+MASS_FLOW_CHANNELS = frozenset({"mass_flow", "setpoint", "excess_flow"})
+CURRENT_CHANNELS = frozenset({"current", "current_limit"})
+#: rig_control.calibrated_channels.CURRENT_DENSITY_CHANNEL (not imported: drivers only here).
+DENSITY_CHANNEL = "current_density"
+#: The recording metadata entry that fixes a run's export units when it starts.
+EXPORT_UNITS_KEY = "export_units"
+
+
 class Quantity(StrEnum):
     PRESSURE = "pressure"
     FLOW = "flow"
@@ -65,6 +77,19 @@ def _factor(quantity: Quantity, unit: str) -> float:
         return table[key]
     except KeyError:
         raise ValueError(f"Unsupported {quantity.value} unit {unit!r}") from None
+
+
+def reading_quantity(channel: str, unit: str) -> "Quantity | None":
+    """The quantity a recorded channel is, if it is one shown in a chosen unit."""
+    if channel == DENSITY_CHANNEL:
+        return Quantity.DENSITY
+    if channel in CURRENT_CHANNELS and unit == "A":
+        return Quantity.CURRENT
+    if channel in ABSOLUTE_PRESSURE_CHANNELS:
+        return Quantity.PRESSURE
+    if channel in MASS_FLOW_CHANNELS:
+        return Quantity.FLOW
+    return None
 
 
 def convert(value: float, from_unit: str, to_unit: str, quantity: Quantity) -> float:
@@ -129,6 +154,16 @@ class DisplayUnits:
     def show(self, value: float, unit: str, quantity: Quantity) -> tuple[float, str]:
         """Convert one value for display; a unit that can't be converted is shown as it is."""
         return _converted(value, unit, self.unit_for(quantity), quantity)
+
+    def show_reading(self, channel: str, value, unit: str) -> tuple[object, str]:
+        """One recorded reading in the display unit for its channel; others unchanged."""
+        quantity = reading_quantity(channel, unit)
+        if quantity is None or isinstance(value, bool) or not isinstance(value, (int, float)):
+            return value, unit
+        return self.show(float(value), unit, quantity)
+
+    def as_dict(self) -> dict[str, str]:
+        return {"pressure": self.pressure, "flow": self.flow, "current": self.current, "density": self.density}
 
     def show_pressure(self, value: float, unit: str) -> tuple[float, str]:
         """Convert one absolute pressure for display."""

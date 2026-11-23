@@ -162,6 +162,7 @@ class IncrementalCsvExporter:
             signals = self.signals(connection)
             metadata_path = self.directory / "metadata.json"
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            self._units = export_units(metadata)
             headers = self.headers(signals, metadata)
             if rebuild:
                 temporary = self.path.with_suffix(".csv.tmp")
@@ -196,10 +197,11 @@ class IncrementalCsvExporter:
     @staticmethod
     def headers(signals, metadata) -> list[str]:
         labels = _channel_labels(metadata)
+        units = export_units(metadata)
         return ["timestamp_utc"] + [
             f"{device}.{channel}"
             + (f" ({labels[device][channel]})" if channel in labels.get(device, {}) else "")
-            + f" [{unit}]" for device, channel, unit in signals
+            + f" [{export_unit(units, channel, unit)}]" for device, channel, unit in signals
         ] + ANNOTATION_HEADERS
 
     def notes(self) -> tuple[dict[int, tuple[str, str]], int]:
@@ -221,6 +223,7 @@ class IncrementalCsvExporter:
             if bucket <= through and (after is None or bucket > after)
         )
         blank = [""] * len(signals)
+        units = getattr(self, "_units", None)
         next_note = 0
         query = "SELECT bucket, device, channel, total, count, latest_value FROM bins WHERE bucket<=?"
         parameters = [through]
@@ -240,7 +243,7 @@ class IncrementalCsvExporter:
                 for _, device, channel, total, count, latest in records
             }
             yield [self._timestamp(bucket),
-                   *(state_label(values[(device, channel)], unit)
+                   *(state_label(export_value(units, channel, values[(device, channel)], unit), unit)
                      if (device, channel) in values else ""
                      for device, channel, unit in signals),
                    *notes.get(bucket, ("", ""))]
@@ -253,11 +256,35 @@ class IncrementalCsvExporter:
         with self._connect() as connection:
             connection.execute("BEGIN")
             signals = self.signals(connection)
+            self._units = export_units(json.loads((self.directory / "metadata.json").read_text(encoding="utf-8")))
             notes, _size = self.notes()
             maximum = _latest_bucket(
                 connection.execute("SELECT MAX(bucket) FROM bins").fetchone()[0], notes
             )
             yield signals, self.rows(connection, signals, through=maximum, notes=notes)
+
+
+def export_units(metadata: dict) -> "DisplayUnits | None":
+    """The units a run's CSV and Excel use, fixed when it started; None (instrument units) before that existed."""
+    from rig_control.display_units import EXPORT_UNITS_KEY, DisplayUnits
+
+    raw = dict(metadata.get("extra", {})).get(EXPORT_UNITS_KEY)
+    if not raw:
+        return None
+    try:
+        return DisplayUnits(**(json.loads(raw) if isinstance(raw, str) else raw))
+    except (TypeError, ValueError):
+        return None  # Unreadable: instrument units are always truthful.
+
+
+def export_unit(units, channel: str, unit: str) -> str:
+    """The unit a column is exported in, in ASCII like the recordings (mA/cm2)."""
+    shown = unit if units is None else units.show_reading(channel, 1.0, unit)[1]
+    return shown.replace("²", "2")
+
+
+def export_value(units, channel: str, value: float, unit: str) -> float:
+    return value if units is None else units.show_reading(channel, value, unit)[0]
 
 
 def _latest_bucket(measurement_maximum: int | None, notes: dict) -> int | None:

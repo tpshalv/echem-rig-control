@@ -813,17 +813,8 @@ class OperationViewModel:
     def _for_display(self, channel: str, value, unit: str):
         """Convert one reading into the unit this rig is set to show."""
 
-        if value is None or not isinstance(value, (int, float)) or isinstance(value, bool):
-            return value, unit
-        if channel == CURRENT_DENSITY_CHANNEL:
-            return self._display_units.show_density(float(value))
-        if channel in self._CURRENT_CHANNELS and unit == "A":
-            return self._display_units.show_current(float(value))
-        if channel in self._PRESSURE_CHANNELS:
-            return self._display_units.show_pressure(float(value), unit)
-        if channel in self._FLOW_CHANNELS:
-            return self._display_units.show_flow(float(value), unit)
-        return value, unit
+        # The same rules as the exports, so screens and files agree.
+        return self._display_units.show_reading(channel, value, unit)
 
     def _route_override(self, command) -> str | None:
         """Send a manual command to the running recipe as an override, if overrides are on."""

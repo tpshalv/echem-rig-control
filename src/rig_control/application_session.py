@@ -1,6 +1,8 @@
+import json
 from pathlib import Path
 
 from rig_control.app_settings import AppSettings
+from rig_control.display_units import EXPORT_UNITS_KEY
 from rig_control.supply_limits import SupplyLimitGuard, instrument_maximums
 from rig_control.calibrated_channels import CalibratedChannels
 from rig_control.cell_area import CellArea
@@ -123,7 +125,9 @@ class ApplicationSession:
         return {**capture_run_context(self.profile, self.settings, self.device_manager),
                 **self.calibrated_channels.snapshot(self.device_manager),
                 **self.excess_flow.snapshot(),
-                **self.cell_area.snapshot()}
+                **self.cell_area.snapshot(),
+                # Fixed at the start, so a run's CSV and Excel never mix units.
+                EXPORT_UNITS_KEY: json.dumps(self.settings.display_units.as_dict(), ensure_ascii=False)}
 
     def record_control_event(self, event: Event, details: str | None = None) -> None:
         """Send commands to both the technical log and the active run journal."""

@@ -7,6 +7,10 @@ is indented, tinted and runs once per loop value.
 The right side summarises the selected step.  Double-clicking a value there
 changes it in place; double-clicking the step opens ``StepEditorDialog`` for
 everything else.  Hardware work stays in ``RecipeRunner``.
+
+While a recipe runs, "Edit running recipe" loads it here to revise what the
+run has still to do: finished steps are greyed, the running step is marked,
+and "Apply to run" hands the edit to the runner (the file is not changed).
 """
 from collections.abc import Callable
 from dataclasses import replace
@@ -25,6 +29,8 @@ from rig_control.data.experiment_naming import describe_recording, existing_reco
 from rig_control.recipes.execution import ORDER_SEED_LIMIT, RecipeRunner, new_order_seed
 from rig_control.recipes import Assignment, Ramp, RampKind
 from rig_control.recipes.plan import PlannedRamp, has_shuffled_loops, plan, values_before
+from rig_control.recipes.preview import preview_items
+from rig_control.recipes.revision import RevisionRefused, finished_steps, remaining_plan
 from rig_control.recipes.outline import (
     LoopEnd, OutlineError, OutlineRow, delete, depths, duplicate, from_outline, insert, is_loop, move,
     partner, to_outline,
@@ -83,6 +89,12 @@ class RecipeBuilderWindow:
         #: drawn after each run, so running again gives a new order.
         self._order_seed = new_order_seed()
         self._was_running = False
+        #: True while the editor holds the running recipe, to revise it.
+        self._run_edit = False
+        #: The run's place last shown, so the marks follow the run.
+        self._run_seen: object = None
+        #: Each tree line's own tags, before the run marks are added.
+        self._line_tags: dict[str, tuple[str, ...]] = {}
         root.title("Recipe builder")
         root.geometry("1120x720"); root.minsize(860, 560)
         root.columnconfigure(0, weight=1); root.rowconfigure(2, weight=1)
@@ -104,6 +116,9 @@ class RecipeBuilderWindow:
         ttk.Button(top, text="New", command=self._new).grid(row=0, column=2, padx=3)
         ttk.Button(top, text="Load…", command=self._load).grid(row=0, column=3, padx=3)
         ttk.Button(top, text="Save…", command=self._save).grid(row=0, column=4, padx=3)
+        self._run_banner = ttk.Label(top, foreground=INFO_TEXT, wraplength=1000, justify="left")
+        self._run_banner.grid(row=1, column=0, columnspan=5, sticky="w", pady=(6, 0))
+        self._run_banner.grid_remove()
 
     def _build_toolbar(self) -> None:
         bar = ttk.Frame(self._root, padding=(12, 4)); bar.grid(row=1, column=0, sticky="ew")
@@ -150,6 +165,9 @@ class RecipeBuilderWindow:
         self._tree.tag_configure("next", foreground=INFO_TEXT)
         self._tree.tag_configure("settle", foreground=MUTED_TEXT)
         self._tree.tag_configure("end", font=("Segoe UI", 10, "bold"), background="#ECEFF3")
+        # Created last, so they win over the tints above.
+        self._tree.tag_configure("done", foreground="#9AA3AD")
+        self._tree.tag_configure("running", background="#FFF1B8", font=("Segoe UI", 10, "bold"))
         self._tree.bind("<<TreeviewSelect>>", lambda _e: self._on_select())
         self._tree.bind("<Double-1>", self._on_double_click)
         self._tree.bind("<Return>", lambda _e: self._edit_selected())
@@ -183,7 +201,9 @@ class RecipeBuilderWindow:
         ttk.Button(bottom, text="Validate", command=self._validate).grid(row=0, column=3, padx=(10, 3))
         self._start = ttk.Button(bottom, text="Start", command=self._start_recipe); self._start.grid(row=0, column=4, padx=3)
         ttk.Button(bottom, text="Stop → end state", command=self._runner.stop).grid(row=0, column=5, padx=3)
-        self._order_row = ttk.Frame(bottom); self._order_row.grid(row=1, column=0, columnspan=6, sticky="w", pady=(8, 0))
+        self._run_edit_button = ttk.Button(bottom, text="Edit running recipe", command=self._toggle_run_edit)
+        self._run_edit_button.grid(row=0, column=6, padx=(10, 3))
+        self._order_row = ttk.Frame(bottom); self._order_row.grid(row=1, column=0, columnspan=7, sticky="w", pady=(8, 0))
         ttk.Label(self._order_row, text="Shuffled loops use order no.").pack(side="left")
         self._order_entry = ttk.Entry(self._order_row, width=9); self._order_entry.pack(side="left", padx=5)
         self._order_entry.bind("<Return>", lambda _e: self._order_typed())
@@ -194,7 +214,7 @@ class RecipeBuilderWindow:
             "The timeline shows this order and Start runs it. Type a number from an earlier run to repeat its order."
         )).pack(side="left", padx=(8, 0))
         self._status = ttk.Label(bottom, text="No recipe running", font=SECTION_FONT)
-        self._status.grid(row=2, column=0, columnspan=6, sticky="w", pady=(8, 0))
+        self._status.grid(row=2, column=0, columnspan=7, sticky="w", pady=(8, 0))
 
     # --- lookups ---
 
@@ -301,6 +321,7 @@ class RecipeBuilderWindow:
 
     def _refresh(self) -> None:
         self._tree.delete(*self._tree.get_children())
+        self._line_tags = {}
         self._analyse()
         levels = depths(self._rows)
         self._step_text_width = 0
@@ -327,12 +348,14 @@ class RecipeBuilderWindow:
                 iid = str(index) if device_id is None else f"{index}:{device_id}"
                 values = (index + 1, name, time, guide + text) if line_number == 0 else ("", "", "", guide + text)
                 self._tree.insert("", "end", iid=iid, values=values, tags=tags)
+                self._line_tags[iid] = tuple(tags)
                 self._step_text_width = max(self._step_text_width, self._measure.measure(guide + text))
         end_text = "■ End state (finish or Stop):  " + ";  ".join(
             end_state_summary(self._end_state, self._all_roles, self._units, self._has_safe_state))
         self._tree.insert("", "end", iid="end", values=("", "End state", "", end_text), tags=("end",))
         self._step_text_width = max(self._step_text_width, self._measure.measure(end_text))
         self._fit_step_column()
+        self._mark_run(force=True)
         if self._end_selected:
             self._tree.selection_set("end")
         elif self._selected is not None and self._selected < len(self._rows):
@@ -379,6 +402,9 @@ class RecipeBuilderWindow:
     def _refresh_timeline(self) -> None:
         self._timeline.delete(*self._timeline.get_children())
         limit = 500
+        self._timeline.heading("at", text="FROM NOW" if self._run_edit else "START")
+        if self._run_edit:
+            self._refresh_run_timeline(limit); return
         try:
             rows = (preview_recipe(self._recipe(), limit=limit, text=self._units.text, seed=self._order_seed)
                     if self._rows else ())
@@ -392,6 +418,130 @@ class RecipeBuilderWindow:
         if has_shuffled_loops(from_outline(self._rows)):
             note += f" Shuffled loops in order no. {self._order_seed}."
         self._timeline_note.configure(text=note)
+
+    def _refresh_run_timeline(self, limit: int) -> None:
+        """What is left of the run, as edited here (or as it runs, if the edit can't be planned)."""
+        try:
+            snapshot = self._runner.snapshot()
+        except RuntimeError:
+            self._timeline_note.configure(text="No recipe is running."); return
+        note = ""
+        try:
+            items = list(preview_items(remaining_plan(snapshot, self._recipe()), limit=limit, text=self._units.text,
+                                       start_seconds=snapshot.wait_left, targets=dict(snapshot.written)))
+            note = "What is left as edited here (Apply to run to make it so)."
+        except (ValueError, TypeError) as error:
+            items = list(preview_items(remaining_plan(snapshot), limit=limit, text=self._units.text,
+                                       start_seconds=snapshot.wait_left, targets=dict(snapshot.written)))
+            note = f"Showing what is left as it runs; the edits can't be planned: {error}"
+        for row in items:
+            self._timeline.insert("", "end", values=(format_clock(row.planned_start_seconds),
+                                                     " › ".join(row.position) or "—", row.label))
+        self._timeline_note.configure(text=(f"Showing the first {limit} rows. " if len(items) == limit else "") + note)
+
+    # --- editing the running recipe ---
+
+    def _row_step_id(self, index: int) -> str:
+        row = self._rows[index]
+        return self._rows[partner(self._rows, index)].id if isinstance(row, LoopEnd) else row.id  # type: ignore[union-attr]
+
+    def _mark_run(self, force: bool = False) -> None:
+        """Grey the finished steps and mark the running one, following the run."""
+        place = None
+        if self._run_edit:
+            try:
+                snapshot = self._runner.snapshot()
+                place = (snapshot.where, snapshot.revision)
+            except RuntimeError:
+                snapshot = None
+        if not force and place == self._run_seen:
+            return
+        self._run_seen = place
+        finished: set[str] = set(); inside: set[str] = set(); running = None
+        if self._run_edit and snapshot is not None:
+            try:
+                finished, inside = finished_steps(snapshot)
+            except ValueError:
+                pass
+            running = snapshot.where[-1][0] if snapshot.where else None
+        for iid, tags in self._line_tags.items():
+            extra: tuple[str, ...] = ()
+            if iid != "end" and self._run_edit:
+                step_id = self._row_step_id(int(iid.partition(":")[0]))
+                extra = ("running",) if step_id == running else ("done",) if step_id in finished else ()
+            if self._tree.exists(iid):
+                self._tree.item(iid, tags=tags + extra)
+
+    def _show_run_banner(self, extra: str = "") -> None:
+        if not self._run_edit:
+            self._run_banner.configure(text=extra)
+            (self._run_banner.grid if extra else self._run_banner.grid_remove)()
+            return
+        revision = self._runner.status.revision
+        self._run_banner.configure(text=(
+            f"Editing the running recipe{f' (revision {revision})' if revision else ''}. Greyed steps have finished; "
+            "the highlighted step is running and finishes as it is (changes to it apply from its next run). "
+            "Press Apply to run to change what is left of this run; the recipe file is not changed."
+            + (f"\n{extra}" if extra else "")))
+        self._run_banner.grid()
+
+    def _toggle_run_edit(self) -> None:
+        if self._run_edit:
+            self._leave_run_edit("Stopped editing the run; the editor keeps the recipe as it is here.")
+            return
+        try:
+            snapshot = self._runner.snapshot()
+        except RuntimeError as error:
+            messagebox.showerror("Edit running recipe", str(error), parent=self._root); return
+        if self._rows and not messagebox.askyesno(
+                "Edit running recipe", "Replace the recipe in the editor with the one that is running?\n\n"
+                "Unsaved changes here will be lost.", parent=self._root):
+            return
+        self._load_rows(snapshot.recipe)
+        self._run_edit, self._order_seed = True, snapshot.seed
+        self._refresh(); self._show_quick(); self._show_run_banner()
+
+    def _leave_run_edit(self, message: str = "") -> None:
+        self._run_edit = False
+        self._refresh(); self._show_run_banner(message)
+
+    def _apply_to_run(self) -> None:
+        recipe = self._recipe()
+        try:
+            changes = self._runner.check_revision(recipe)
+        except RevisionRefused as error:
+            messagebox.showerror("Apply to run", "Not applied:\n\n" + "\n\n".join(
+                "• " + p for p in error.problems[:6]), parent=self._root); return
+        except RuntimeError as error:
+            messagebox.showerror("Apply to run", str(error), parent=self._root)
+            self._leave_run_edit(); return
+        lines = []
+        if changes.running_changed:
+            lines.append(f"Running now, then changed from its next run: {changes.running_changed}")
+        for title, items in (("Changed", changes.changed), ("Added", changes.added),
+                             ("No longer run", changes.removed)):
+            if items:
+                lines.append(f"{title}:\n" + "\n".join("   • " + i for i in items[:12])
+                             + (f"\n   … and {len(items) - 12} more" if len(items) > 12 else ""))
+        if changes.end_state_changed:
+            lines.append("End state:\n" + "\n".join("   • " + line for line in end_state_summary(
+                self._end_state, self._all_roles, self._units, self._has_safe_state)))
+        lines.append(f"About {format_duration(round(changes.remaining_seconds))} left after this change.")
+        if not messagebox.askokcancel("Apply to run", "\n\n".join(lines) + "\n\nApply this to the running recipe? "
+                                      "The recipe file is not changed.", parent=self._root):
+            return
+        try:
+            self._runner.revise(recipe)
+        except RevisionRefused as error:
+            messagebox.showerror("Apply to run", "Not applied:\n\n" + "\n\n".join(
+                "• " + p for p in error.problems[:6]), parent=self._root); return
+        except RuntimeError as error:
+            messagebox.showerror("Apply to run", str(error), parent=self._root)
+            self._leave_run_edit(); return
+        self._show_run_banner(f"Applied at {datetime.now().strftime('%H:%M')}.")
+        self._mark_run(force=True)
+        if self._tabs.select() == str(self._timeline_tab):
+            self._refresh_timeline()
 
     # --- selection ---
 
@@ -810,6 +960,8 @@ class RecipeBuilderWindow:
         entry.delete(0, "end"); entry.insert(0, text)
 
     def _load_rows(self, recipe: Recipe) -> None:
+        if self._run_edit:
+            self._run_edit = False; self._show_run_banner()
         self._rows = to_outline(recipe.steps); self._selected = self._selected_device = None
         self._end_state, self._end_selected = recipe.end_state, False
         self._set_entry(self._name, recipe.name)
@@ -844,6 +996,8 @@ class RecipeBuilderWindow:
                                 + (f"\n\n{density}" if density else ""), parent=self._root)
 
     def _start_recipe(self) -> None:
+        if self._run_edit:
+            self._apply_to_run(); return
         if self._plan_recording is None:
             messagebox.showerror("Start recipe", "Open the recipe builder from Operation to record a run.",
                                  parent=self._root); return
@@ -891,7 +1045,7 @@ class RecipeBuilderWindow:
 
     def _refresh_order_row(self) -> None:
         """Show the order number only when a loop is shuffled."""
-        if has_shuffled_loops(from_outline(self._rows)):
+        if has_shuffled_loops(from_outline(self._rows)) and not self._run_edit:
             self._order_row.grid()
             if self._root.focus_get() is not self._order_entry:
                 self._set_entry(self._order_entry, str(self._order_seed))
@@ -925,12 +1079,18 @@ class RecipeBuilderWindow:
             return
         status = self._runner.status
         running = status.state.value == "running"
+        if self._run_edit and not running:
+            self._leave_run_edit(f"The run has ended ({status.state.value}); this is now an ordinary recipe "
+                                 "in the editor.")
         if self._was_running and not running:
             self._reshuffle()  # The finished run's order is recorded; the next run gets a new one.
         self._was_running = running
+        if self._run_edit:
+            self._mark_run()
         if status.state.value == "running":
             where = " › ".join(status.position)
-            text = (f"Running: {where + ' › ' if where else ''}{status.active_step or ''}   "
+            revision = f" · revision {status.revision}" if status.revision else ""
+            text = (f"Running{revision}: {where + ' › ' if where else ''}{status.active_step or ''}   "
                     f"({format_duration(round(status.elapsed_seconds))} elapsed, "
                     f"~{format_duration(round(status.estimated_remaining_seconds))} left)")
         elif status.state.value == "idle":
@@ -939,5 +1099,10 @@ class RecipeBuilderWindow:
             text = f"Recipe {status.state.value}" + (f": {status.failure}" if status.failure else "")
         self._status.configure(text=text)
         self._destination.configure(text=self._recording_preview())
-        self._start.configure(state="disabled" if self._runner.is_running else "normal")
+        if self._run_edit:
+            self._start.configure(text="Apply to run", state="normal")
+        else:
+            self._start.configure(text="Start", state="disabled" if self._runner.is_running else "normal")
+        self._run_edit_button.configure(text="Stop editing run" if self._run_edit else "Edit running recipe",
+                                        state="normal" if running else "disabled")
         self._root.after(250, self._tick)

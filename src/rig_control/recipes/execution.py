@@ -231,11 +231,7 @@ class RecipeRunner:
         ``RevisionRefused`` with the reasons, or ``RuntimeError`` if no run.
         """
         for _attempt in range(5):
-            revision = prepare_revision(self.snapshot(), recipe)
-            try:
-                self._check_writes(revision.writes, recipe)
-            except RecipeValidationError as error:
-                raise RevisionRefused((str(error),)) from error
+            revision = self._prepare(recipe)
             future = self._submit(lambda revision=revision: self._apply_revision(revision))
             try:
                 return future.result(timeout)  # type: ignore[return-value]
@@ -245,6 +241,18 @@ class RecipeRunner:
                 raise RevisionRefused(("The run did not take the change in time (a device may be slow "
                                        "to answer); nothing was changed. Try again.",)) from None
         raise RevisionRefused(("The run kept moving on while the change was checked; try again.",))
+
+    def check_revision(self, recipe: Recipe) -> RevisionChanges:
+        """What ``revise`` would change now, without changing anything; raises as it does."""
+        return self._prepare(recipe).changes
+
+    def _prepare(self, recipe: Recipe) -> Revision:
+        revision = prepare_revision(self.snapshot(), recipe)
+        try:
+            self._check_writes(revision.writes, recipe)
+        except RecipeValidationError as error:
+            raise RevisionRefused((str(error),)) from error
+        return revision
 
     def _submit(self, work: Callable[[], object]) -> Future:
         future: Future = Future()

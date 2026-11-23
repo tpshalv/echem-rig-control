@@ -245,9 +245,20 @@ def prepare_revision(snapshot: RunSnapshot, new: Recipe) -> Revision:
                     tuple(rest_writes + tail_writes))
 
 
-def remaining_plan(snapshot: RunSnapshot) -> Iterator[PlanItem]:
-    """Everything left to run, from the snapshot: the rest of the running step, then the plan after it."""
+def remaining_plan(snapshot: RunSnapshot, recipe: Recipe | None = None) -> Iterator[PlanItem]:
+    """Everything left to run: the rest of the running step, then the plan after it.
+
+    With ``recipe``, the plan after it is that recipe's, i.e. what would run
+    if it were applied (unchecked; ``prepare_revision`` says if it can be).
+    """
     predicted = dict(snapshot.written)
     predicted.update((w.key, w.value) for item in snapshot.rest if isinstance(item, PlannedSet) for w in item.writes)
     yield from snapshot.rest
-    yield from resume_plan(snapshot.recipe.steps, snapshot.where, lambda: predicted, seed=snapshot.seed)
+    yield from resume_plan((recipe or snapshot.recipe).steps, snapshot.where, lambda: predicted, seed=snapshot.seed)
+
+
+def finished_steps(snapshot: RunSnapshot) -> tuple[set[str], set[str]]:
+    """Step IDs of the running recipe that will not run again, and those the run is inside (running now)."""
+    inside = {step_id for step_id, _ in snapshot.where or ()}
+    will_run = _tail_ids(remaining_plan(snapshot))
+    return {s.id for s in iter_steps(snapshot.recipe.steps)} - will_run - inside, inside

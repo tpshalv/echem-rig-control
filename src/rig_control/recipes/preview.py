@@ -1,9 +1,10 @@
 """Counts, durations and bounded previews, all read from the one ``plan()``."""
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 from rig_control.recipes.model import Recipe, RecipeStep, WaitPurpose
-from rig_control.recipes.plan import PlannedSet, PlannedWait, ValueText, plan, value_text
+from rig_control.recipes.plan import PlanItem, PlannedSet, PlannedWait, ValueText, plan, value_text
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,13 +75,24 @@ def preview_recipe(recipe: Recipe, *, limit: int = 500, offset: int = 0,
     display units.  Parameters always keep the recipe's own values.
     Raises ``RampStartUnknown`` if a ramp has nothing to start from.
     """
+    return preview_items(plan(recipe.steps, text=text, seed=seed), limit=limit, offset=offset, text=text)
+
+
+def preview_items(items: Iterable[PlanItem], *, limit: int = 500, offset: int = 0, text: ValueText = value_text,
+                  start_seconds: float = 0.0, targets: dict[tuple[str, str], object] | None = None
+                  ) -> tuple[PreviewRow, ...]:
+    """``preview_recipe`` for any run of plan items, e.g. what is left of a running recipe.
+
+    ``start_seconds`` is when the first item starts, and ``targets`` what
+    was set before it.
+    """
     if limit <= 0 or offset < 0:
         raise ValueError("Preview limit must be positive and offset non-negative")
     rows: list[PreviewRow] = []
-    elapsed = 0.0
+    elapsed = start_seconds
     index = 0
-    targets: dict[tuple[str, str], object] = {}
-    for item in plan(recipe.steps, text=text, seed=seed):
+    targets = dict(targets or {})
+    for item in items:
         if len(rows) >= limit:
             break
         if isinstance(item, PlannedSet):

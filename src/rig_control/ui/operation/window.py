@@ -890,7 +890,8 @@ class OperationWindow:
         self._dashboard_window = LiveDashboardWindow(
             self._root,
             signal_provider=self._dashboard_signals,
-            history_provider=self._view_model.measurement_history_for_period,
+            # In the display units, as the table shows them.
+            history_provider=self._view_model.display_history_for_period,
             on_close=lambda: setattr(self, "_dashboard_window", None),
             annotations=self._annotation_hub,
         )
@@ -908,14 +909,15 @@ class OperationWindow:
                 else f"{reading.device_id} — {reading.channel}"
             )
             channel = reading.channel.casefold()
-            unit = reading.unit.casefold()
+            shown_unit = self._view_model.display_unit(reading.channel, reading.unit)
+            unit = shown_unit.casefold()
             if "temp" in channel or unit in {"degc", "°c", "k"}:
                 group = "Temperatures"
             elif "flow" in channel or unit in {"sccm", "slpm", "lpm"}:
                 group = "Flows"
             elif "humid" in channel or "%rh" in unit:
                 group = "Humidity"
-            elif "pressure" in channel or unit in {"pa", "kpa", "bar", "psia"}:
+            elif "pressure" in channel or unit in {"pa", "kpa", "bar", "psia", "bara", "kpaa", "mbara"}:
                 group = "Pressure"
             elif channel in {"voltage", "current", "current_density", "power"} or unit in {
                 "v",
@@ -930,7 +932,7 @@ class OperationWindow:
                     reading.device_id,
                     reading.channel,
                     label,
-                    reading.unit,
+                    shown_unit,
                     group,
                     quantity=row.channel_name if row is not None else "",
                     is_setpoint="setpoint" in channel or "limit" in channel,
@@ -977,7 +979,7 @@ class OperationWindow:
             channel=channel,
             history_provider=(
                 lambda seconds, selected_device=device_id, selected_channel=channel:
-                self._view_model.measurement_history_for_period(
+                self._view_model.display_history_for_period(
                     selected_device,
                     selected_channel,
                     seconds,

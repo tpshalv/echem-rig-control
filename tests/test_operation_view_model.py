@@ -840,3 +840,28 @@ def test_connecting_with_nothing_connected_does_not_start_monitoring() -> None:
     model.connect_all()
 
     assert model.is_monitoring is False
+
+
+def test_graph_history_is_in_the_display_units_like_the_table() -> None:
+    from rig_control.display_units import DisplayUnits
+
+    model, _, polling, _ = make_model()
+    model._display_units = DisplayUnits(flow="SCCM", current="mA")
+    for second, (channel, value, unit) in enumerate([("mass_flow", 0.2, "SLPM"), ("current", 0.25, "A")]):
+        polling.results.put(PollingBatch(
+            started_at=FIXED_TIME, finished_at=FIXED_TIME,
+            measurements=(MeasurementRecord(
+                device_id="dev", channel=channel,
+                measurement=Measurement(value, unit, timestamp=FIXED_TIME + timedelta(seconds=second),
+                                        quality=Quality.GOOD)),),
+            failures=(), events=(),
+        ))
+        model.collect_polling_results()
+
+    flow = model.display_history_for_period("dev", "mass_flow", None)
+    current = model.display_history_for_period("dev", "current", None)
+    assert [(r.value, r.unit) for r in flow] == [(200.0, "SCCM")]
+    assert [(r.value, r.unit) for r in current] == [(250.0, "mA")]
+    # The stored history keeps the instrument's own units.
+    assert model.measurement_history("dev", "mass_flow")[0].unit == "SLPM"
+    assert model.display_unit("temperature", "degC") == "degC"

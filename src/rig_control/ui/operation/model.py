@@ -1052,6 +1052,34 @@ class OperationViewModel:
         history = self._measurement_histories.get((device_id, channel))
         return () if history is None else history.rows_for_period(seconds)
 
+    def display_history_for_period(
+        self,
+        device_id: str,
+        channel: str,
+        seconds: int | None,
+    ) -> tuple[LiveMeasurementRow, ...]:
+        """``measurement_history_for_period`` in the display units, so graphs match the table."""
+
+        rows = self.measurement_history_for_period(device_id, channel, seconds)
+        if not rows:
+            return rows
+        unit = self.display_unit(channel, rows[-1].unit)
+        if unit == rows[-1].unit:
+            return rows
+        return tuple(
+            replace(row, value=self._for_display(channel, row.value, row.unit)[0], unit=unit)
+            if row.unit == rows[-1].unit and isinstance(row.value, (int, float)) and not isinstance(row.value, bool)
+            else row
+            for row in rows
+        )
+
+    def display_unit(self, channel: str, unit: str) -> str:
+        """The unit a reading of this channel is shown in on screens and graphs."""
+
+        if channel in {"output_enabled", "regulation_mode"}:
+            return unit
+        return self._for_display(channel, 1.0, unit)[1]
+
     def latest_measurement(
         self,
         device_id: str,

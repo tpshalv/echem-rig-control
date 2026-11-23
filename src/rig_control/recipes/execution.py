@@ -35,12 +35,13 @@ from rig_control.instrument_settings.calibration import CalibrationService, Pump
 from rig_control.models import Event, EventSeverity
 from rig_control.devices.safe_state import SafeStateCapable
 from rig_control.recipes.model import (
-    CURRENT_DENSITY_SETTING, EndAction, Assignment, LoopStep, Recipe, RepeatStep, WaitStep, iter_steps, power_supply_mode_of, recipe_to_dict,
+    CURRENT_DENSITY_SETTING, POWER_SUPPLY_MODE_SETTINGS, EndAction, Assignment, LoopStep, Recipe, RepeatStep, WaitStep, iter_steps, power_supply_mode_of, recipe_to_dict,
 )
 from rig_control.recipes.plan import (
     PlanItem, PlannedLoopOrder, PlannedRamp, PlannedSet, PlannedWait, SupplySequence, plan, recipe_problems,
 )
 from rig_control.recipes.preview import estimate_recipe
+from rig_control.supply_limits import SupplyLimits
 from rig_control.recipes.revision import (
     Revision, RevisionChanges, RevisionRefused, RunSnapshot, override_problems, prepare_revision, structure_problems,
 )
@@ -151,10 +152,13 @@ class RecipeRunner:
     def __init__(self, control_service: RigControlService, device_manager: DeviceManager, *,
                  recorder: ExperimentRecorder | None = None, event_sink: Callable[[Event], None] | None = None,
                  sleeper: Callable[[float], None] = sleep, clock: Callable[[], float] = monotonic,
-                 pump_calibrations: CalibrationService | None = None, cell_area: CellArea | None = None) -> None:
+                 pump_calibrations: CalibrationService | None = None, cell_area: CellArea | None = None,
+                 supply_limits: SupplyLimits | None = None) -> None:
         self._control = control_service; self._devices = device_manager; self._recorder = recorder
         self._pump_calibrations = pump_calibrations or PumpCalibrationService()
         self._cell_area = cell_area or CellArea()
+        #: Everyday limits; a supply entering a mode gets its compliance limit from them.
+        self._supply_limits = supply_limits or SupplyLimits()
         self._event_sink = event_sink; self._sleeper = sleeper; self._clock = clock
         self._cancel = ThreadEvent(); self._lock = Lock(); self._thread: Thread | None = None
         self._status = RecipeRunStatus(RecipeRunState.IDLE); self._result: RecipeRunResult | None = None
@@ -221,8 +225,11 @@ class RecipeRunner:
         for write in unique.values():
             try:
                 device = self._devices.get(write.device_id)
-                self._command(write)
+                command = self._command(write)
                 self._validate_capability_and_limits(device, write)
+                problem = self._control.limit_problem(command)
+                if problem:
+                    raise ValueError(problem)
             except CellAreaMissing as error:
                 raise RecipeValidationError(str(error)) from error
             except Exception as error:
@@ -603,6 +610,7 @@ class RecipeRunner:
             # Intended mode only; actual CC/CV is the polled regulation_mode channel.
             self._supply_modes[step.device_id] = mode
             self._emit("power_supply_mode", f"{step.device_id}={mode.value}")
+            self._write_default_limit(step, mode, position)
         self._set_status(name or f"Set {step.setting}", position)
         command = self._command(step)
         self._control.execute(command)
@@ -616,6 +624,33 @@ class RecipeRunner:
                  {"amps": command.current, "area_cm2": self._cell_area.cm2}
                  if step.setting == CURRENT_DENSITY_SETTING else {})
         self._emit("recipe_command", f"{step.device_id}.{step.setting}={step.value}", **extra)
+
+    def _write_default_limit(self, step: Assignment, mode: PowerSupplyOperatingMode, position: tuple[str, ...]) -> None:
+        """A supply entering a mode gets that mode's compliance limit from Settings first.
+
+        The recipe need not set it; if it does (now or later), its own value
+        replaces this one, and may only be lower (the everyday value is also
+        the ceiling).
+        """
+        limit_setting = POWER_SUPPLY_MODE_SETTINGS[mode][1]
+        if step.setting == limit_setting:
+            return  # This write is the limit.
+        try:
+            maximums = getattr(self._devices.get(step.device_id), "limits", None)
+        except Exception:
+            maximums = None
+        if mode is PowerSupplyOperatingMode.CONSTANT_CURRENT:
+            value = self._supply_limits.default_voltage_limit(getattr(maximums, "maximum_voltage", None))
+        else:
+            value = self._supply_limits.default_current_limit(self._cell_area.cm2,
+                                                              getattr(maximums, "maximum_current", None))
+        limit = Assignment(step.device_id, limit_setting, value)
+        self._control.execute(self._command(limit))
+        with self._lock:
+            self._written[limit.key] = value
+            self._supply.write(limit)
+        self._emit("recipe_command", f"{step.device_id}.{limit_setting}={value:g}", default_from_settings=True,
+                   position=list(position))
 
     def _pump_calibration(self, device_id: str):
         calibration = self._pump_calibrations.active_calibration(device_id)

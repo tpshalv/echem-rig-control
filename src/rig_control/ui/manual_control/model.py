@@ -32,6 +32,7 @@ from rig_control.models import (
     DeviceStatus,
 )
 
+from rig_control.supply_limits import SupplyLimitGuard
 from rig_control.ui.manual_control.types import (
     DEFAULT_WIRING_CURRENT_CEILING_AMPS,
     ManualActionResult,
@@ -158,10 +159,28 @@ class ManualControlViewModel:
         to exceed the capability advertised by an individual instrument.
         """
 
+        guard = self._control_service.limit_guard
+        if isinstance(guard, SupplyLimitGuard):
+            # The everyday limits, area included, as every command is checked against.
+            return min(
+                guard.limits.default_current_limit(guard.area_cm2, device.limits.maximum_current),
+                self.effective_current_ceiling(),
+            )
         return min(
             self._power_supply_safety.default_current_amps,
             self.effective_current_ceiling(),
             device.limits.maximum_current,
+        )
+
+    def _default_voltage_limit(self, device: PowerSupply) -> float:
+        """The CC compliance limit: the everyday maximum voltage, within the instrument's."""
+
+        guard = self._control_service.limit_guard
+        if isinstance(guard, SupplyLimitGuard):
+            return guard.limits.default_voltage_limit(device.limits.maximum_voltage)
+        return min(
+            self._power_supply_safety.default_voltage_volts,
+            device.limits.maximum_voltage,
         )
 
     def initialize_manual_power_supply_defaults(
@@ -202,10 +221,7 @@ class ManualControlViewModel:
                 results.append(
                     self.set_power_supply_voltage(
                         device_id,
-                        min(
-                            self._power_supply_safety.default_voltage_volts,
-                            device.limits.maximum_voltage,
-                        ),
+                        self._default_voltage_limit(device),
                     )
                 )
             else:
@@ -319,10 +335,7 @@ class ManualControlViewModel:
             if not target_result.succeeded:
                 return target_result
 
-            voltage_limit = min(
-                self._power_supply_safety.default_voltage_volts,
-                device.limits.maximum_voltage,
-            )
+            voltage_limit = self._default_voltage_limit(device)
             limit_result = self._execute(
                 SetPowerSupplyVoltage(
                     device_id=device_id,

@@ -57,7 +57,8 @@ def test_nested_loops_run_inner_loop_fully_per_outer_value_and_keep_repeats():
     runner, result = run(recipe)
     assert result.state is RecipeRunState.COMPLETED
     assert commands(runner, "flow") == [1, 1]
-    assert commands(runner, "current") == [2, 4, 2, 4]
+    # Entering constant voltage first writes the everyday current limit (1.5 A).
+    assert commands(runner, "current") == [1.5, 2, 4, 2, 4]
     assert commands(runner, "voltage") == [3]
     assert runner._control.mode is ControlMode.IDLE
 
@@ -178,7 +179,9 @@ def test_recipe_can_switch_supply_mode_with_output_off():
     runner, result = run(recipe)
     assert result.state is RecipeRunState.COMPLETED
     kinds = [type(r.command) for r in runner._control.history]
-    assert kinds[:3] == [SetPowerSupplyVoltage, SetPowerSupplyCurrentLimit, SetPowerSupplyOutput]
+    # The everyday current limit comes first, as the supply enters constant voltage.
+    assert kinds[:4] == [SetPowerSupplyCurrentLimit, SetPowerSupplyVoltage, SetPowerSupplyCurrentLimit,
+                         SetPowerSupplyOutput]
 
 
 def test_mode_changes_are_recorded_as_events():
@@ -202,15 +205,20 @@ def test_switching_mode_with_output_on_is_refused():
         runner.validate(recipe)
 
 
-def test_output_needs_both_settings_of_the_current_mode():
-    missing_limit = Recipe("r", steps=(SetStep.one("supply", "current_setpoint", 1), ON))
-    assert "before voltage_limit is set" in power_supply_problems(missing_limit)[0]
+def test_output_needs_the_current_modes_setpoint_and_its_limit_comes_from_settings():
+    # The limit is written from Settings on entering the mode, so a recipe need not set it.
+    assert power_supply_problems(Recipe("r", steps=(SetStep.one("supply", "current_setpoint", 1), ON))) == ()
+    runner, result = run(Recipe("r", steps=(SetStep.one("supply", "current_setpoint", 1), ON, OFF)))
+    assert result.state is RecipeRunState.COMPLETED
+    assert commands(runner, "voltage") == [6.0]  # The everyday maximum, before the setpoint.
+    limit_only = Recipe("r", steps=(SetStep.one("supply", "voltage_limit", 5), ON))
+    assert "before current_setpoint is set" in power_supply_problems(limit_only)[0]
     nothing = Recipe("r", steps=(ON,))
     assert "before any setpoint" in power_supply_problems(nothing)[0]
-    # After a mode switch, the old mode's settings no longer count.
+    # After a mode switch, the old mode's setpoint no longer counts.
     switched = Recipe("r", steps=(SetStep.one("supply", "voltage", 1), SetStep.one("supply", "current_limit", 1),
-                                  SetStep.one("supply", "current_setpoint", 1), ON))
-    assert "before voltage_limit is set" in power_supply_problems(switched)[0]
+                                  SetStep.one("supply", "voltage_limit", 1), ON))
+    assert "before current_setpoint is set" in power_supply_problems(switched)[0]
 
 
 def test_loop_second_pass_is_checked_for_mode_problems():
@@ -242,7 +250,9 @@ def test_one_set_step_writes_its_settings_in_listed_order():
     runner, result = run(recipe)
     assert result.state is RecipeRunState.COMPLETED
     kinds = [type(r.command).__name__ for r in runner._control.history]
-    assert kinds[:4] == ["SetPowerSupplyCurrentLimit", "SetPowerSupplyVoltage", "SetMfcFlow", "SetPowerSupplyOutput"]
+    # The everyday voltage limit first (entering constant current), then the step in its order.
+    assert kinds[:5] == ["SetPowerSupplyVoltage", "SetPowerSupplyCurrentLimit", "SetPowerSupplyVoltage",
+                         "SetMfcFlow", "SetPowerSupplyOutput"]
     set_rows = [row for row in preview_recipe(recipe) if row.kind == "set"]
     assert set_rows[0].label == ("Set supply current setpoint = 2, supply voltage limit = 5, "
                                  "mfc flow = 30, supply output enabled = On")
@@ -250,10 +260,10 @@ def test_one_set_step_writes_its_settings_in_listed_order():
 
 def test_order_inside_a_set_step_is_checked():
     recipe = Recipe("r", steps=(SetStep((
-        Assignment("supply", "current_setpoint", 2), Assignment("supply", "output_enabled", True),
-        Assignment("supply", "voltage_limit", 5),
+        Assignment("supply", "voltage_limit", 5), Assignment("supply", "output_enabled", True),
+        Assignment("supply", "current_setpoint", 2),
     )),))
-    assert "before voltage_limit is set" in power_supply_problems(recipe)[0]
+    assert "before current_setpoint is set" in power_supply_problems(recipe)[0]
 
 
 def test_set_step_rejects_the_same_setting_twice_and_empty_steps():

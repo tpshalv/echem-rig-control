@@ -46,6 +46,7 @@ class SettingsWindow:
                 _CEILING_KEY,
                 "power_supply_default_current_amps",
                 "power_supply_default_voltage_volts",
+                "power_supply_maximum_current_density",
             ),
         ),
     )

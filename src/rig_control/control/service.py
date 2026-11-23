@@ -1,6 +1,7 @@
 from rig_control.devices.pressure_controller import PressureController
 from dataclasses import asdict, dataclass
 from collections import deque
+from collections.abc import Callable
 import json
 from datetime import datetime, timezone
 from traceback import format_exc
@@ -63,6 +64,10 @@ class ControlAccessError(RuntimeError):
     """A command is not permitted in the current control mode."""
 
 
+class LimitExceeded(ControlAccessError):
+    """A command asks a device for more than an operating limit allows."""
+
+
 class ControlExecutionError(RuntimeError):
     """An authorized command failed during execution."""
 
@@ -119,6 +124,14 @@ class RigControlService:
         self._history: list[ExecutedCommand] = []
         self._event_sink = event_sink
         self._audit_failures: deque[str] = deque(maxlen=100)
+        #: Operating limits every command must pass, whoever sends it: returns
+        #: why a command is refused, or None.  Set by the session.
+        self.limit_guard: Callable[[ControlCommand], str | None] | None = None
+
+    def limit_problem(self, command: ControlCommand) -> str | None:
+        """Why ``command`` would be refused by the operating limits, without sending it."""
+        guard = self.limit_guard
+        return None if guard is None else guard(command)
 
     @property
     def audit_failures(self) -> tuple[str, ...]:
@@ -260,6 +273,9 @@ class RigControlService:
 
         try:
             self._authorize(command)
+            problem = self.limit_problem(command)
+            if problem:
+                raise LimitExceeded(problem)
             with self._device_manager.operation(command.device_id):
                 message = self._dispatch(command)
         except ControlAccessError as error:

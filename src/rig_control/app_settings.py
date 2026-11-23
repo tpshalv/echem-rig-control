@@ -11,6 +11,12 @@ NATIVE = "native"
 PRESSURE_UNITS = (NATIVE, "bara", "psia", "kpaa")
 FLOW_UNITS = (NATIVE, "SCCM", "SLPM")
 CURRENT_UNITS = ("mA", "A")
+#: Everyday power-supply limits (see rig_control.supply_limits, decisions/0028).
+DEFAULT_MAXIMUM_CURRENT_AMPS = 1.5
+DEFAULT_MAXIMUM_VOLTAGE_VOLTS = 6.0
+DEFAULT_MAXIMUM_CURRENT_DENSITY = 300.0  # mA/cm²
+#: The cable ceiling outside High current mode (decisions/0014).
+STANDARD_CABLE_CEILING_AMPS = 45.0
 
 
 type AppSettingValue = str | int | float | bool
@@ -212,25 +218,36 @@ SETTING_DEFINITIONS = (
     ),
     SettingDefinition(
         key="power_supply_default_current_amps",
-        label="Default current limit (A)",
+        label="Everyday maximum current (A)",
         description=(
-            "Default current limit applied whenever constant voltage mode "
-            "is initially entered. This is a protective compliance limit and "
-            "can be adjusted in the power-supply control panel."
+            "No current above this is ever sent to a supply, by hand, recipe or "
+            "override. It is also the current limit a supply gets in constant "
+            "voltage; a run may set a lower one. Raise it only for a larger cell."
         ),
-        default=0.0,
-        validator=_non_negative_number,
+        default=DEFAULT_MAXIMUM_CURRENT_AMPS,
+        validator=_positive_number,
     ),
     SettingDefinition(
         key="power_supply_default_voltage_volts",
-        label="Default voltage limit (V)",
+        label="Everyday maximum voltage (V)",
         description=(
-            "Default voltage limit applied whenever constant current mode "
-            "is initially entered. This is a protective compliance limit and "
-            "can be adjusted in the power-supply control panel."
+            "No voltage above this is ever sent to a supply. It is also the "
+            "voltage limit a supply gets in constant current; a run may set a "
+            "lower one."
         ),
-        default=0.0,
-        validator=_non_negative_number,
+        default=DEFAULT_MAXIMUM_VOLTAGE_VOLTS,
+        validator=_positive_number,
+    ),
+    SettingDefinition(
+        key="power_supply_maximum_current_density",
+        label="Maximum current density (mA/cm²)",
+        description=(
+            "Once an active area is entered, no current above this density "
+            "times the area is sent. Applied as well as the everyday maximum "
+            "current, so a wrong area can never raise the limit."
+        ),
+        default=DEFAULT_MAXIMUM_CURRENT_DENSITY,
+        validator=_positive_number,
     ),
     SettingDefinition(
         key="power_supply_high_current_mode",
@@ -280,6 +297,7 @@ SETTING_DEFINITIONS = (
         validator=_reconnect_attempts,
     ),
 )
+_LEGACY_UNSET_ZERO = ("power_supply_default_current_amps", "power_supply_default_voltage_volts")
 _DEFINITIONS_BY_KEY = {
     definition.key: definition for definition in SETTING_DEFINITIONS
 }
@@ -302,6 +320,11 @@ class AppSettings:
                 raise ValueError(f"{name} cannot be empty")
 
         supplied = dict(self.values)
+        for key in _LEGACY_UNSET_ZERO:
+            # These were starting values that defaulted to 0 before they
+            # became the everyday maximums; a saved 0 meant "never set".
+            if supplied.get(key) in (0, 0.0):
+                del supplied[key]
         unknown = set(supplied) - set(_DEFINITIONS_BY_KEY)
         if unknown:
             raise ValueError(
@@ -381,6 +404,23 @@ class AppSettings:
     @property
     def power_supply_wiring_current_ceiling_amps(self) -> float:
         return float(self.values["power_supply_wiring_current_ceiling_amps"])
+
+    @property
+    def supply_limits(self):
+        """The limits every current and voltage sent to a supply must pass."""
+
+        from rig_control.supply_limits import SupplyLimits
+
+        return SupplyLimits(
+            maximum_current_amps=float(self.values["power_supply_default_current_amps"]),
+            maximum_voltage_volts=float(self.values["power_supply_default_voltage_volts"]),
+            maximum_current_density=float(self.values["power_supply_maximum_current_density"]),
+            cable_ceiling_amps=(
+                self.power_supply_wiring_current_ceiling_amps
+                if self.power_supply_high_current_mode
+                else STANDARD_CABLE_CEILING_AMPS
+            ),
+        )
 
     @property
     def device_reconnect_interval_seconds(self) -> float:

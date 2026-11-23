@@ -134,7 +134,9 @@ def test_density_counts_as_the_current_setpoint_for_output_safety():
     limit = SetStep.one("supply", "voltage_limit", 3.0)
     density = SetStep.one("supply", DENSITY, 100.0)
     assert power_supply_problems(Recipe("ok", steps=(limit, density, on))) == ()
-    assert "voltage_limit" in power_supply_problems(Recipe("no limit", steps=(density, on)))[0]
+    # The voltage limit comes from Settings on entering constant current.
+    assert power_supply_problems(Recipe("no limit", steps=(density, on))) == ()
+    assert "current_setpoint" in power_supply_problems(Recipe("no density", steps=(limit, on)))[0]
     # It states CC, so it cannot replace a CV setting while the output is on.
     cv = (SetStep.one("supply", "voltage", 3.0), SetStep.one("supply", "current_limit", 1.0), on)
     assert "turn the output off" in power_supply_problems(Recipe("switch", steps=(*cv, density)))[0]

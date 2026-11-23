@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from rig_control.app_settings import AppSettings
+from rig_control.supply_limits import SupplyLimitGuard, instrument_maximums
 from rig_control.calibrated_channels import CalibratedChannels
 from rig_control.cell_area import CellArea
 from rig_control.control.service import RigControlService
@@ -65,9 +66,14 @@ class ApplicationSession:
             is_recording=lambda: self.experiment_recorder.is_recording,
             cell_area=self.cell_area,
         )
+        #: Every current and voltage sent to a supply must pass these (decisions/0028).
+        self.supply_limits = settings.supply_limits
+        self.control_service.limit_guard = SupplyLimitGuard(
+            self.supply_limits, lambda: self.cell_area.cm2, instrument_maximums(self.device_manager))
         self.recipe_runner = RecipeRunner(
             self.control_service,
             self.device_manager,
+            supply_limits=self.supply_limits,
             recorder=self.experiment_recorder,
             event_sink=lambda event: self.record_control_event(event),
             pump_calibrations=self.calibrated_channels.pumps,

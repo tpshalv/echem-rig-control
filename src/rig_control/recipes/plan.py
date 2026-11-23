@@ -322,8 +322,9 @@ def _mode_text(mode: PowerSupplyOperatingMode) -> str:
 class SupplySequence:
     """Tracks each supply's mode, written settings and output, write by write.
 
-    - Output may only turn on once the current mode's setpoint and limit
-      have both been written.
+    - Output may only turn on once the current mode's setpoint has been
+      written.  Its limit need not be: the runner writes the everyday limit
+      from Settings as the supply enters the mode (see RecipeRunner).
     - Switching mode (writing the other mode's setting) while the output is
       on is refused, because the stale register would briefly act as the
       new mode's limit.  Turn the output off, set both, then turn it on.
@@ -349,7 +350,8 @@ class SupplySequence:
                     return (f"{device} switches to {_mode_text(step_mode)} while its output is on; "
                             "turn the output off first")
                 self.mode[device] = step_mode
-                self.written[device] = set()
+                # The mode's limit is written from Settings on entering it.
+                self.written[device] = {POWER_SUPPLY_MODE_SETTINGS[step_mode][1]}
             self.written[device].add("current_setpoint" if step.setting == CURRENT_DENSITY_SETTING else step.setting)
         elif step.setting == POWER_SUPPLY_OUTPUT_SETTING:
             if step.value is True and not self.output_on.get(device):

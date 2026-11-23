@@ -23,8 +23,9 @@ def test_defaults_are_safe_and_explicit() -> None:
     assert settings.default_output_directory == str(experiments_directory())
     assert settings.export_bin_seconds == 1.0
     assert settings.live_export_interval_seconds == 60.0
-    assert settings.power_supply_default_current_amps == 0.0
-    assert settings.power_supply_default_voltage_volts == 0.0
+    assert settings.power_supply_default_current_amps == 1.5
+    assert settings.power_supply_default_voltage_volts == 6.0
+    assert settings.supply_limits.maximum_current_density == 300.0
     assert settings.power_supply_high_current_mode is False
     assert settings.power_supply_wiring_current_ceiling_amps == 45.0
     assert settings.keithley_2280s_nplc == 0.5
@@ -93,7 +94,8 @@ def test_live_export_refresh_can_be_disabled() -> None:
     assert settings.live_export_interval_seconds == 0.0
 
 
-def test_zero_power_supply_defaults_are_allowed() -> None:
+def test_saved_zero_power_supply_values_load_as_the_everyday_defaults() -> None:
+    # These were starting values that defaulted to 0; a saved 0 meant "never set".
     settings = AppSettings(
         "safe",
         "Safe",
@@ -103,8 +105,15 @@ def test_zero_power_supply_defaults_are_allowed() -> None:
         },
     )
 
-    assert settings.power_supply_default_current_amps == 0.0
-    assert settings.power_supply_default_voltage_volts == 0.0
+    assert settings.power_supply_default_current_amps == 1.5
+    assert settings.power_supply_default_voltage_volts == 6.0
+
+
+@pytest.mark.parametrize("key", ["power_supply_default_current_amps", "power_supply_default_voltage_volts",
+                                 "power_supply_maximum_current_density"])
+def test_supply_limits_must_be_positive(key) -> None:
+    with pytest.raises(ValueError, match=key):
+        AppSettings("bad", "Bad", {key: -1})
 
 
 @pytest.mark.parametrize("value", [0, -1, 0.001, 12.01, float("inf"), float("nan"), True, "0.5"])

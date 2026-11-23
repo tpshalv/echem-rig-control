@@ -9,6 +9,8 @@ class CommandSource(StrEnum):
     MANUAL = "manual"
     DIAGNOSTIC = "diagnostic"
     RECIPE = "recipe"
+    #: An operator's change while a recipe runs, made through the recipe runner.
+    RECIPE_OVERRIDE = "recipe_override"
     CALIBRATION = "calibration"
     SAFETY_SYSTEM = "safety_system"
 

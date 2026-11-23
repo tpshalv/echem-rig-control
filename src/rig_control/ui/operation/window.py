@@ -210,6 +210,7 @@ class OperationWindow:
         if self._view_model.leak_check is not None and self._view_model.leak_check.available:
             ttk.Button(controls, text="Leak check", command=self._open_leak_check).grid(
                 row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        self._build_override_controls(controls)
 
         left = ttk.Frame(body, style="Blueprint.TFrame")
         left.grid(row=1, column=0, sticky="nsew", padx=(0, 12))
@@ -1306,6 +1307,77 @@ class OperationWindow:
             )
         return "break"
 
+    # --- manual changes while a recipe runs ---
+
+    _OVERRIDE_MODES = {
+        "Blocked": "blocked",
+        "Override until the recipe next sets it": "until_next",
+        "Override and pin for the rest of the run": "pin",
+    }
+
+    def _build_override_controls(self, controls: ttk.Frame) -> None:
+        """While a recipe runs, choose whether manual changes are blocked or sent as overrides."""
+        row = ttk.Frame(controls, style="Blueprint.TFrame")
+        row.grid(row=2, column=2, columnspan=4, sticky="e", pady=(6, 0))
+        ttk.Label(row, text="Manual changes during a recipe:", style="Blueprint.TLabel").pack(side="left")
+        self._override_choice = ttk.Combobox(row, values=list(self._OVERRIDE_MODES), state="disabled", width=40)
+        self._override_choice.set("Blocked")
+        self._override_choice.pack(side="left", padx=6)
+        self._override_choice.bind("<<ComboboxSelected>>", lambda _e: self._override_chosen())
+        self._pins_button = ttk.Button(row, text="Pins (0)…", command=self._show_pins, state="disabled")
+        self._pins_button.pack(side="left")
+        self._override_running = False
+
+    def _override_chosen(self) -> None:
+        self._view_model.override_mode = self._OVERRIDE_MODES.get(self._override_choice.get(), "blocked")
+        self._override_choice.selection_clear()
+
+    def _refresh_override_controls(self) -> None:
+        if not hasattr(self, "_override_choice"):
+            return  # Not built (e.g. a window assembled for a test).
+        runner = getattr(self._view_model, "recipe_runner", None)
+        running = runner is not None and runner.is_running
+        if running != self._override_running:
+            self._override_running = running
+            # Every run starts with manual changes blocked, as before overrides existed.
+            self._override_choice.set("Blocked"); self._view_model.override_mode = "blocked"
+            self._override_choice.configure(state="readonly" if running else "disabled")
+        pins = runner.pins if running else ()
+        self._pins_button.configure(text=f"Pins ({len(pins)})…", state="normal" if pins else "disabled")
+
+    def _show_pins(self) -> None:
+        runner = self._view_model.recipe_runner
+        if runner is None:
+            return
+        dialog = tk.Toplevel(self._root)
+        dialog.title("Pinned settings")
+        dialog.transient(self._root)
+        frame = ttk.Frame(dialog, padding=12)
+        frame.grid(sticky="nsew")
+        ttk.Label(frame, wraplength=520, justify="left", text=(
+            "While pinned, the recipe's writes to a setting are skipped (and recorded). Release hands it back: "
+            "the recipe sets it again at its next step that does. Release and restore also sets the recipe's "
+            "latest value now.")).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 8))
+
+        def release(pin, restore: bool) -> None:
+            dialog.destroy()
+            self._run_operation_action(f"Releasing {pin.name}", lambda: self._release_pin(pin, restore))
+
+        for r, pin in enumerate(runner.pins, start=1):
+            skipped = f"recipe wants {pin.skipped.value}" if pin.skipped is not None else "recipe has not set it since"
+            ttk.Label(frame, text=f"{pin.name}: pinned at {pin.value} ({skipped})").grid(
+                row=r, column=0, sticky="w", pady=2)
+            ttk.Button(frame, text="Release", command=lambda p=pin: release(p, False)).grid(row=r, column=1, padx=4)
+            ttk.Button(frame, text="Release and restore", command=lambda p=pin: release(p, True),
+                       state="normal" if pin.skipped is not None else "disabled").grid(row=r, column=2)
+        ttk.Button(frame, text="Close", command=dialog.destroy).grid(row=99, column=0, sticky="w", pady=(10, 0))
+
+    def _release_pin(self, pin, restore: bool) -> OperationActionResult:
+        try:
+            return OperationActionResult(True, self._view_model.recipe_runner.release(pin, restore=restore))
+        except Exception as error:
+            return OperationActionResult(False, f"Not released: {error}")
+
     def _schedule_update(self) -> None:
         if getattr(self, "_updates_cancelled", False):
             return
@@ -1332,6 +1404,7 @@ class OperationWindow:
             if collected:
                 self._update_display(refresh_trends=True)
             self._refresh_id_preview()  # Also ticks the previewed minute over.
+            self._refresh_override_controls()
         except Exception as error:
             self._ui_tick_failure_count += 1
             if not self._refresh_failed:

@@ -331,7 +331,7 @@ class RigControlService:
             raise ControlAccessError("Calibration control has ended")
 
         if self.mode is ControlMode.RECIPE_ACTIVE:
-            if source is not CommandSource.RECIPE:
+            if source not in (CommandSource.RECIPE, CommandSource.RECIPE_OVERRIDE):
                 raise ControlAccessError(
                     f"{source.value} command "
                     f"{type(command).__name__} is blocked while "
@@ -340,7 +340,7 @@ class RigControlService:
 
             return
 
-        if source is CommandSource.RECIPE:
+        if source in (CommandSource.RECIPE, CommandSource.RECIPE_OVERRIDE):
             raise ControlAccessError(
                 f"Recipe command {type(command).__name__} is "
                 "blocked because recipe control has not begun"

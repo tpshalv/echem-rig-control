@@ -203,7 +203,9 @@ class RecipeBuilderWindow:
         ttk.Button(bottom, text="Stop → end state", command=self._runner.stop).grid(row=0, column=5, padx=3)
         self._run_edit_button = ttk.Button(bottom, text="Edit running recipe", command=self._toggle_run_edit)
         self._run_edit_button.grid(row=0, column=6, padx=(10, 3))
-        self._order_row = ttk.Frame(bottom); self._order_row.grid(row=1, column=0, columnspan=7, sticky="w", pady=(8, 0))
+        self._next_button = ttk.Button(bottom, text="Next step ⏭", command=self._next_step)
+        self._next_button.grid(row=0, column=7, padx=3)
+        self._order_row = ttk.Frame(bottom); self._order_row.grid(row=1, column=0, columnspan=8, sticky="w", pady=(8, 0))
         ttk.Label(self._order_row, text="Shuffled loops use order no.").pack(side="left")
         self._order_entry = ttk.Entry(self._order_row, width=9); self._order_entry.pack(side="left", padx=5)
         self._order_entry.bind("<Return>", lambda _e: self._order_typed())
@@ -214,7 +216,7 @@ class RecipeBuilderWindow:
             "The timeline shows this order and Start runs it. Type a number from an earlier run to repeat its order."
         )).pack(side="left", padx=(8, 0))
         self._status = ttk.Label(bottom, text="No recipe running", font=SECTION_FONT)
-        self._status.grid(row=2, column=0, columnspan=7, sticky="w", pady=(8, 0))
+        self._status.grid(row=2, column=0, columnspan=8, sticky="w", pady=(8, 0))
 
     # --- lookups ---
 
@@ -500,6 +502,22 @@ class RecipeBuilderWindow:
         self._load_rows(snapshot.recipe)
         self._run_edit, self._order_seed = True, snapshot.seed
         self._refresh(); self._show_quick(); self._show_run_banner()
+
+    def _next_step(self) -> None:
+        status = self._runner.status
+        if status.state.value != "running":
+            return
+        where = " › ".join(status.position)
+        if not messagebox.askokcancel("Next step", (
+                f"Skip the rest of {status.active_step or 'this step'}{f' ({where})' if where else ''} "
+                "and go on to the next step?\n\nIts wait ends now. Any settings it has still to make are made at "
+                "once, so a ramp jumps straight to its target."), icon="warning", parent=self._root):
+            return
+        try:
+            message = self._runner.skip_step()
+        except Exception as error:
+            messagebox.showerror("Next step", str(error), parent=self._root); return
+        self._show_run_banner(message)
 
     def _leave_run_edit(self, message: str = "") -> None:
         self._run_edit = False
@@ -1105,4 +1123,5 @@ class RecipeBuilderWindow:
             self._start.configure(text="Start", state="disabled" if self._runner.is_running else "normal")
         self._run_edit_button.configure(text="Stop editing run" if self._run_edit else "Edit running recipe",
                                         state="normal" if running else "disabled")
+        self._next_button.configure(state="normal" if running else "disabled")
         self._root.after(250, self._tick)

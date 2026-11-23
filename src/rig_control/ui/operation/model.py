@@ -405,6 +405,10 @@ class OperationViewModel:
         self._profile_id = profile_id
         self._profile = profile
         self.recipe_runner = recipe_runner
+        #: What manual changes do while a recipe runs: "blocked", "until_next"
+        #: (until the recipe next sets that setting) or "pin" (for the rest of the run).
+        self.override_mode = "blocked"
+        self.manual_control.override_router = self._route_override
         self.leak_check = leak_check
         self.excess_flow = excess_flow
         self._measurements: dict[
@@ -756,6 +760,13 @@ class OperationViewModel:
         if channel in self._FLOW_CHANNELS:
             return self._display_units.show_flow(float(value), unit)
         return value, unit
+
+    def _route_override(self, command) -> str | None:
+        """Send a manual command to the running recipe as an override, if overrides are on."""
+        runner = self.recipe_runner
+        if self.override_mode == "blocked" or runner is None or not runner.is_running:
+            return None
+        return runner.override(command, pin=self.override_mode == "pin")
 
     def apply_channel_value(
         self, device_id: str, channel: str, value: float | bool | str

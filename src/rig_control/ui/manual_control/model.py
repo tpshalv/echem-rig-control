@@ -567,10 +567,33 @@ class ManualControlViewModel:
         }
 
 
+    #: While a recipe runs, sends a command as an override and returns what
+    #: was done, or None when overrides are off (set by Operation).
+    override_router = None
+
     def _execute(
         self,
         command: ControlCommand,
     ) -> ManualActionResult:
+        router = self.override_router
+        if router is not None and self._control_service.mode.value == "recipe_active":
+            try:
+                summary = router(command)
+            except Exception as error:
+                return ManualActionResult(
+                    succeeded=False,
+                    summary=f"Not sent to {command.device_id!r}: {error}",
+                    technical_details=format_exc(),
+                )
+            if summary is None:
+                return ManualActionResult(
+                    succeeded=False,
+                    summary=(
+                        "A recipe controls the rig, so manual changes are blocked. To change this now, "
+                        "set 'Manual changes during a recipe' to an override."
+                    ),
+                )
+            return ManualActionResult(succeeded=True, summary=summary)
         try:
             result = self._control_service.execute(command)
         except Exception as error:

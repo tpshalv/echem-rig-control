@@ -57,6 +57,8 @@ class RunSnapshot:
     #: Seconds left of the wait in progress.
     wait_left: float = 0.0
     revision: int = 0
+    #: Settings pinned by an override, as ``(device_id, setting)``: the recipe's writes to them are skipped.
+    pinned: frozenset[tuple[str, str]] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,10 +202,12 @@ def prepare_revision(snapshot: RunSnapshot, new: Recipe) -> Revision:
     tail_writes = [w for item in tail if isinstance(item, PlannedSet) for w in item.writes]
 
     supply = snapshot.supply.copy()
-    supply.first_problem(rest_writes)  # Already checked when the step started.
-    problem = supply.first_problem(tail_writes)
+    # Pinned settings are not written, so the checks follow what will actually be sent.
+    supply.first_problem(w for w in rest_writes if w.key not in snapshot.pinned)
+    problem = supply.first_problem(w for w in tail_writes if w.key not in snapshot.pinned)
     if problem:
         problems.append(problem)
+    problems += pinned_loop_problems(new, _tail_ids(tail) | {i for i, _ in snapshot.where or ()}, snapshot.pinned)
 
     old_steps = {s.id: s for s in iter_steps(snapshot.recipe.steps)}
     new_steps = {s.id: s for s in iter_steps(new.steps)}
@@ -243,6 +247,34 @@ def prepare_revision(snapshot: RunSnapshot, new: Recipe) -> Revision:
         raise RevisionRefused(("Nothing has changed from the recipe that is running",))
     return Revision(new, snapshot.seed, snapshot.counter, snapshot.where, changes,
                     tuple(rest_writes + tail_writes))
+
+
+def pinned_loop_problems(recipe: Recipe, will_run: set[str], pinned) -> list[str]:
+    """A loop over a pinned setting would run every pass at the pinned value."""
+    return [f"{step_title(s)} steps through {s.device_id} {s.setting.replace('_', ' ')}, which is pinned by "
+            "an override, so its passes would all be the same; release the pin first"
+            for s in iter_steps(recipe.steps)
+            if isinstance(s, LoopStep) and s.id in will_run and (s.device_id, s.setting) in pinned]
+
+
+def override_problems(snapshot: RunSnapshot, pinned: frozenset[tuple[str, str]],
+                      output: tuple[str, bool] | None = None) -> list[str]:
+    """Whether what is left of the run stays safe with ``pinned`` settings skipped.
+
+    ``output`` is a supply output an override turns on or off, as
+    ``(device_id, on)``: the recipe's later writes are checked from there.
+    """
+    remaining = list(remaining_plan(snapshot))
+    will_run = _tail_ids(remaining) | {i for i, _ in snapshot.where or ()}
+    problems = pinned_loop_problems(snapshot.recipe, will_run, pinned)
+    supply = snapshot.supply.copy()
+    if output is not None:
+        supply.output_on[output[0]] = output[1]
+    problem = supply.first_problem(w for item in remaining if isinstance(item, PlannedSet) for w in item.writes
+                                   if w.key not in pinned)
+    if problem:
+        problems.append(f"Later in the recipe, {problem}")
+    return problems
 
 
 def remaining_plan(snapshot: RunSnapshot, recipe: Recipe | None = None) -> Iterator[PlanItem]:

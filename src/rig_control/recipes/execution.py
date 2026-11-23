@@ -13,7 +13,7 @@ from time import monotonic, sleep
 
 from rig_control.cell_area import CellArea, CellAreaMissing
 from rig_control.control.commands import (
-    CommandSource, EnterDeviceSafeState, SetControllerOutput, SetHotplateHeating, SetHotplateSpeed,
+    CommandSource, ControlCommand, EnterDeviceSafeState, SetControllerOutput, SetHotplateHeating, SetHotplateSpeed,
     SetHotplateStirring, SetHotplateTemperature, SetMfcFlow, SetPowerSupplyCurrentLimit,
     SetPowerSupplyOutput, SetPowerSupplyVoltage, SetPressureSetpoint, SetPumpDirection,
     SetPumpRunning, SetPumpSpeed, SetTemperatureSetpoint,
@@ -42,7 +42,7 @@ from rig_control.recipes.plan import (
 )
 from rig_control.recipes.preview import estimate_recipe
 from rig_control.recipes.revision import (
-    Revision, RevisionChanges, RevisionRefused, RunSnapshot, prepare_revision, structure_problems,
+    Revision, RevisionChanges, RevisionRefused, RunSnapshot, override_problems, prepare_revision, structure_problems,
 )
 
 
@@ -82,6 +82,61 @@ class _MovedOn(Exception):
     """The run started another item while a revision was being checked."""
 
 
+#: Commands an operator may send while a recipe runs, by the recipe settings
+#: each one writes (the first names it) and the field holding its value.
+_OVERRIDES: dict[type, tuple[tuple[str, ...], str]] = {
+    SetMfcFlow: (("flow", "flow_sccm"), "flow"),
+    SetPressureSetpoint: (("pressure",), "value"),
+    SetPowerSupplyVoltage: (("voltage", "voltage_limit"), "voltage"),
+    SetPowerSupplyCurrentLimit: (("current_limit", "current_setpoint", CURRENT_DENSITY_SETTING), "current"),
+    SetPowerSupplyOutput: (("output_enabled",), "enabled"),
+    SetTemperatureSetpoint: (("temperature_setpoint",), "value"),
+    SetPumpSpeed: (("pump_speed", "pump_flow"), "rpm"),
+    SetPumpDirection: (("pump_direction",), "direction"),
+    SetPumpRunning: (("pump_running",), "running"),
+    SetHotplateTemperature: (("hotplate_temperature",), "temperature"),
+    SetHotplateSpeed: (("hotplate_speed",), "rpm"),
+    SetHotplateHeating: (("hotplate_heating",), "enabled"),
+    SetHotplateStirring: (("hotplate_stirring",), "enabled"),
+}
+
+
+def override_target(command: object) -> tuple[tuple[str, ...], str] | None:
+    """The recipe settings a command writes and its value as text; None if it can't override."""
+    if isinstance(command, SetControllerOutput):
+        return (f"controller_output:{command.output_name}",), "On" if command.enabled else "Off"
+    known = _OVERRIDES.get(type(command))
+    if known is None:
+        return None
+    settings, field = known
+    value = getattr(command, field)
+    text = ("On" if value else "Off") if isinstance(value, bool) else (
+        f"{value:g}" if isinstance(value, (int, float)) else str(getattr(value, "value", value)))
+    unit = {SetMfcFlow: getattr(command, "unit", "") or "(device unit)", SetPressureSetpoint: getattr(command, "unit", ""),
+            SetPowerSupplyVoltage: "V", SetPowerSupplyCurrentLimit: "A", SetPumpSpeed: "rpm",
+            SetHotplateSpeed: "rpm", SetHotplateTemperature: "°C", SetTemperatureSetpoint: "°C"}.get(type(command), "")
+    return settings, f"{text} {unit}".strip()
+
+
+@dataclass(frozen=True, slots=True)
+class OverridePin:
+    """A setting the operator has pinned: the recipe's writes to it are skipped until released."""
+    device_id: str
+    #: The recipe settings it covers, e.g. flow and flow_sccm (one register).
+    settings: tuple[str, ...]
+    #: What the operator set, as text, e.g. "25 sccm".
+    value: str
+    #: The latest recipe write skipped, which "release and restore" writes.
+    skipped: Assignment | None = None
+
+    @property
+    def name(self) -> str:
+        return f"{self.device_id} {self.settings[0].replace('_', ' ')}"
+
+    def covers(self, device_id: str, setting: str) -> bool:
+        return device_id == self.device_id and setting in self.settings
+
+
 #: Order seeds are drawn below this, so they stay short enough to read and type.
 ORDER_SEED_LIMIT = 1_000_000
 
@@ -118,6 +173,9 @@ class RecipeRunner:
         self._counter = 0; self._where = None; self._trace = ()
         self._written: dict[tuple[str, str], object] = {}; self._supply = SupplySequence()
         self._wait_left = 0.0
+        self._pins: dict[tuple[str, str], OverridePin] = {}
+        #: True once the operator skips to the next step, until it starts.
+        self._skipping = False
 
     @property
     def cell_area(self) -> CellArea: return self._cell_area
@@ -220,7 +278,111 @@ class RecipeRunner:
                 raise RuntimeError("No recipe is running")
             return RunSnapshot(self._recipe, self._order_seed, self._counter, self._where, self._trace,
                                tuple(self._rest), dict(self._written), self._supply.copy(), self._wait_left,
-                               self._revision)
+                               self._revision, self._pinned_keys())
+
+    def _pinned_keys(self) -> frozenset[tuple[str, str]]:
+        return frozenset((p.device_id, s) for p in self._pins.values() for s in p.settings)
+
+    # --- operator overrides ---
+
+    @property
+    def pins(self) -> tuple[OverridePin, ...]:
+        """Settings pinned by an override in this run."""
+        with self._lock:
+            return tuple(self._pins.values()) if self._status.state is RecipeRunState.RUNNING else ()
+
+    def override(self, command: ControlCommand, *, pin: bool, timeout: float = 10.0) -> str:
+        """Send an operator's command now, while the recipe runs; returns what was done, in words.
+
+        Without ``pin`` the recipe's next write to that setting replaces it.
+        With ``pin`` the recipe's writes to it are skipped (and recorded)
+        until ``release``.  The command is sent on the run's thread, between
+        items or during a wait, so it never lands between a step's writes.
+        Raises ``RevisionRefused`` if it would make what is left unsafe.
+        """
+        target = override_target(command)
+        if target is None:
+            raise RevisionRefused((f"{type(command).__name__} can't be sent while a recipe runs",))
+        settings, value = target
+        device_id = command.device_id  # type: ignore[attr-defined]
+        if isinstance(command, SetMfcFlow) and not command.unit:
+            try:  # Sent in the MFC's own unit; name it.
+                native = self._devices.get(device_id).limits.flow_unit  # type: ignore[attr-defined]
+                value = value.replace("(device unit)", str(native))
+            except Exception:
+                pass
+        output = (device_id, bool(command.enabled)) if isinstance(command, SetPowerSupplyOutput) else None
+
+        def apply() -> str:
+            snapshot = self.snapshot()
+            pinned = snapshot.pinned | ({(device_id, s) for s in settings} if pin else set())
+            if pin or output is not None:
+                problems = override_problems(snapshot, frozenset(pinned), output)
+                if problems:
+                    raise RevisionRefused(tuple(problems))
+            self._control.execute(replace(command, source=CommandSource.RECIPE_OVERRIDE))  # type: ignore[type-var]
+            key = (device_id, settings[0])
+            with self._lock:
+                if output is not None:
+                    self._supply.output_on[device_id] = output[1]
+                held = self._pins.get(key)
+                if pin or held is not None:  # A pinned setting stays pinned, at the new value.
+                    self._pins[key] = OverridePin(device_id, settings, value, held.skipped if held else None)
+            pinned_now = pin or held is not None
+            self._emit("recipe_override", f"{device_id}.{settings[0]}={value}", pinned=pinned_now,
+                       command=type(command).__name__, position=list(self._status.position))
+            name = f"{device_id} {settings[0].replace('_', ' ')}"
+            return (f"Override: {name} set to {value}, pinned for the rest of the run" if pinned_now else
+                    f"Override: {name} set to {value} until the recipe next sets it")
+        return self._call_in_run(apply, timeout)
+
+    def release(self, pin: OverridePin, *, restore: bool, timeout: float = 10.0) -> str:
+        """Unpin a setting; with ``restore``, write the recipe's latest value for it now."""
+        def apply() -> str:
+            key = (pin.device_id, pin.settings[0])
+            with self._lock:
+                held = self._pins.get(key)
+            if held is None:
+                return f"{pin.name} is not pinned"
+            write = held.skipped if restore else None
+            if write is not None:
+                problem = self.snapshot().supply.copy().write(write)
+                if problem:
+                    raise RevisionRefused((f"Restoring the recipe's value now is unsafe: {problem}",))
+            with self._lock:
+                del self._pins[key]
+            if write is not None:
+                self._execute_set(write, self._status.position, f"Restore {pin.name}")
+            self._emit("recipe_override_released", pin.name, restored=write is not None,
+                       position=list(self._status.position))
+            if write is not None:
+                return f"Released {pin.name}; the recipe's value ({write.value}) is set again"
+            return f"Released {pin.name}; the recipe sets it again at its next step that does"
+        return self._call_in_run(apply, timeout)
+
+    def skip_step(self, *, timeout: float = 10.0) -> str:
+        """Go on to the next step now: the running step's waits end, and any
+        settings it has still to make are made at once (a ramp jumps to its
+        target), so the rig is where the recipe expects for the next step."""
+        def apply() -> str:
+            with self._lock:
+                if self._where is None:
+                    raise RevisionRefused(("Nothing has started yet",))
+                left = self._wait_left + sum(i.wait.duration_seconds for i in self._rest if isinstance(i, PlannedWait))
+                self._skipping = True
+                self._estimated_seconds -= left
+                label, position = self._status.active_step or "this step", list(self._status.position)
+            self._emit("recipe_step_skipped", label, skipped_seconds=left, position=position)
+            return f"Skipped the rest of {label} ({round(left)} s); going on to the next step"
+        return self._call_in_run(apply, timeout)
+
+    def _call_in_run(self, work: Callable[[], str], timeout: float) -> str:
+        future = self._submit(work)
+        try:
+            return future.result(timeout)  # type: ignore[return-value]
+        except FutureTimeout:
+            raise RevisionRefused(("The run did not respond in time (a device may be slow to answer); "
+                                   "check whether the change was made before trying again.",)) from None
 
     def revise(self, recipe: Recipe, *, timeout: float = 10.0) -> RevisionChanges:
         """Replace what the run has still to do with ``recipe``'s; see ``rig_control.recipes.revision``.
@@ -372,6 +534,7 @@ class RecipeRunner:
                 run.append(item)
             with self._lock:
                 self._rest, self._lookahead = deque(run), lookahead
+                self._skipping = False  # A new step run.
         with self._lock:
             item = self._rest.popleft()
             self._counter += 1; self._where = item.where; self._trace = item.trace
@@ -392,6 +555,8 @@ class RecipeRunner:
                 for assignment in item.writes:
                     self._execute_set(assignment, item.position, "Ramp" if item.ramping else item.name)
             elif isinstance(item, PlannedWait):
+                if self._skipping:
+                    continue  # Skipped to the next step; its settings are still made.
                 # Waits, Set holds and ramp holds share one path: same events, status and Stop.
                 self._wait(item.wait, item.position)
             elif isinstance(item, PlannedRamp):
@@ -416,12 +581,23 @@ class RecipeRunner:
             with self._lock:
                 self._wait_left = remaining
             self._serve_requests()
+            if self._skipping:
+                break
             period = min(remaining, 0.1); self._sleeper(period); remaining -= period
         with self._lock:
             self._wait_left = 0.0
 
     def _execute_set(self, step: Assignment, position: tuple[str, ...], name: str = "") -> None:
         self._check_cancel()
+        with self._lock:
+            pin = next((p for p in self._pins.values() if p.covers(step.device_id, step.setting)), None)
+            if pin is not None:
+                self._pins[(pin.device_id, pin.settings[0])] = replace(pin, skipped=step)
+        if pin is not None:
+            self._set_status(name or f"Set {step.setting}", position)
+            self._emit("recipe_override_skipped", f"{step.device_id}.{step.setting}={step.value}",
+                       pinned=pin.value, position=list(position))
+            return
         mode = power_supply_mode_of(step.setting)
         if mode is not None and self._supply_modes.get(step.device_id) is not mode:
             # Intended mode only; actual CC/CV is the polled regulation_mode channel.

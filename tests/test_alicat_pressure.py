@@ -335,7 +335,9 @@ def test_operation_ui_has_pressure_editors_and_no_flow_editor():
     controller, protocol = device(PressurePolicy(True, 5))
     manager = DeviceManager()
     manager.register(controller)
-    model = OperationViewModel(manager, PollingService(manager), ExperimentRecorder(), RigControlService(manager), profile_id="test")
+    from rig_control.display_units import NATIVE, DisplayUnits
+    model = OperationViewModel(manager, PollingService(manager), ExperimentRecorder(), RigControlService(manager),
+                               profile_id="test", display_units=DisplayUnits(NATIVE, NATIVE))
     rows = {r.channel: r for r in model.channel_rows()}
     assert rows["pressure_setpoint_absolute"].writable
     assert rows["pressure_setpoint_absolute"].unit == "bara"

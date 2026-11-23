@@ -8,9 +8,10 @@ from rig_control.app_paths import experiments_directory, logs_directory
 #: Repeated here rather than imported from rig_control.display_units, so that
 #: reading settings never pulls in the device drivers that module needs.
 NATIVE = "native"
-PRESSURE_UNITS = (NATIVE, "bara", "psia", "kpaa")
+PRESSURE_UNITS = (NATIVE, "bara", "psia", "kpaa", "mbara")
 FLOW_UNITS = (NATIVE, "SCCM", "SLPM")
 CURRENT_UNITS = ("mA", "A")
+DENSITY_UNITS = ("mA/cm²", "A/cm²")
 #: Everyday power-supply limits (see rig_control.supply_limits, decisions/0028).
 DEFAULT_MAXIMUM_CURRENT_AMPS = 1.5
 DEFAULT_MAXIMUM_VOLTAGE_VOLTS = 6.0
@@ -101,6 +102,12 @@ def _display_current_unit(value: object) -> AppSettingValue:
     return _one_of(value, CURRENT_UNITS, "display current unit")
 
 
+def _display_density_unit(value: object) -> AppSettingValue:
+    if isinstance(value, str):
+        value = value.replace("cm2", "cm²")
+    return _one_of(value, DENSITY_UNITS, "display current density unit")
+
+
 def _one_of(value: object, allowed: tuple[str, ...], name: str) -> AppSettingValue:
     if not isinstance(value, str):
         raise TypeError("must be text")
@@ -122,11 +129,11 @@ SETTING_DEFINITIONS = (
         key="display_pressure_unit",
         label="Show pressures in",
         description=(
-            "Display and entry only. Instruments are still commanded in their "
-            "own units, and recordings keep the units each instrument reports. "
-            "'native' leaves every reading as its instrument sends it."
+            "Every screen, entry box and CSV/Excel export. Instruments are still "
+            "commanded in their own units and the raw log keeps them. 'native' "
+            "leaves every reading as its instrument sends it."
         ),
-        default=NATIVE,
+        default="psia",
         validator=_display_pressure_unit,
         choices=PRESSURE_UNITS,
     ),
@@ -134,25 +141,36 @@ SETTING_DEFINITIONS = (
         key="display_flow_unit",
         label="Show mass flows in",
         description=(
-            "Display and entry only. A value typed here is converted into the "
-            "instrument's own unit before it is sent, so a setpoint entered in "
-            "SCCM can never be acted on as SLPM."
+            "Every screen, entry box and CSV/Excel export. A value typed is "
+            "converted into the instrument's own unit before it is sent, so a "
+            "setpoint entered in SCCM can never be acted on as SLPM."
         ),
-        default=NATIVE,
+        default="SCCM",
         validator=_display_flow_unit,
         choices=FLOW_UNITS,
     ),
     SettingDefinition(
         key="display_current_unit",
-        label="Show recipe currents in",
+        label="Show currents in",
         description=(
-            "Display and entry in the recipe builder only. Recipes are still "
-            "saved, sent and recorded in amperes, so changing this never "
-            "changes what a recipe does."
+            "Every screen, entry box and CSV/Excel export. Supplies are still "
+            "commanded, recipes saved and the raw log kept in amperes, so "
+            "changing this never changes what is sent."
         ),
         default="mA",
         validator=_display_current_unit,
         choices=CURRENT_UNITS,
+    ),
+    SettingDefinition(
+        key="display_density_unit",
+        label="Show current densities in",
+        description=(
+            "Every screen, entry box and CSV/Excel export. Densities are still "
+            "saved and recorded in mA/cm²."
+        ),
+        default="mA/cm²",
+        validator=_display_density_unit,
+        choices=DENSITY_UNITS,
     ),
     SettingDefinition(
         key="trend_history_readings",
@@ -352,6 +370,7 @@ class AppSettings:
             pressure=str(self.values["display_pressure_unit"]),
             flow=str(self.values["display_flow_unit"]),
             current=str(self.values["display_current_unit"]),
+            density=str(self.values["display_density_unit"]),
         )
 
     @property

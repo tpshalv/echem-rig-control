@@ -733,6 +733,7 @@ def test_flow_rows_and_entries_follow_the_chosen_display_unit():
 def test_native_display_units_leave_flow_exactly_as_the_device_has_it():
     from rig_control.devices.mass_flow_controller import MassFlowControllerLimits
     from rig_control.devices.simulated_mfc import SimulatedMassFlowController
+    from rig_control.display_units import NATIVE, DisplayUnits
 
     device = SimulatedMassFlowController("mfc_a", MassFlowControllerLimits(2.0, "SLPM"))
     manager = DeviceManager()
@@ -740,7 +741,7 @@ def test_native_display_units_leave_flow_exactly_as_the_device_has_it():
     device.connect()
     model = OperationViewModel(
         manager, PollingService(manager), ExperimentRecorder(),
-        RigControlService(manager), profile_id="test",
+        RigControlService(manager), profile_id="test", display_units=DisplayUnits(NATIVE, NATIVE),
     )
 
     assert model.apply_channel_value("mfc_a", "setpoint", 1.5).succeeded

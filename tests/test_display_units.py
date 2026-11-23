@@ -24,10 +24,17 @@ def settings_with(**values):
     return replace(settings, values=dict(settings.values, **values))
 
 
-def test_defaults_leave_every_reading_in_its_own_units() -> None:
+def test_defaults_are_sccm_psia_ma_and_ma_per_cm2() -> None:
     units = default_app_settings().display_units
 
-    assert units == DisplayUnits(NATIVE, NATIVE)
+    assert units == DisplayUnits("psia", "SCCM", "mA", "mA/cm²")
+    assert units.show_flow(0.2, "SLPM") == (200.0, "SCCM")
+    assert units.show_current(0.25) == (250.0, "mA")
+
+
+def test_native_leaves_every_reading_in_its_own_units() -> None:
+    units = DisplayUnits(NATIVE, NATIVE)
+
     assert units.show_pressure(1.5, "bara") == (1.5, "bara")
     assert units.show_flow(0.2, "SLPM") == (0.2, "SLPM")
 
@@ -112,3 +119,55 @@ def test_a_command_without_a_unit_still_means_the_device_s_own_unit() -> None:
     device.set_flow_setpoint(1.5)
 
     assert device.flow_setpoint == 1.5
+
+
+# --- Typed entry: one display unit per quantity; a typed unit always wins ---------
+
+from rig_control.display_units import Quantity, split_typed  # noqa: E402
+
+ALL_DISPLAYS = [DisplayUnits(p, f, c, d) for p in ("psia", "bara", "kpaa", "mbara") for f in ("SCCM", "SLPM")
+                for c in ("mA", "A") for d in ("mA/cm²", "A/cm²")]
+
+
+@pytest.mark.parametrize("units", ALL_DISPLAYS)
+def test_a_typed_unit_means_the_same_whatever_the_display_unit(units) -> None:
+    assert units.read("250 mA", Quantity.CURRENT, "A") == 0.25
+    assert units.read("0.25A", Quantity.CURRENT, "A") == 0.25
+    assert units.read("10 mA/cm2", Quantity.DENSITY, "mA/cm²") == 10.0
+    assert units.read("0.01 A/cm²", Quantity.DENSITY, "mA/cm²") == 10.0
+    assert units.read("0.5 slpm", Quantity.FLOW, "SCCM") == 500.0
+    assert units.read("14.5038 psia", Quantity.PRESSURE, "bara") == pytest.approx(1.0, rel=1e-5)
+
+
+def test_a_bare_number_is_in_the_display_unit() -> None:
+    ma = DisplayUnits(current="mA", density="A/cm²", flow="SLPM", pressure="psia")
+    assert ma.read("250", Quantity.CURRENT, "A") == 0.25
+    assert DisplayUnits(current="A").read("250", Quantity.CURRENT, "A") == 250.0  # The limits catch this.
+    assert ma.read("0.3", Quantity.DENSITY, "mA/cm²") == 300.0
+    assert ma.read("0.2", Quantity.FLOW, "SCCM") == 200.0
+    # "native" means the instrument's own unit.
+    assert DisplayUnits(flow=NATIVE).read("0.2", Quantity.FLOW, "SCCM", native_unit="SLPM") == 200.0
+
+
+@pytest.mark.parametrize("text,quantity,message", [
+    ("250 sccm", Quantity.CURRENT, "not a current unit"),
+    ("10 mA", Quantity.DENSITY, "not a current density unit"),
+    ("15 psi", Quantity.PRESSURE, "absolute"),
+    ("1 bar", Quantity.PRESSURE, "absolute"),
+    ("5 psig", Quantity.PRESSURE, "absolute"),
+    ("2 V", Quantity.CURRENT, "not a current unit"),
+    ("abc", Quantity.FLOW, "not a number"),
+    ("", Quantity.FLOW, "not a number"),
+])
+def test_wrong_or_ambiguous_units_are_refused(text, quantity, message) -> None:
+    with pytest.raises(ValueError, match=message):
+        DisplayUnits().read(text, quantity, "A" if quantity is Quantity.CURRENT else "SCCM")
+
+
+def test_split_typed_and_show_round_trip() -> None:
+    assert split_typed(" 1.5e-3  mA ") == (0.0015, "mA")
+    assert split_typed("-2") == (-2.0, "")
+    units = DisplayUnits(current="mA", density="A/cm²")
+    assert units.show_current(0.0123) == (12.3, "mA")
+    assert units.show_density(300.0) == (0.3, "A/cm²")
+    assert DisplayUnits(density="mA/cm2").density == "mA/cm²"

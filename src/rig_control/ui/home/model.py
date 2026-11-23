@@ -40,6 +40,8 @@ class AppSettingRow:
     label: str
     description: str
     value: str
+    #: A fixed set of values, chosen from a list rather than typed.
+    choices: tuple[str, ...] = ()
 
 
 class HomeViewModel:
@@ -125,6 +127,7 @@ class HomeViewModel:
                 definition.label,
                 definition.description,
                 str(self._settings.values[definition.key]),
+                tuple(getattr(definition, "choices", ()) or ()),
             )
             for definition in SETTING_DEFINITIONS
         )

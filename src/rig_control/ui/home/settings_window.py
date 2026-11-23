@@ -24,6 +24,10 @@ class SettingsWindow:
     _CATEGORIES: tuple[tuple[str, tuple[str, ...]], ...] = (
         ("General", ("publish_interval_seconds",)),
         (
+            "Units",
+            ("display_flow_unit", "display_pressure_unit", "display_current_unit", "display_density_unit"),
+        ),
+        (
             "Device reconnection",
             ("device_reconnect_interval_minutes", "device_reconnect_attempts"),
         ),

@@ -143,3 +143,31 @@ def test_refreshing_fills_both_kinds_of_field(root):
 
     assert box.get() == "SCCM"
     assert entry.get() == "5.0"
+
+
+def test_units_page_offers_each_quantitys_units_as_a_list_and_applies_them(root, monkeypatch):
+    import rig_control.ui.home.settings_window as settings_window
+    from tkinter import ttk
+
+    monkeypatch.setattr(settings_window, "create_instrument_panels", lambda *a, **k: {})
+    settings = default_app_settings()
+    model = Mock()
+    model.settings = settings
+    model.settings_path = Path("settings.toml")
+    model.setting_rows.return_value = tuple(
+        AppSettingRow(item.key, item.label, item.description, str(settings.values[item.key]),
+                      tuple(item.choices or ()))
+        for item in SETTING_DEFINITIONS
+    )
+    window = SettingsWindow(root, model)
+    window._sidebar.selection_set("Units")
+    window._on_category_selected(None)
+    expected = {"display_flow_unit": "SCCM", "display_pressure_unit": "psia",
+                "display_current_unit": "mA", "display_density_unit": "mA/cm²"}
+    for key, value in expected.items():
+        entry = window._entries[key]
+        assert isinstance(entry, ttk.Combobox) and entry.get() == value
+    window._entries["display_density_unit"].set("A/cm²")
+    window._apply()
+    applied = model.apply_setting_text.call_args[0][0]
+    assert applied["display_density_unit"] == "A/cm²" and applied["display_flow_unit"] == "SCCM"

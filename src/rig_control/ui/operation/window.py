@@ -571,6 +571,7 @@ class OperationWindow:
             self._view_model.recipe_runner,
             self._view_model.profile,
             current_unit=self._view_model.display_units.current,
+            display_units=self._view_model.display_units,
             recording_details=self.recording_details,
             plan_recording=self.plan_recipe_recording,
             recording_preview=self.recording_preview,

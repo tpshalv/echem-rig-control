@@ -35,7 +35,9 @@ from rig_control.recipes.outline import (
     LoopEnd, OutlineError, OutlineRow, delete, depths, duplicate, from_outline, insert, is_loop, move,
     partner, to_outline,
 )
-from rig_control.rig_profile import RigProfile
+from rig_control.display_units import DisplayUnits
+from rig_control.recipes.model import CURRENT_DENSITY_SETTING
+from rig_control.rig_profile import DeviceCapability, RigProfile
 from rig_control.ui.common.theme import ERROR_TEXT, INFO_TEXT, MUTED_TEXT, SECTION_FONT, SUCCESS_TEXT
 from rig_control.ui.operation.recipe_settings import (
     SETTINGS, current_density_summary, default_value, group_by_device, recipe_turns_output_on, group_mode, short_label, format_clock, format_duration, format_value, parse_duration,
@@ -60,7 +62,7 @@ class RecipeBuilderWindow:
     """Edits an in-memory list of outline rows; hardware work remains in ``RecipeRunner``."""
 
     def __init__(self, root: tk.Toplevel, runner: RecipeRunner, profile: RigProfile, *,
-                 current_unit: str = "mA",
+                 current_unit: str = "mA", display_units: DisplayUnits | None = None,
                  recording_details: Callable[[], dict[str, str]] | None = None,
                  plan_recording: Callable[[datetime], tuple[Path, ExperimentMetadata]] | None = None,
                  recording_preview: Callable[[], str] | None = None) -> None:
@@ -83,7 +85,8 @@ class RecipeBuilderWindow:
         #: True while the fixed End state row is selected.
         self._end_selected = False
         #: Currents show in mA (or A, per the app setting); recipes keep amperes.
-        self._units = ValueDisplay(current_unit)
+        #: Every value shows in the display units (one per quantity); recipes keep fixed units.
+        self._units = ValueDisplay(display_units) if display_units is not None else ValueDisplay(current_unit)
         #: Sets the order of shuffled loops.  The timeline, checks and Start all
         #: use it, so the order shown is the order that runs.  A new one is
         #: drawn after each run, so running again gives a new order.
@@ -226,6 +229,16 @@ class RecipeBuilderWindow:
         except KeyError:
             return device_id
 
+    def _value_unit(self, device_id: str, spec) -> str:
+        """The unit after a value; a flow in "the device's unit" names that unit from the rig profile."""
+        if spec.name == "flow":
+            try:
+                native = self._profile.get_role(device_id).settings.get("flow_unit")
+            except KeyError:
+                native = None
+            return str(native) if native else ""  # Its label already says "device's unit".
+        return self._units.suffix(spec)
+
     def _target_text(self, device_id: str, setting: str) -> str:
         return f"{self._friendly(device_id)} · {spec_for(setting).label}"
 
@@ -237,10 +250,12 @@ class RecipeBuilderWindow:
         parts = []
         for a in items:
             spec = spec_for(a.setting)
-            unit = f" {self._units.suffix(spec)}" if self._units.suffix(spec) else ""
+            unit = f" {self._value_unit(a.device_id, spec)}" if self._value_unit(a.device_id, spec) else ""
             ramp = f" ({describe_ramp(a.ramp, spec, self._units, self._ramp_start(key, a.device_id, a.setting))})" \
                 if a.ramp else ""
-            parts.append(f"{short_label(spec)} {self._units.show(a.value, spec)}{unit}{ramp}")
+            pair = self._units.pair(a.setting, a.value)
+            parts.append(f"{short_label(spec)} {self._units.show(a.value, spec)}{unit}"
+                         + (f" ({pair})" if pair else "") + ramp)
         mode_text = {"constant_current": " (CC)", "constant_voltage": " (CV)"}.get(mode.value if mode else "", "")
         return f"{self._friendly(device_id)}{mode_text}:  " + "  ·  ".join(parts)
 
@@ -270,6 +285,9 @@ class RecipeBuilderWindow:
             shown = ", ".join(row.pass_names[:8] if row.pass_names else
                               (self._units.show(v, spec) + unit for v in row.values[:8]))
             shown += ", …" if len(row.values) > 8 else ""
+            first, last = self._units.pair(row.setting, row.values[0]), self._units.pair(row.setting, row.values[-1])
+            if first:
+                shown += f"  ({first}" + (f" … {last.removeprefix('= ')}" if last != first else "") + ")"
             ramp = (f"   ·  {describe_ramp(row.ramp, spec, self._units, self._ramp_start(key, row.device_id, row.setting))}"
                     if row.ramp else "")
             order = f"   ·  {loop_order_short(row.order)}" if row.order.shuffled else ""
@@ -322,6 +340,8 @@ class RecipeBuilderWindow:
         return self._ramp_starts.get((key, device_id, setting)) if key else None
 
     def _refresh(self) -> None:
+        # Densities and currents are shown with each other at the area entered in Operation.
+        self._units.area_cm2 = self._runner.cell_area.cm2
         self._tree.delete(*self._tree.get_children())
         self._line_tags = {}
         self._analyse()
@@ -728,7 +748,9 @@ class RecipeBuilderWindow:
                         fields.append((short_label(spec), format_value(a.value), "",
                                        "toggle", lambda change=change, a=a: change(not a.value)))
                     else:
-                        fields.append((short_label(spec), self._units.show(a.value, spec), self._units.unit(spec),
+                        pair = self._units.pair(a.setting, a.value)
+                        fields.append((short_label(spec), self._units.show(a.value, spec),
+                                       self._value_unit(a.device_id, spec) + (f"  ({pair})" if pair else ""),
                                        "text", lambda text, change=change, spec=spec: change(self._units.read(text, spec))))
                     fields += ramp_field
         elif isinstance(row, WaitStep):
@@ -880,6 +902,9 @@ class RecipeBuilderWindow:
         if not self._roles:
             raise ValueError("This rig profile has no devices a recipe can control")
         role = self._roles[0]
+        if role.capability is DeviceCapability.DC_POWER_SUPPLY:
+            # Current density is what is normally set; amperes stay one click away.
+            return role.device_id, spec_for(CURRENT_DENSITY_SETTING)
         return role.device_id, SETTINGS[role.capability][0]
 
     def _add(self, row: OutlineRow) -> None:

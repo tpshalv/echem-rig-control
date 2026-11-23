@@ -2,11 +2,12 @@
 
 No Tk here, so everything in this module is tested directly.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from math import isclose
 import re
 
 from rig_control.cell_area import DENSITY_UNIT
+from rig_control.display_units import DENSITY_UNITS, NATIVE, DisplayUnits, Quantity, convert
 from rig_control.recipes import Assignment
 from rig_control.devices.power_supply import PowerSupplyOperatingMode
 from rig_control.recipes.model import CURRENT_DENSITY_SETTING, POWER_SUPPLY_OUTPUT_SETTING, power_supply_mode_of
@@ -34,9 +35,10 @@ SETTINGS: dict[DeviceCapability, tuple[SettingSpec, ...]] = {
     DeviceCapability.BACK_PRESSURE_CONTROLLER: (SettingSpec("pressure", "Pressure setpoint", "bara"),),
     # The setting chosen states the supply mode; there is no separate mode.
     DeviceCapability.DC_POWER_SUPPLY: (
-        SettingSpec("current_setpoint", "Current setpoint (CC)", "A"),
+        # Density first: it is what is normally set, so a new supply card starts on it.
         # Converted to amperes with the active area entered for the run.
         SettingSpec(CURRENT_DENSITY_SETTING, "Current density setpoint (CC)", DENSITY_UNIT),
+        SettingSpec("current_setpoint", "Current setpoint (CC)", "A"),
         SettingSpec("voltage_limit", "Voltage limit (CC)", "V"),
         SettingSpec("voltage", "Voltage setpoint (CV)", "V"),
         SettingSpec("current_limit", "Current limit (CV)", "A"),
@@ -257,44 +259,100 @@ def _clean(value: float) -> float:
     return float(f"{value:.12g}")
 
 
-#: A current unit typed straight after a number: ``250mA``, ``0.25 A``.
-_CURRENT_UNIT = re.compile(r"([\d.])\s*(mA|A)\b", re.IGNORECASE)
+#: Units the builder recognises typed after a number, any quantity, longest first, so a
+#: unit of the wrong quantity is named in the refusal instead of failing as "not a number".
+_KNOWN_UNITS = sorted({"mA", "A", "mA/cm²", "mA/cm2", "A/cm²", "A/cm2", "SCCM", "SLPM", "bara", "psia", "kPaa",
+                       "mbara", "psi", "bar", "kPa", "mbar", "psig", "barg"}, key=len, reverse=True)
+_TYPED_UNIT = re.compile(r"(?<=[\d.])\s*(" + "|".join(re.escape(u) for u in _KNOWN_UNITS) + r")(?![A-Za-z/²\d])",
+                         re.IGNORECASE)
 CURRENT_UNITS = ("mA", "A")
+#: The units each kind of value can be shown and typed in, by its recipe unit.
+_QUANTITY_BY_RECIPE_UNIT = {"A": Quantity.CURRENT, DENSITY_UNIT: Quantity.DENSITY, "SCCM": Quantity.FLOW,
+                            "bara": Quantity.PRESSURE}
+_FIELD = {Quantity.CURRENT: "current", Quantity.DENSITY: "density", Quantity.FLOW: "flow",
+          Quantity.PRESSURE: "pressure"}
+UNIT_CHOICES = {Quantity.CURRENT: CURRENT_UNITS, Quantity.DENSITY: DENSITY_UNITS,
+                Quantity.FLOW: ("SCCM", "SLPM"), Quantity.PRESSURE: ("psia", "bara", "kpaa", "mbara")}
 
 
 class ValueDisplay:
-    """Shows and reads recipe values in the builder's display units.
+    """Shows and reads recipe values in the display units (one per quantity).
 
-    Recipes keep amperes, the canonical unit the supply is commanded in and
-    recordings use.  With ``current_unit="mA"`` the builder shows and accepts
-    milliamps, converting only here, at the edge of the UI.
+    Recipes keep fixed units: amperes, mA/cm², SCCM and bara, which is what
+    supplies, MFCs and BPRs are commanded from and recordings use.  The
+    builder shows and accepts the operator's display units, converting only
+    here, at the edge of the UI.  A unit typed after a number always wins;
+    one of another quantity is refused.
     """
 
-    def __init__(self, current_unit: str = "mA") -> None:
-        if current_unit not in ("mA", "A"):
-            raise ValueError("Current display unit must be mA or A")
-        self.current_unit = current_unit
+    def __init__(self, units: "DisplayUnits | str" = "mA", area_cm2: float | None = None) -> None:
+        if isinstance(units, str):
+            if units not in CURRENT_UNITS:
+                raise ValueError("Current display unit must be mA or A")
+            units = DisplayUnits(current=units)
+        self.units = units
+        #: The cell's active area, so a current can be shown with its density and the reverse.
+        self.area_cm2 = area_cm2
 
-    def _scale(self, spec: SettingSpec) -> float:
-        return 1000.0 if spec.unit == "A" and self.current_unit == "mA" else 1.0
+    def pair(self, setting: str, value: object) -> str:
+        """A density as the current it is at the entered area, or a current as its density; else empty."""
+        if self.area_cm2 is None or isinstance(value, bool) or not isinstance(value, (int, float)):
+            return ""
+        if setting == CURRENT_DENSITY_SETTING:
+            shown, unit = self.units.show_current(float(value) * self.area_cm2 / 1000.0)
+        elif setting in ("current_setpoint", "current_limit"):
+            shown, unit = self.units.show_density(float(value) * 1000.0 / self.area_cm2)
+        else:
+            return ""
+        return f"= {shown:.4g} {unit}"
+
+    @property
+    def current_unit(self) -> str:
+        return self.units.current
+
+    @staticmethod
+    def quantity(spec: SettingSpec | None) -> Quantity | None:
+        """The quantity a setting is, if its unit can be shown in another."""
+        return None if spec is None else _QUANTITY_BY_RECIPE_UNIT.get(spec.unit)
+
+    def _display_unit(self, spec: SettingSpec) -> str:
+        quantity = self.quantity(spec)
+        if quantity is None:
+            return spec.unit
+        unit = self.units.unit_for(quantity)
+        return spec.unit if unit == NATIVE else unit
 
     def unit(self, spec: SettingSpec) -> str:
         """The unit label shown beside a value (may be a hint like "native unit")."""
-        return "mA" if self._scale(spec) != 1.0 else spec.unit
+        return self._display_unit(spec)
 
     def suffix(self, spec: SettingSpec) -> str:
         """The unit written after a value in running text; empty for a hint."""
         unit = self.unit(spec)
         return "" if unit == "native unit" else unit
 
+    def choices(self, spec: SettingSpec | None) -> tuple[str, ...]:
+        """Units a value box can switch between; empty when it has only its own."""
+        quantity = self.quantity(spec)
+        return UNIT_CHOICES.get(quantity, ()) if quantity else ()
+
+    def with_unit(self, spec: SettingSpec, unit: str) -> "ValueDisplay":
+        """The same display units, but ``spec``'s quantity shown in ``unit``."""
+        quantity = self.quantity(spec)
+        if quantity is None:
+            return self
+        return ValueDisplay(replace(self.units, **{_FIELD[quantity]: unit}), self.area_cm2)
+
     def to_display(self, value: object, spec: SettingSpec) -> object:
-        if isinstance(value, float):
-            return _clean(value * self._scale(spec))
+        quantity = self.quantity(spec)
+        if isinstance(value, float) and quantity is not None:
+            return convert(value, spec.unit, self._display_unit(spec), quantity)
         return value
 
     def from_display(self, value: object, spec: SettingSpec) -> object:
-        if isinstance(value, float):
-            return _clean(value / self._scale(spec))
+        quantity = self.quantity(spec)
+        if isinstance(value, float) and quantity is not None:
+            return convert(value, self._display_unit(spec), spec.unit, quantity)
         return value
 
     def show(self, value: object, spec: SettingSpec) -> str:
@@ -303,17 +361,24 @@ class ValueDisplay:
     def _typed_unit(self, text: str, spec: SettingSpec) -> tuple[str, "ValueDisplay"]:
         """Honour a unit typed after the number(s), e.g. ``0.25 A`` in an mA box.
 
-        A typed unit always wins over the box's own unit.  Mixing mA and A in
-        one entry is refused rather than guessed.
+        A typed unit always wins over the box's own.  Mixing units in one
+        entry is refused rather than guessed, and so is a unit of another
+        quantity (``250 sccm`` for a current).
         """
-        if spec.unit != "A":
-            return text, self
-        typed = {m.group(2).casefold() for m in _CURRENT_UNIT.finditer(text)}
+        typed = [m.group(1) for m in _TYPED_UNIT.finditer(text)]
         if not typed:
             return text, self
-        if len(typed) > 1:
-            raise ValueError("Use one unit, mA or A, for all the values in a box")
-        return _CURRENT_UNIT.sub(r"\1", text), ValueDisplay("mA" if typed == {"ma"} else "A")
+        quantity = self.quantity(spec)
+        if quantity is None:
+            raise ValueError(f"Type {spec.label.lower()} as a plain number"
+                             + (f" in {spec.unit}" if spec.unit and spec.unit != "native unit" else ""))
+        units = {DisplayUnits._typed_unit(u, quantity) for u in typed}
+        folded = {u.casefold().replace("cm2", "cm²") for u in units}
+        if len(folded) > 1:
+            raise ValueError("Use one unit for all the values in a box")
+        unit = next(iter(units))
+        unit = next((c for c in UNIT_CHOICES[quantity] if c.casefold() == unit.casefold().replace("cm2", "cm²")), unit)
+        return _TYPED_UNIT.sub("", text), self.with_unit(spec, unit)
 
     def read(self, text: str, spec: SettingSpec) -> object:
         text, units = self._typed_unit(text, spec)
@@ -341,9 +406,10 @@ class ValueDisplay:
     def text(self, setting: str, value: object, unit: str) -> str:
         """Value and unit for running text such as the timeline."""
         spec = spec_for(setting)
-        suffix = self.suffix(spec) if self._scale(spec) != 1.0 else unit
+        suffix = self.suffix(spec) if self.quantity(spec) is not None else unit
         shown = self.show(value, spec)
-        return f"{shown} {suffix}" if suffix else shown
+        pair = self.pair(setting, value)
+        return (f"{shown} {suffix}" if suffix else shown) + (f" ({pair})" if pair else "")
 
 
 # --- Current density ------------------------------------------------------------------

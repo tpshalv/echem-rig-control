@@ -71,7 +71,8 @@ def test_pass_names_are_comma_separated_or_none():
 def test_supply_card_lists_one_mode_with_output_last():
     cc = [spec.name for spec in device_settings(DeviceCapability.DC_POWER_SUPPLY, CC)]
     cv = [spec.name for spec in device_settings(DeviceCapability.DC_POWER_SUPPLY, CV)]
-    assert cc == ["current_setpoint", "current_density_setpoint", "voltage_limit", "output_enabled"]
+    # Density first: it is what is normally set, so a new supply card starts on it.
+    assert cc == ["current_density_setpoint", "current_setpoint", "voltage_limit", "output_enabled"]
     assert cv == ["voltage", "current_limit", "output_enabled"]
     assert [s.name for s in device_settings(DeviceCapability.HOTPLATE_STIRRER)] == [
         "hotplate_temperature", "hotplate_speed", "hotplate_heating", "hotplate_stirring"]
@@ -189,3 +190,41 @@ def test_end_state_hides_read_only_devices_and_flags_ones_with_no_safe_state():
     assert end_state_summary(EndState(), roles, ValueDisplay(), no_safe) == [
         "Left as it is: RE72 heater (no safe state)", "Everything else: off (safe state)"]
     assert "keeps its last settings" in end_state_warnings(EndState(), roles, no_safe)[0]
+
+
+def test_every_quantity_shows_and_reads_in_its_display_unit_but_recipes_keep_fixed_units():
+    from rig_control.display_units import DisplayUnits
+    from rig_control.ui.operation.recipe_settings import ValueDisplay, spec_for
+    flow, pressure, density = spec_for("flow_sccm"), spec_for("pressure"), spec_for("current_density_setpoint")
+    units = ValueDisplay(DisplayUnits(pressure="psia", flow="SLPM", current="mA", density="A/cm²"))
+    assert (units.show(500.0, flow), units.unit(flow)) == ("0.5", "SLPM")
+    assert units.read("0.5", flow) == 500.0 and units.read("200 sccm", flow) == 200.0
+    assert units.unit(pressure) == "psia" and units.read("1 bara", pressure) == 1.0
+    assert units.read("14.503773773", pressure) == pytest.approx(1.0)
+    assert (units.show(300.0, density), units.unit(density)) == ("0.3", "A/cm²")
+    assert units.read("50 mA/cm2", density) == 50.0
+    assert units.choices(flow) == ("SCCM", "SLPM") and units.choices(spec_for("voltage_limit")) == ()
+    assert units.with_unit(flow, "SCCM").show(500.0, flow) == "500"
+
+
+def test_units_of_another_quantity_or_gauge_pressure_are_refused_in_the_builder():
+    from rig_control.ui.operation.recipe_settings import ValueDisplay, spec_for
+    units = ValueDisplay()
+    with pytest.raises(ValueError, match="not a current unit"):
+        units.read("50 sccm", spec_for("current_setpoint"))
+    with pytest.raises(ValueError, match="absolute"):
+        units.read("15 psi", spec_for("pressure"))
+    with pytest.raises(ValueError, match="plain number"):
+        units.read("5 mA", spec_for("voltage_limit"))
+    # Words in a range are not units.
+    assert units.read_values("10 to 30 step 10", spec_for("flow_sccm")) == (10.0, 20.0, 30.0)
+
+
+def test_densities_and_currents_are_shown_with_each_other_at_the_area():
+    from rig_control.ui.operation.recipe_settings import ValueDisplay
+    units = ValueDisplay("mA", area_cm2=5.0)
+    assert units.pair("current_density_setpoint", 50.0) == "= 250 mA"
+    assert units.pair("current_setpoint", 0.25) == "= 50 mA/cm²"
+    assert units.pair("voltage", 1.0) == ""
+    assert ValueDisplay("mA").pair("current_density_setpoint", 50.0) == ""  # No area, no pair.
+    assert units.text("current_density_setpoint", 50.0, "mA/cm²") == "50 mA/cm² (= 250 mA)"

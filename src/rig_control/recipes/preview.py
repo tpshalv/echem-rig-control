@@ -27,6 +27,10 @@ class PreviewRow:
     parameters: tuple[tuple[str, str, object], ...] = ()
 
 
+#: Settings whose name carries a unit, named without it: the value shown has its own unit.
+_SETTING_WORDS = {"flow_sccm": "flow"}
+
+
 def estimate_recipe(recipe: Recipe, *, seed: int = 0) -> RecipeEstimate:
     """Raises ``RampStartUnknown`` if a ramp has nothing to start from."""
     counts = {WaitPurpose.MEASURE: 0, WaitPurpose.SETTLE: 0}
@@ -99,8 +103,8 @@ def preview_items(items: Iterable[PlanItem], *, limit: int = 500, offset: int = 
             targets.update((a.key, a.value) for a in item.writes)
             if not item.writes:
                 continue
-            parts = ", ".join(f"{a.device_id} {a.setting.replace('_', ' ')} = {text(a.setting, a.value, a.unit)}"
-                              for a in item.writes)
+            parts = ", ".join(f"{a.device_id} {_SETTING_WORDS.get(a.setting, a.setting.replace('_', ' '))} = "
+                              f"{text(a.setting, a.value, a.unit)}" for a in item.writes)
             label = f"Ramp {parts}" if item.ramping else (f"{item.name}: " if item.name else "") + f"Set {parts}"
             kind = "set"
         elif isinstance(item, PlannedWait):

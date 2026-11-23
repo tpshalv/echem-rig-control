@@ -111,30 +111,38 @@ def _replace_text(entry: ttk.Entry, text: str) -> None:
 
 
 class _UnitPicker:
-    """The unit beside a value: an mA/A dropdown for currents, a plain label otherwise.
+    """The unit beside a value: a dropdown when its quantity has several units, else a label.
 
-    Switching mA <-> A converts the numbers shown (250 mA -> 0.25 A) through
-    ``on_switch(old, new)``, so a quantity never changes just because its
-    unit did.  (Time units reinterpret instead, which is harmless there.)
+    Currents (mA/A), densities (mA/cm²/A/cm²), flows (SCCM/SLPM) and
+    pressures (psia/bara/...) can be switched; doing so converts the numbers
+    shown (250 mA -> 0.25 A) through ``on_switch(old, new)``, so a quantity
+    never changes just because its unit did.  (Time units reinterpret
+    instead, which is harmless there.)
     """
 
     def __init__(self, parent: tk.Widget, units: ValueDisplay, on_switch) -> None:
         self.units, self._on_switch = units, on_switch
-        self.box = ttk.Combobox(parent, values=CURRENT_UNITS, state="readonly", width=4)
-        self.box.set(units.current_unit)
+        self._spec: SettingSpec | None = None
+        self.box = ttk.Combobox(parent, values=CURRENT_UNITS, state="readonly", width=7)
         self.box.bind("<<ComboboxSelected>>", lambda _e: self._switched())
         self.label = ttk.Label(parent, foreground=MUTED_TEXT)
 
     def show(self, spec: SettingSpec | None, **grid) -> None:
-        """Grid the dropdown for a current setting, else the label."""
-        current = spec is not None and spec.unit == "A"
-        (self.box if current else self.label).grid(**grid)
-        (self.label if current else self.box).grid_remove()
+        """Grid the dropdown for a setting with several units, else the label."""
+        self._spec = spec
+        choices = self.units.choices(spec)
+        if choices:
+            self.box.configure(values=choices)
+            self.box.set(self.units.unit(spec))  # type: ignore[arg-type]
+        (self.box if choices else self.label).grid(**grid)
+        (self.label if choices else self.box).grid_remove()
         self.label.configure(text=self.units.unit(spec) if spec else "")
 
     def _switched(self) -> None:
-        old, self.units = self.units, ValueDisplay(self.box.get())
-        if old.current_unit != self.units.current_unit:
+        if self._spec is None:
+            return
+        old, self.units = self.units, self.units.with_unit(self._spec, self.box.get())
+        if old.unit(self._spec) != self.units.unit(self._spec):
             self._on_switch(old, self.units)
 
 

@@ -1079,7 +1079,9 @@ class OperationWindow:
             elif row.editor in {"mode", "direction"}:
                 value = text
             else:
-                value = float(text)
+                # A unit typed after the number wins (e.g. "250 mA"); one of
+                # another quantity is refused.
+                value = self._view_model.parse_entry(row, text)
                 if row.minimum is not None and value < row.minimum:
                     raise ValueError(f"Value must be at least {row.minimum:g} {row.unit}")
                 if row.maximum is not None and value > row.maximum:
@@ -1087,12 +1089,11 @@ class OperationWindow:
         except ValueError as error:
             messagebox.showerror("Invalid value", str(error), parent=self._root)
             return "break"
-        amps = (
-            value if row.channel == "current_limit"
-            else self._view_model.amps_for_density(value)
-            if row.channel == "current_density_setpoint" and isinstance(value, float)
-            else None
-        )
+        try:
+            amps = (self._view_model.amps_for_entry(row, value)
+                    if isinstance(value, float) else None)
+        except ValueError:
+            amps = None  # No area: the density is refused when it is applied.
         if (
             isinstance(amps, float)
             and amps > DEFAULT_WIRING_CURRENT_CEILING_AMPS
@@ -1474,6 +1475,9 @@ class OperationWindow:
                     value_text = "—"
                 else:
                     value_text = format(value, ".6g")
+                equivalent = getattr(row, "equivalent", "")
+                if equivalent:
+                    value_text += f"   ({equivalent})"
                 timestamp = getattr(row, "timestamp", None)
                 values = (
                     getattr(row, "device_name", row.device_id),

@@ -1,7 +1,7 @@
 from rig_control.devices.pressure_controller import PressureController
 from rig_control.calibrated_channels import CURRENT_DENSITY_CHANNEL
 from rig_control.cell_area import CellArea, CellAreaMissing, DENSITY_UNIT
-from rig_control.display_units import DisplayUnits
+from rig_control.display_units import DisplayUnits, Quantity, convert
 from array import array
 from bisect import bisect_left
 from collections import deque
@@ -357,10 +357,28 @@ class OperationChannelRow:
     editor: str = "number"
     minimum: float | None = None
     maximum: float | None = None
+    #: The same value as another quantity, shown beside it, e.g. "50 mA/cm²"
+    #: beside a current or "250 mA" beside a density.
+    equivalent: str = ""
 
     @property
     def key(self) -> tuple[str, str]:
         return (self.device_id, self.channel)
+
+
+#: Editable rows whose typed value may carry a unit, by the quantity it is.
+_ENTRY_QUANTITIES = {
+    "setpoint": Quantity.FLOW,
+    "pressure_setpoint_absolute": Quantity.PRESSURE,
+    "current_limit": Quantity.CURRENT,
+    "current_density_setpoint": Quantity.DENSITY,
+}
+#: Readings in amperes shown in the display current unit.
+_CURRENT_CHANNELS = frozenset({"current", "current_limit"})
+
+
+def _quantity_text(value: float, unit: str) -> str:
+    return f"{value:.4g} {unit}"
 
 
 class OperationViewModel:
@@ -441,6 +459,35 @@ class OperationViewModel:
     def amps_for_density(self, density: float) -> float:
         return self._cell_area.amps_for(density)
 
+    def parse_entry(self, row: "OperationChannelRow", text: str) -> float:
+        """A typed value in the row's own unit; a unit typed after it wins (``250 mA``).
+
+        A unit of another quantity, or one that could mean gauge pressure, is
+        refused, so the number can never be taken in the wrong unit.
+        """
+        quantity = _ENTRY_QUANTITIES.get(row.channel)
+        if quantity is None:
+            return float(text)
+        return self._display_units.read(text, quantity, row.unit, native_unit=row.unit)
+
+    def amps_for_entry(self, row: "OperationChannelRow", value: float) -> float | None:
+        """The amperes an entered current or density row value means; None for other rows."""
+        if row.channel == "current_limit":
+            return convert(value, self._display_units.current, "A", Quantity.CURRENT)
+        if row.channel == "current_density_setpoint":
+            return self.amps_for_density(convert(value, self._display_units.density, "mA/cm²", Quantity.DENSITY))
+        return None
+
+    def _current_equivalent(self, amps: float | None) -> str:
+        """The density an amperes value is, at the entered area; empty without one."""
+        density = None if amps is None else self._cell_area.density_for(amps)
+        return "" if density is None else _quantity_text(*self._display_units.show_density(density))
+
+    def _density_equivalent(self, ma_per_cm2: float | None) -> str:
+        if ma_per_cm2 is None or self._cell_area.cm2 is None:
+            return ""
+        return _quantity_text(*self._display_units.show_current(self._cell_area.amps_for(ma_per_cm2)))
+
     def active_area_forgotten(self, electrolyser_id: str) -> bool:
         """No area, yet this looks like a real cell: one is named or a supply is on."""
         if self._cell_area.cm2 is not None:
@@ -516,6 +563,12 @@ class OperationViewModel:
                 value, unit = state_label(reading.value, reading.unit), ""
             if maximum is not None:
                 maximum = self._for_display(reading.channel, maximum, reading.unit)[0]
+            equivalent = ""
+            if isinstance(reading.value, (int, float)) and not isinstance(reading.value, bool):
+                if reading.channel == "current" and reading.unit == "A":
+                    equivalent = self._current_equivalent(float(reading.value))
+                elif reading.channel == CURRENT_DENSITY_CHANNEL:
+                    equivalent = self._density_equivalent(float(reading.value))
             row = OperationChannelRow(
                 device_id=reading.device_id,
                 device_name=self._device_name(reading.device_id),
@@ -529,6 +582,7 @@ class OperationViewModel:
                 writable=writable,
                 minimum=0.0 if writable else None,
                 maximum=maximum,
+                equivalent=equivalent,
             )
             rows[row.key] = row
 
@@ -617,24 +671,31 @@ class OperationViewModel:
                     if mode is PowerSupplyOperatingMode.CONSTANT_CURRENT
                     else "Current limit"
                 )
+                # Shown and entered in the display current unit; the supply is
+                # always commanded in amperes (see apply_channel_value).
+                units = self._display_units
+                amps = device.current_limit
                 rows[(device_id, "current_limit")] = OperationChannelRow(
                     device_id, device_name, "current_limit", current_limit_name,
-                    device.current_limit, "A", "good", None, device_system,
-                    True, "number", 0.0, device.limits.maximum_current,
+                    None if amps is None else units.show_current(amps)[0], units.current,
+                    "good", None, device_system,
+                    True, "number", 0.0, units.show_current(device.limits.maximum_current)[0],
+                    self._current_equivalent(amps),
                 )
                 # The same setting as the row above, entered per area; the
                 # supply is still commanded in amperes through that row's path.
-                density = (None if device.current_limit is None
-                           else self._cell_area.density_for(device.current_limit))
+                density = None if amps is None else self._cell_area.density_for(amps)
                 has_area = self._cell_area.cm2 is not None
+                most = self._cell_area.density_for(device.limits.maximum_current)
                 rows[(device_id, "current_density_setpoint")] = OperationChannelRow(
                     device_id, device_name, "current_density_setpoint",
                     current_limit_name.replace("Current", "Current density")
                     + ("" if has_area else " (enter active area)"),
-                    None if density is None else round(density, 3), DENSITY_UNIT,
+                    None if density is None else round(units.show_density(density)[0], 6), units.density,
                     "good" if has_area else "bad", None, device_system,
                     has_area, "number", 0.0,
-                    self._cell_area.density_for(device.limits.maximum_current),
+                    None if most is None else units.show_density(most)[0],
+                    "" if amps is None else _quantity_text(*units.show_current(amps)) if has_area else "",
                 )
                 rows[(device_id, "output_enabled")] = OperationChannelRow(
                     device_id, device_name, "output_enabled", "Output",
@@ -747,6 +808,7 @@ class OperationViewModel:
     #: are different quantities with their own units and are left alone.
     _PRESSURE_CHANNELS = frozenset({"absolute_pressure", "pressure_setpoint_absolute"})
     _FLOW_CHANNELS = frozenset({"mass_flow", "setpoint", "excess_flow"})
+    _CURRENT_CHANNELS = _CURRENT_CHANNELS
 
     def _for_display(self, channel: str, value, unit: str):
         """Convert one reading into the unit this rig is set to show."""
@@ -754,7 +816,9 @@ class OperationViewModel:
         if value is None or not isinstance(value, (int, float)) or isinstance(value, bool):
             return value, unit
         if channel == CURRENT_DENSITY_CHANNEL:
-            return value, DENSITY_UNIT
+            return self._display_units.show_density(float(value))
+        if channel in self._CURRENT_CHANNELS and unit == "A":
+            return self._display_units.show_current(float(value))
         if channel in self._PRESSURE_CHANNELS:
             return self._display_units.show_pressure(float(value), unit)
         if channel in self._FLOW_CHANNELS:
@@ -796,13 +860,18 @@ class OperationViewModel:
         elif channel == "voltage_setpoint":
             result = self.manual_control.set_power_supply_voltage(device_id, float(value))
         elif channel == "current_limit":
-            result = self.manual_control.set_power_supply_current(device_id, float(value))
+            # Entered in the display current unit; the supply is commanded in amperes.
+            amps = convert(float(value), self._display_units.current, "A", Quantity.CURRENT)
+            result = self._with_entry(self.manual_control.set_power_supply_current(device_id, amps),
+                                      f"{float(value):g} {self._display_units.current}", amps)
         elif channel == "current_density_setpoint":
+            density = convert(float(value), self._display_units.density, "mA/cm²", Quantity.DENSITY)
             try:
-                amps = self._cell_area.amps_for(float(value))
+                amps = self._cell_area.amps_for(density)
             except CellAreaMissing as error:
                 return OperationActionResult(False, str(error))
-            result = self.manual_control.set_power_supply_current(device_id, amps)
+            result = self._with_entry(self.manual_control.set_power_supply_current(device_id, amps),
+                                      f"{float(value):g} {self._display_units.density}", amps)
         elif channel == "output_enabled":
             result = self.manual_control.set_power_supply_output(device_id, bool(value))
         elif channel == "operating_mode":
@@ -837,6 +906,14 @@ class OperationViewModel:
             result.succeeded, result.summary, result.technical_details
         )
 
+    @staticmethod
+    def _with_entry(result, entered: str, amps: float):
+        """Say what was typed and what was sent, so a unit slip can be traced."""
+        if not result.succeeded:
+            return result
+        return type(result)(True, f"{result.summary} (entered {entered}; sent {amps:.6g} A)",
+                            result.technical_details)
+
     def _device_name(self, device_id: str) -> str:
         if device_id == EXCESS_FLOW_SOURCE:
             return "Excess flow / rough FE"
@@ -853,9 +930,9 @@ class OperationViewModel:
             return tuple((channel, self._labelled_channel_name(device_id, channel), "degC")
                          for channel in device.channels)
         if isinstance(device, PowerSupply):
-            return (("voltage", "Voltage", "V"), ("current", "Current draw", "A")) + (
+            return (("voltage", "Voltage", "V"), ("current", "Current draw", self._display_units.current)) + (
                 () if self._cell_area.cm2 is None
-                else ((CURRENT_DENSITY_CHANNEL, "Current density", DENSITY_UNIT),)
+                else ((CURRENT_DENSITY_CHANNEL, "Current density", self._display_units.density),)
             )
         if isinstance(device, MassFlowController):
             return (("mass_flow", "Measured mass flow", device.limits.flow_unit),)

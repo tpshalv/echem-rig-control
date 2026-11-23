@@ -21,7 +21,7 @@ from rig_control.control.commands import (
     SetHotplateStirring,
     SetHotplateTemperature,
 )
-from rig_control.control.service import RigControlService
+from rig_control.control.service import LimitExceeded, RigControlService
 from rig_control.devices.manager import DeviceManager
 from rig_control.devices.power_supply import (
     PowerSupply,
@@ -609,6 +609,9 @@ class ManualControlViewModel:
             return ManualActionResult(succeeded=True, summary=summary)
         try:
             result = self._control_service.execute(command)
+        except LimitExceeded as error:
+            # An operating limit, not a fault: say plainly which and why.
+            return ManualActionResult(succeeded=False, summary=f"Not sent: {error}")
         except Exception as error:
             return ManualActionResult(
                 succeeded=False,

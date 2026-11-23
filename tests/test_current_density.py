@@ -240,10 +240,15 @@ def test_operation_shows_and_accepts_density_alongside_amperes():
     density, amps = row_for(model, "current_density_setpoint"), row_for(model, "current_limit")
     assert (density.value, density.unit, density.writable) == (200.0, "mA/cm²", True)
     assert density.maximum == 2000.0
-    assert (amps.value, amps.unit, amps.writable) == (1.0, "A", True)
-    assert model.apply_channel_value("supply", "current_density_setpoint", 100.0).succeeded
+    # Currents show in the display unit (mA by default), each with its density beside it.
+    assert (amps.value, amps.unit, amps.writable) == (1000.0, "mA", True)
+    assert amps.equivalent == "200 mA/cm²" and density.equivalent == "1000 mA"
+    result = model.apply_channel_value("supply", "current_density_setpoint", 100.0)
+    assert result.succeeded and "entered 100 mA/cm²; sent 0.5 A" in result.summary
     assert supply.current_limit == 0.5
-    assert row_for(model, "current_limit").value == 0.5
+    assert row_for(model, "current_limit").value == 500.0
+    assert model.apply_channel_value("supply", "current_limit", 250.0).succeeded  # mA
+    assert supply.current_limit == 0.25
 
 
 def test_operation_without_an_area_refuses_density_but_not_amperes():
@@ -252,8 +257,9 @@ def test_operation_without_an_area_refuses_density_but_not_amperes():
     assert not row.writable and row.value is None and "enter active area" in row.channel_name
     result = model.apply_channel_value("supply", "current_density_setpoint", 100.0)
     assert not result.succeeded and "no active area" in result.summary
-    assert model.apply_channel_value("supply", "current_limit", 0.5).succeeded
+    assert model.apply_channel_value("supply", "current_limit", 500.0).succeeded  # mA
     assert supply.current_limit == 0.5
+    assert row_for(model, "current_limit").equivalent == ""  # No area, no density.
 
 
 def test_operation_density_beyond_the_instruments_maximum_is_refused():
@@ -306,3 +312,28 @@ def CellAreaWith(cm2: float) -> CellArea:
     area = CellArea()
     area.set(cm2)
     return area
+
+
+def test_operation_entries_take_a_typed_unit_and_refuse_the_wrong_quantity():
+    model, supply = make_operation(5.0)
+    current, density = row_for(model, "current_limit"), row_for(model, "current_density_setpoint")
+    assert model.parse_entry(current, "250") == 250.0           # The row's own unit, mA.
+    assert model.parse_entry(current, "0.25 A") == 250.0         # A typed unit wins.
+    assert model.parse_entry(density, "0.05 A/cm2") == 50.0
+    with pytest.raises(ValueError, match="not a current unit"):
+        model.parse_entry(current, "50 mA/cm²")
+    with pytest.raises(ValueError, match="not a current density unit"):
+        model.parse_entry(density, "250 mA")
+    assert model.amps_for_entry(current, 250.0) == 0.25
+    assert model.amps_for_entry(density, 50.0) == 0.25
+
+
+def test_operation_currents_follow_an_amperes_display_unit():
+    from rig_control.display_units import DisplayUnits
+    model, supply = make_operation(5.0)
+    model._display_units = DisplayUnits(current="A", density="A/cm²")
+    supply.set_current_limit(1.0)
+    amps, density = row_for(model, "current_limit"), row_for(model, "current_density_setpoint")
+    assert (amps.value, amps.unit) == (1.0, "A") and (density.value, density.unit) == (0.2, "A/cm²")
+    assert model.apply_channel_value("supply", "current_density_setpoint", 0.1).succeeded
+    assert supply.current_limit == 0.5

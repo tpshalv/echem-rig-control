@@ -1,5 +1,7 @@
 """Background recipe execution using the shared control service."""
-from collections.abc import Callable
+from collections import deque
+from collections.abc import Callable, Iterator
+from concurrent.futures import Future, TimeoutError as FutureTimeout
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -35,8 +37,13 @@ from rig_control.devices.safe_state import SafeStateCapable
 from rig_control.recipes.model import (
     CURRENT_DENSITY_SETTING, EndAction, Assignment, LoopStep, Recipe, RepeatStep, WaitStep, iter_steps, power_supply_mode_of, recipe_to_dict,
 )
-from rig_control.recipes.plan import PlannedLoopOrder, PlannedRamp, PlannedSet, PlannedWait, plan, recipe_problems
+from rig_control.recipes.plan import (
+    PlanItem, PlannedLoopOrder, PlannedRamp, PlannedSet, PlannedWait, SupplySequence, plan, recipe_problems,
+)
 from rig_control.recipes.preview import estimate_recipe
+from rig_control.recipes.revision import (
+    Revision, RevisionChanges, RevisionRefused, RunSnapshot, prepare_revision, structure_problems,
+)
 
 
 class RecipeRunState(StrEnum):
@@ -56,6 +63,8 @@ class RecipeRunStatus:
     elapsed_seconds: float = 0.0
     estimated_remaining_seconds: float = 0.0
     failure: str | None = None
+    #: How many times the running recipe has been revised.
+    revision: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +76,10 @@ class RecipeRunResult:
 
 class RecipeValidationError(ValueError):
     pass
+
+
+class _MovedOn(Exception):
+    """The run started another item while a revision was being checked."""
 
 
 #: Order seeds are drawn below this, so they stay short enough to read and type.
@@ -92,6 +105,19 @@ class RecipeRunner:
         self._status = RecipeRunStatus(RecipeRunState.IDLE); self._result: RecipeRunResult | None = None
         self._started_at = 0.0; self._estimated_seconds = 0.0; self._order_seed = 0
         self._supply_modes: dict[str, PowerSupplyOperatingMode] = {}
+        self._reset_position(None)
+        #: Work handed to the run's thread, done between items or during a wait.
+        self._requests: deque[tuple[Callable[[], object], Future]] = deque()
+
+    def _reset_position(self, recipe: Recipe | None) -> None:
+        """Where the run is, read by ``snapshot`` from other threads (under the lock)."""
+        self._recipe = recipe; self._revision = 0
+        self._items: Iterator[PlanItem] = iter(())
+        #: The running step run's items not yet started; then the first of the next.
+        self._rest: deque[PlanItem] = deque(); self._lookahead: PlanItem | None = None
+        self._counter = 0; self._where = None; self._trace = ()
+        self._written: dict[tuple[str, str], object] = {}; self._supply = SupplySequence()
+        self._wait_left = 0.0
 
     @property
     def cell_area(self) -> CellArea: return self._cell_area
@@ -117,24 +143,24 @@ class RecipeRunner:
         Shuffled loops are checked in the order ``order_seed`` gives, which
         is the order a run started with that seed follows.
         """
-        for step in iter_steps(recipe.steps):
-            if isinstance(step, (LoopStep, RepeatStep)) and not step.steps:
-                name = "Repeat" if isinstance(step, RepeatStep) else f"Loop over {step.device_id}.{step.setting}"
-                raise RecipeValidationError(f"{name} has no steps inside it")
-        problems = recipe_problems(recipe, seed=order_seed)
+        problems = structure_problems(recipe) or recipe_problems(recipe, seed=order_seed)
         if problems:
             raise RecipeValidationError(problems[0])
         # Every value the run will write, ramps included, checked once each.
-        writes = {(a.device_id, a.setting, a.value): a for item in plan(recipe.steps, seed=order_seed)
-                  if isinstance(item, PlannedSet) for a in item.writes}
+        self._check_writes([a for item in plan(recipe.steps, seed=order_seed)
+                            if isinstance(item, PlannedSet) for a in item.writes], recipe)
+
+    def _check_writes(self, writes, recipe: Recipe) -> None:
+        """Each distinct write, and the end state, must be possible for the connected devices."""
+        unique = {(a.device_id, a.setting, a.value): a for a in writes}
         # The end state is checked like any step: it must be possible before the run starts.
-        writes.update(((a.device_id, a.setting, a.value), a) for d in recipe.end_state.devices for a in d.assignments)
+        unique.update(((a.device_id, a.setting, a.value), a) for d in recipe.end_state.devices for a in d.assignments)
         for entry in recipe.end_state.devices:
             try:
                 self._devices.get(entry.device_id)
             except Exception as error:
                 raise RecipeValidationError(f"End state: {entry.device_id}: {error}") from error
-        for write in writes.values():
+        for write in unique.values():
             try:
                 device = self._devices.get(write.device_id)
                 self._command(write)
@@ -169,6 +195,7 @@ class RecipeRunner:
                 existing = existing_recording(recording_root, metadata.experiment_id)
                 if existing is not None: remove_recording(existing)
             self._cancel.clear(); self._result = None; self._supply_modes = {}; self._order_seed = order_seed
+            self._reset_position(recipe); self._items = plan(recipe.steps, seed=order_seed)
             estimate = estimate_recipe(recipe, seed=order_seed)
             self._started_at = self._clock(); self._estimated_seconds = estimate.duration_seconds
             self._status = RecipeRunStatus(RecipeRunState.RUNNING, estimated_remaining_seconds=estimate.duration_seconds)
@@ -177,6 +204,96 @@ class RecipeRunner:
             self._thread.start()
 
     def stop(self) -> None: self._cancel.set()
+
+    # --- revising the running recipe ---
+
+    @property
+    def active_recipe(self) -> Recipe | None:
+        """The recipe the run is following now, revisions included; None when idle."""
+        with self._lock:
+            return self._recipe if self._status.state is RecipeRunState.RUNNING else None
+
+    def snapshot(self) -> RunSnapshot:
+        """The run as it stands, for working out a revision or what is left."""
+        with self._lock:
+            if self._recipe is None or self._status.state is not RecipeRunState.RUNNING:
+                raise RuntimeError("No recipe is running")
+            return RunSnapshot(self._recipe, self._order_seed, self._counter, self._where, self._trace,
+                               tuple(self._rest), dict(self._written), self._supply.copy(), self._wait_left,
+                               self._revision)
+
+    def revise(self, recipe: Recipe, *, timeout: float = 10.0) -> RevisionChanges:
+        """Replace what the run has still to do with ``recipe``'s; see ``rig_control.recipes.revision``.
+
+        Checked here, then swapped in by the run's own thread before its next
+        item (or during a wait), so the run never sees half a change.  If the
+        run moves on meanwhile, the check is done again.  Raises
+        ``RevisionRefused`` with the reasons, or ``RuntimeError`` if no run.
+        """
+        for _attempt in range(5):
+            revision = prepare_revision(self.snapshot(), recipe)
+            try:
+                self._check_writes(revision.writes, recipe)
+            except RecipeValidationError as error:
+                raise RevisionRefused((str(error),)) from error
+            future = self._submit(lambda revision=revision: self._apply_revision(revision))
+            try:
+                return future.result(timeout)  # type: ignore[return-value]
+            except _MovedOn:
+                continue
+            except FutureTimeout:
+                raise RevisionRefused(("The run did not take the change in time (a device may be slow "
+                                       "to answer); nothing was changed. Try again.",)) from None
+        raise RevisionRefused(("The run kept moving on while the change was checked; try again.",))
+
+    def _submit(self, work: Callable[[], object]) -> Future:
+        future: Future = Future()
+        with self._lock:
+            if self._thread is None or not self._thread.is_alive() or self._status.state is not RecipeRunState.RUNNING:
+                raise RuntimeError("No recipe is running")
+            self._requests.append((work, future))
+        return future
+
+    def _serve_requests(self) -> None:
+        """Run work handed over by other threads; only ever called on the run's thread."""
+        while True:
+            with self._lock:
+                if not self._requests:
+                    return
+                work, future = self._requests.popleft()
+            if not future.set_running_or_notify_cancel():
+                continue
+            try:
+                future.set_result(work())
+            except BaseException as error:  # Handed back to the caller, never lost.
+                future.set_exception(error)
+
+    def _drop_requests(self) -> None:
+        with self._lock:
+            pending, self._requests = list(self._requests), deque()
+        for _work, future in pending:
+            if future.set_running_or_notify_cancel():
+                future.set_exception(RuntimeError("The run has ended"))
+
+    def _apply_revision(self, revision: Revision) -> RevisionChanges:
+        if revision.based_on != self._counter:
+            raise _MovedOn()
+        # Read only once the running step has finished; see ``resume_plan``.
+        items = revision.items(lambda: dict(self._written))
+        elapsed = self._clock() - self._started_at
+        with self._lock:
+            self._items, self._lookahead = items, None
+            self._recipe = revision.recipe; self._revision += 1
+            self._estimated_seconds = elapsed + revision.changes.remaining_seconds
+            self._status = replace(self._status, revision=self._revision,
+                                   estimated_remaining_seconds=revision.changes.remaining_seconds)
+        changes = revision.changes
+        self._emit("recipe_revised", f"revision {self._revision}", revision=self._revision,
+                   position=list(self._status.position), changed=list(changes.changed), added=list(changes.added),
+                   removed=list(changes.removed), running_changed=changes.running_changed,
+                   end_state_changed=changes.end_state_changed,
+                   recipe_snapshot_json=json.dumps(recipe_to_dict(revision.recipe), sort_keys=True))
+        return changes
     def join(self, timeout: float | None = None) -> RecipeRunResult | None:
         thread = self._thread
         if thread is not None: thread.join(timeout)
@@ -196,17 +313,21 @@ class RecipeRunner:
                 started_recording = True
             self._control.begin_recipe_control()
             self._emit("recipe_started", recipe.name, order_seed=self._order_seed)
-            self._execute(recipe)
+            self._execute()
             # Finishing, Stop and failure all leave the rig in the recipe's
-            # end state.  Stop skips every remaining step, ramps and holds
-            # included; the rig's global safe state stays for emergencies.
-            safe_failures = self._apply_end_state(recipe, "completed")
+            # end state (as last revised).  Stop skips every remaining step,
+            # ramps and holds included; the rig's global safe state stays for
+            # emergencies.
+            self._drop_requests()
+            safe_failures = self._apply_end_state(self._active(recipe), "completed")
         except _Cancelled:
+            self._drop_requests()
             state = RecipeRunState.STOPPED; self._emit("recipe_stopped", "Operator requested Stop")
-            safe_failures = self._apply_end_state(recipe, "stopped")
+            safe_failures = self._apply_end_state(self._active(recipe), "stopped")
         except Exception as error:
+            self._drop_requests()
             state = RecipeRunState.FAILED; failure = f"{type(error).__name__}: {error}"; self._emit("recipe_failed", failure, EventSeverity.ERROR)
-            safe_failures = self._apply_end_state(recipe, "failed")
+            safe_failures = self._apply_end_state(self._active(recipe), "failed")
         finally:
             if self._control.mode.value == "recipe_active":
                 try: self._control.end_recipe_control()
@@ -217,11 +338,45 @@ class RecipeRunner:
             elapsed = self._clock() - started
             result = RecipeRunResult(state, failure, safe_failures)
             with self._lock:
-                self._result = result; self._status = RecipeRunStatus(state, elapsed_seconds=elapsed, failure=failure)
+                self._result = result
+                self._status = RecipeRunStatus(state, elapsed_seconds=elapsed, failure=failure, revision=self._revision)
+            self._drop_requests()  # Anything handed over while the end state applied.
 
-    def _execute(self, recipe: Recipe) -> None:
+    def _active(self, started: Recipe) -> Recipe:
+        with self._lock:
+            return self._recipe or started
+
+    def _next_item(self) -> PlanItem | None:
+        """The next item, keeping ``_rest`` as the running step run's unstarted items.
+
+        A step run's items are taken from the plan together when it starts,
+        so a revision can leave the rest of it as it started.
+        """
+        if not self._rest:
+            first = self._lookahead if self._lookahead is not None else next(self._items, None)
+            if first is None:
+                return None
+            run, lookahead = [first], None
+            for item in self._items:
+                if item.where != first.where:
+                    lookahead = item
+                    break
+                run.append(item)
+            with self._lock:
+                self._rest, self._lookahead = deque(run), lookahead
+        with self._lock:
+            item = self._rest.popleft()
+            self._counter += 1; self._where = item.where; self._trace = item.trace
+        return item
+
+    def _execute(self) -> None:
         """Run the plan item by item: exactly what the timeline and estimate show."""
-        for item in plan(recipe.steps, seed=self._order_seed):
+        while True:
+            self._check_cancel()
+            self._serve_requests()
+            item = self._next_item()
+            if item is None:
+                return
             self._check_cancel()
             if isinstance(item, PlannedSet):
                 if item.name and not item.ramping:
@@ -249,7 +404,13 @@ class RecipeRunner:
                    duration_seconds=step.duration_seconds, position=list(position))
         remaining = step.duration_seconds
         while remaining > 0:
-            self._check_cancel(); period = min(remaining, 0.1); self._sleeper(period); remaining -= period
+            self._check_cancel()
+            with self._lock:
+                self._wait_left = remaining
+            self._serve_requests()
+            period = min(remaining, 0.1); self._sleeper(period); remaining -= period
+        with self._lock:
+            self._wait_left = 0.0
 
     def _execute_set(self, step: Assignment, position: tuple[str, ...], name: str = "") -> None:
         self._check_cancel()
@@ -261,6 +422,9 @@ class RecipeRunner:
         self._set_status(name or f"Set {step.setting}", position)
         command = self._command(step)
         self._control.execute(command)
+        with self._lock:
+            self._written[step.key] = step.value
+            self._supply.write(step)
         # A flow is sent as rpm; record which rpm and calibration it became.
         extra = ({"rpm": command.rpm, "calibration": self._pump_calibration(step.device_id).name}
                  if step.setting == "pump_flow" else
@@ -347,6 +511,7 @@ class RecipeRunner:
         with self._lock:
             self._status = RecipeRunStatus(
                 RecipeRunState.RUNNING, label, position, elapsed, max(0.0, self._estimated_seconds - elapsed),
+                revision=self._revision,
             )
     def _apply_end_state(self, recipe: Recipe, reason: str) -> tuple[str, ...]:
         """Leave each device as the end state says; any device not listed goes to safe state.

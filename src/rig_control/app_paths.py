@@ -36,7 +36,31 @@ def logs_directory() -> Path:
 
 
 def experiments_directory() -> Path:
-    return home_directory() / "experiments"
+    """Where recordings go unless the operator picks somewhere else.
+
+    Documents\\Rig Data, so runs are easy to find in File Explorer rather
+    than hidden in AppData. A portable deployment (ECHEM_RIG_CONTROL_HOME
+    set) keeps its recordings with the rest of its data instead.
+    """
+
+    if os.environ.get("ECHEM_RIG_CONTROL_HOME"):
+        return home_directory() / "experiments"
+    return Path.home() / "Documents" / "Rig Data"
+
+
+def resolve_output_directory(text: str | Path) -> Path:
+    """The full path for an output folder typed on screen.
+
+    Blank means the default folder. A name that is not a full path goes
+    inside the default folder, never into whichever folder the app was
+    started from, where recordings would be hard to find.
+    """
+
+    text = str(text).strip()
+    if not text:
+        return experiments_directory()
+    path = Path(text).expanduser()
+    return path if path.is_absolute() else experiments_directory() / path
 
 
 def device_dumps_directory() -> Path:

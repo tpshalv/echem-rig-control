@@ -6,6 +6,7 @@ from rig_control.app_paths import (
     home_directory,
     logs_directory,
     profiles_directory,
+    resolve_output_directory,
     settings_directory,
 )
 
@@ -41,6 +42,29 @@ def test_subdirectories_and_selection_path_sit_under_home(monkeypatch) -> None:
     assert logs_directory() == home / "logs"
     assert experiments_directory() == home / "experiments"
     assert default_selection_path() == home / "app-selection.toml"
+
+
+def test_recordings_default_to_documents_rig_data(monkeypatch) -> None:
+    monkeypatch.delenv("ECHEM_RIG_CONTROL_HOME", raising=False)
+
+    assert experiments_directory() == Path.home() / "Documents" / "Rig Data"
+
+
+def test_output_folder_never_depends_on_where_the_app_started(
+    monkeypatch, tmp_path
+) -> None:
+    """A blank box or a bare name once saved runs into whatever folder the
+    app was launched from, so they were hard to find afterwards."""
+
+    monkeypatch.delenv("ECHEM_RIG_CONTROL_HOME", raising=False)
+    monkeypatch.chdir(tmp_path)
+    default = experiments_directory()
+
+    assert resolve_output_directory("") == default
+    assert resolve_output_directory("   ") == default
+    assert resolve_output_directory("experiments") == default / "experiments"
+    assert resolve_output_directory(r"D:\Data\Runs") == Path(r"D:\Data\Runs")
+    assert resolve_output_directory(str(tmp_path)) == tmp_path
 
 
 def test_build_stamp_describes_a_build_and_never_fails_without_one(tmp_path, monkeypatch):

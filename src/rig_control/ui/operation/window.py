@@ -7,6 +7,7 @@ from threading import Thread
 from traceback import format_exc
 from typing import Any
 
+from rig_control.app_paths import resolve_output_directory
 from rig_control.cell_area import parse_area
 from rig_control.data.annotations import ANNOTATION_KIND_LABELS, ANNOTATION_KINDS
 from rig_control.data.electrolysers import (
@@ -112,8 +113,10 @@ class OperationWindow:
         self._root.rowconfigure(0, weight=1)
 
         self._create_widgets(profile_name)
-        if default_output_directory:
-            self._entries["output"].insert(0, default_output_directory)
+        # Always a full path, so the screen shows exactly where runs will go.
+        self._entries["output"].insert(
+            0, str(resolve_output_directory(default_output_directory))
+        )
         if remembered is not None:
             self._entries["operator"].insert(0, remembered.get("operator"))
         self._refresh_electrolysers()
@@ -298,7 +301,7 @@ class OperationWindow:
             "<<ComboboxSelected>>", lambda _event: self._electrolyser_chosen()
         )
         self._entries["output"].bind(
-            "<FocusOut>", lambda _event: self._refresh_electrolysers()
+            "<FocusOut>", lambda _event: self._output_edited()
         )
         electrolyser_buttons = ttk.Frame(recording)
         electrolyser_buttons.grid(row=1, column=2, sticky="w", pady=2)
@@ -377,7 +380,7 @@ class OperationWindow:
 
     def _refresh_electrolysers(self) -> None:
         """List the output folder's electrolysers; retired ones are left off."""
-        names = [item.name for item in list_electrolysers(self._entries["output"].get().strip())]
+        names = [item.name for item in list_electrolysers(self._output_directory())]
         chosen = self._electrolyser_id()
         if chosen and chosen not in names:
             names.append(chosen)  # Retired, or the folder changed: keep showing it.
@@ -398,16 +401,25 @@ class OperationWindow:
             self._area_typed()
         self._refresh_id_preview()
 
+    def _output_directory(self) -> str:
+        """The output folder as a full path: blank or a bare name never
+        means the folder the app happened to be started from."""
+        return str(resolve_output_directory(self._entries["output"].get()))
+
+    def _output_edited(self) -> None:
+        """Show the full path of whatever was typed, then list its electrolysers."""
+        full = self._output_directory()
+        if self._entries["output"].get() != full:
+            self._entries["output"].delete(0, "end")
+            self._entries["output"].insert(0, full)
+        self._refresh_electrolysers()
+        self._refresh_id_preview()
+
     def _run_folder(self):
-        return run_folder(self._entries["output"].get().strip(), self._electrolyser_id())
+        return run_folder(self._output_directory(), self._electrolyser_id())
 
     def _electrolyser_root(self) -> str | None:
-        output = self._entries["output"].get().strip()
-        if not output:
-            messagebox.showerror("Electrolyser", "Choose the output folder first; "
-                                 "electrolysers are kept inside it.", parent=self._root)
-            return None
-        return output
+        return self._output_directory()
 
     def _new_electrolyser(self) -> None:
         output = self._electrolyser_root()
@@ -663,7 +675,7 @@ class OperationWindow:
         operator = self._entries["operator"].get().strip()
         description = self._entries["description"].get().strip()
         electrolyser_id = self._electrolyser_id()
-        output_directory = self._entries["output"].get().strip()
+        output_directory = self._output_directory()
         notes = self._entries["notes"].get().strip()
         if self._view_model.active_area_forgotten(electrolyser_id) and not messagebox.askyesno(
             "No active area",
@@ -742,8 +754,9 @@ class OperationWindow:
         """Operator, electrolyser, description, notes and output folder, for recipe runs."""
         details = {
             key: self._entries[key].get().strip()
-            for key in ("operator", "description", "notes", "output")
+            for key in ("operator", "description", "notes")
         }
+        details["output"] = self._output_directory()
         details["electrolyser"] = self._electrolyser_id()
         return details
 
@@ -838,7 +851,7 @@ class OperationWindow:
             parent=self._root,
             title="Choose an experiment folder to review",
             initialdir=str(self._view_model.experiment_directory
-                           or self._entries["output"].get() or "."),
+                           or self._output_directory()),
         )
         if selected:
             self._open_run_review(selected)
@@ -852,7 +865,7 @@ class OperationWindow:
                 parent=self._root,
                 title="Choose an experiment folder to export",
                 initialdir=str(self._view_model.experiment_directory
-                               or self._entries["output"].get() or "."),
+                               or self._output_directory()),
             )
             if not selected:
                 return

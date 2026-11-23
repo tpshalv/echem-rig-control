@@ -46,12 +46,18 @@ machine:
     otherwise %LOCALAPPDATA%\EchemRigControl (Windows)
     otherwise ~/.echem-rig-control (fallback)
 
-with settings/, profiles/, logs/, and experiments/ subfolders, plus
+with settings/, profiles/ and logs/ subfolders, plus
 `app-selection.toml` at the top (which settings file and rig profile are
-currently active - see "User interface" below). Application setting
-defaults for the log path and default recording folder point here too,
-so a freshly created settings file writes to the data home without
-needing to be told to.
+currently active - see "User interface" below). The default log path
+points here too, so a freshly created settings file writes to the data
+home without needing to be told to.
+
+Recordings are the exception: they default to `Documents\Rig Data`,
+where they are easy to find in File Explorer (or `experiments/` inside
+the data home when ECHEM_RIG_CONTROL_HOME is set). A blank output folder
+means that default, and a folder name that is not a full path is placed
+inside it (`resolve_output_directory`), so where a run is saved never
+depends on which folder the app was started from.
 
 The example/simulation profiles shipped in this repository
 (`rig-profile.simulation.toml`, `rig-profile.example.toml`) are checked

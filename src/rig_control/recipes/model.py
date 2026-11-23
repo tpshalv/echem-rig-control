@@ -20,9 +20,10 @@ a setting is always addressed by a profile/device ID and a supported
 setting name.
 """
 from collections.abc import Iterator, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from math import isfinite
+from secrets import token_hex
 from typing import TypeAlias
 
 from rig_control.devices.power_supply import PowerSupplyOperatingMode
@@ -51,6 +52,26 @@ def _name(value: object) -> str:
     if not isinstance(value, str):
         raise TypeError("Step name must be text")
     return value.strip()
+
+
+def new_step_id() -> str:
+    """A step's stable identity: kept through edits and saves, never reused."""
+    return token_hex(6)
+
+
+def _ensure_id(step: object) -> None:
+    """Give a step without an ID a fresh one (frozen, so set directly)."""
+    if not isinstance(step.id, str):  # type: ignore[attr-defined]
+        raise TypeError("Step ID must be text")
+    if not step.id:  # type: ignore[attr-defined]
+        object.__setattr__(step, "id", new_step_id())
+
+
+#: Every step has an ``id`` that names it while a recipe is edited and run,
+#: so a running recipe can be revised: the run finds its place by ID, not by
+#: list position.  It is not part of what a step *does*, so two steps that do
+#: the same thing compare equal whatever their IDs.
+_ID = dict(default="", compare=False, repr=False)
 
 
 def _duration(value: object, name: str) -> float:
@@ -232,8 +253,10 @@ class SetStep:
     #: Optional wait after writing, e.g. "hotplate to 50 °C, settle 10 min".
     #: It only delays the next step; the settings stay either way.
     hold: "WaitStep | None" = None
+    id: str = field(**_ID)  # type: ignore[call-overload]
 
     def __post_init__(self) -> None:
+        _ensure_id(self)
         object.__setattr__(self, "name", _name(self.name))
         if self.hold is not None and not isinstance(self.hold, WaitStep):
             raise TypeError("A Set step's hold must be a WaitStep or None")
@@ -271,8 +294,10 @@ class WaitStep:
     duration_seconds: float
     purpose: WaitPurpose = WaitPurpose.MEASURE
     name: str = ""
+    id: str = field(**_ID)  # type: ignore[call-overload]
 
     def __post_init__(self) -> None:
+        _ensure_id(self)
         object.__setattr__(self, "duration_seconds", _duration(self.duration_seconds, "Wait duration"))
         object.__setattr__(self, "purpose", WaitPurpose(self.purpose))
         object.__setattr__(self, "name", _name(self.name))
@@ -301,8 +326,10 @@ class LoopStep:
     #: the first from the last value set before the loop (or ``ramp.start``).
     ramp: Ramp | None = None
     order: LoopOrder = LoopOrder.AS_LISTED
+    id: str = field(**_ID)  # type: ignore[call-overload]
 
     def __post_init__(self) -> None:
+        _ensure_id(self)
         object.__setattr__(self, "name", _name(self.name))
         object.__setattr__(self, "order", LoopOrder(self.order))
         if self.ramp is not None:
@@ -345,8 +372,10 @@ class RepeatStep:
     count: int
     steps: tuple["RecipeStep", ...] = ()
     name: str = ""
+    id: str = field(**_ID)  # type: ignore[call-overload]
 
     def __post_init__(self) -> None:
+        _ensure_id(self)
         object.__setattr__(self, "name", _name(self.name))
         if isinstance(self.count, bool) or not isinstance(self.count, int) or self.count < 1:
             raise ValueError("Repeat count must be a whole number of at least 1")
@@ -434,6 +463,27 @@ class Recipe:
         _check_steps(self.steps)
         if not isinstance(self.end_state, EndState):
             raise TypeError("Recipe end state must be an EndState")
+        object.__setattr__(self, "steps", _unique_ids(self.steps, set()))
+
+
+def _unique_ids(steps: tuple["RecipeStep", ...], seen: set[str]) -> tuple["RecipeStep", ...]:
+    """Steps with every ID used once: a later copy of an ID (the same step
+    object listed twice, or a pasted step) gets a fresh one, top to bottom."""
+    result = []
+    for step in steps:
+        if step.id in seen:
+            step = replace(step, id=new_step_id())
+        seen.add(step.id)
+        if isinstance(step, (LoopStep, RepeatStep)):
+            children = _unique_ids(step.steps, seen)
+            if any(a is not b for a, b in zip(children, step.steps)):
+                step = replace(step, steps=children)
+        result.append(step)
+    return tuple(result)
+
+
+def find_step(steps: tuple["RecipeStep", ...], step_id: str) -> "RecipeStep | None":
+    return next((s for s in iter_steps(steps) if s.id == step_id), None)
 
 
 def iter_steps(steps: tuple[RecipeStep, ...]) -> Iterator[RecipeStep]:
@@ -498,17 +548,17 @@ def _step_to_dict(step: RecipeStep) -> dict[str, object]:
     if isinstance(step, SetStep):
         hold = None if step.hold is None else {
             "duration_seconds": step.hold.duration_seconds, "purpose": step.hold.purpose.value, "name": step.hold.name}
-        return {"kind": "set", "name": step.name, "assignments": [_assignment_to_dict(a) for a in step.assignments],
+        return {"kind": "set", "id": step.id, "name": step.name, "assignments": [_assignment_to_dict(a) for a in step.assignments],
                 "hold": hold}
     if isinstance(step, WaitStep):
-        return {"kind": "wait", "name": step.name, "duration_seconds": step.duration_seconds,
+        return {"kind": "wait", "id": step.id, "name": step.name, "duration_seconds": step.duration_seconds,
                 "purpose": step.purpose.value}
     if isinstance(step, LoopStep):
-        return {"kind": "loop", "name": step.name, "device_id": step.device_id, "setting": step.setting,
+        return {"kind": "loop", "id": step.id, "name": step.name, "device_id": step.device_id, "setting": step.setting,
                 "values": list(step.values), "pass_names": list(step.pass_names), "unit": step.unit,
                 "ramp": _ramp_to_dict(step.ramp), "order": step.order.value,
                 "steps": [_step_to_dict(s) for s in step.steps]}
-    return {"kind": "repeat", "name": step.name, "count": step.count,
+    return {"kind": "repeat", "id": step.id, "name": step.name, "count": step.count,
             "steps": [_step_to_dict(s) for s in step.steps]}
 
 
@@ -548,25 +598,27 @@ def _step_from_dict(raw: object) -> RecipeStep:
     item = _mapping(raw, "step")
     kind = item.get("kind")
     name = str(item.get("name", ""))
+    # Files saved before steps had IDs get fresh ones as they load.
+    step_id = str(item.get("id", ""))
     children = lambda: tuple(_step_from_dict(s) for s in _list(item.get("steps", []), "loop steps"))
     if kind == "set":
         # Early version 2 files held one setting directly on the step.
         raw_assignments = _list(item["assignments"], "set assignments") if "assignments" in item else [item]
         raw_hold = item.get("hold")
         hold = None if raw_hold is None else _wait_from_dict(_mapping(raw_hold, "hold"))
-        return SetStep(tuple(_assignment_from_dict(a) for a in raw_assignments), name, hold)
+        return SetStep(tuple(_assignment_from_dict(a) for a in raw_assignments), name, hold, step_id)
     if kind == "wait":
-        return _wait_from_dict(item)
+        return replace(_wait_from_dict(item), id=step_id)
     if kind == "loop":
         return LoopStep(str(item["device_id"]), str(item["setting"]), tuple(_list(item["values"], "loop values")),
                         str(item.get("unit", "")), children(), name,
                         tuple(str(n) for n in _list(item.get("pass_names", []), "pass names")),
-                        _ramp_from_dict(item.get("ramp")), LoopOrder(str(item.get("order", "as_listed"))))
+                        _ramp_from_dict(item.get("ramp")), LoopOrder(str(item.get("order", "as_listed"))), step_id)
     if kind == "repeat":
         count = item["count"]
         if isinstance(count, float) and count.is_integer():
             count = int(count)
-        return RepeatStep(count, children(), name)  # type: ignore[arg-type]
+        return RepeatStep(count, children(), name, step_id)  # type: ignore[arg-type]
     raise ValueError(f"Unknown recipe step kind {kind!r}")
 
 

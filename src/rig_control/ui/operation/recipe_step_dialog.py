@@ -6,6 +6,7 @@ range for a loop).  It edits a copy: OK hands back the new step, Cancel
 leaves the recipe untouched.
 """
 from collections.abc import Callable
+from dataclasses import replace
 import tkinter as tk
 from tkinter import ttk
 
@@ -760,6 +761,10 @@ class StepEditorDialog:
         widget.bind("<<ComboboxSelected>>", lambda _e: self._changed(), add="+")
 
     def _build_row(self) -> OutlineRow:
+        """The edited step: the same step (same ID), so a running recipe can be revised."""
+        return replace(self._build_fields(), id=self._row.id)  # type: ignore[union-attr]
+
+    def _build_fields(self) -> OutlineRow:
         row, name = self._row, self._name.get()
         if isinstance(row, SetStep):
             return SetStep(tuple(self._read_cards()), name, self._read_hold())

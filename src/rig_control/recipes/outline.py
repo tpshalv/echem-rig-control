@@ -136,7 +136,9 @@ def duplicate(rows: list[OutlineRow], index: int) -> tuple[list[OutlineRow], int
     if isinstance(rows[index], LoopEnd):
         index = partner(rows, index)
     first, last = _span(rows, index)
-    return rows[:last + 1] + rows[first:last + 1] + rows[last + 1:], last + 1
+    # A copy is a new step, so it gets a new ID (see ``Recipe``).
+    copies = [r if isinstance(r, LoopEnd) else replace(r, id="") for r in rows[first:last + 1]]
+    return rows[:last + 1] + copies + rows[last + 1:], last + 1
 
 
 def move(rows: list[OutlineRow], index: int, direction: int) -> tuple[list[OutlineRow], int]:

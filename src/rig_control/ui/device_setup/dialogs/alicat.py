@@ -4,61 +4,13 @@ from queue import Empty, Queue
 from threading import Thread
 from tkinter import messagebox, ttk
 
-from rig_control.ui.device_setup.types import (
-    BPR_INSTALLATION_WARNING,
-    AddAlicatRequest,
-)
+from rig_control.ui.device_setup.types import AddAlicatRequest
 
 
 from rig_control.ui.device_setup.dialogs.base import SetupDialog
 
 
 class AlicatDialogs(SetupDialog):
-    def _acknowledge_bpr_installation(self) -> None:
-        """Record the hardware acknowledgement for a BPR saved earlier.
-
-        Adding a BPR records this automatically; this button exists only for
-        devices saved before the acknowledgement was stored with them.
-        """
-
-        device_id = self._selected_device_id()
-        if not device_id:
-            messagebox.showinfo(
-                "Select Alicat",
-                "Select the saved Alicat BPR first.",
-                parent=self._root,
-            )
-            return
-        role = self._view_model.profile.get_role(device_id)
-        if (
-            role.driver != "alicat"
-            or role.capability.value != "back_pressure_controller"
-        ):
-            messagebox.showinfo(
-                "Select a BPR",
-                "Select an Alicat back-pressure controller.",
-                parent=self._root,
-            )
-            return
-        if not messagebox.askokcancel(
-            "Back-pressure installation",
-            BPR_INSTALLATION_WARNING,
-            parent=self._root,
-            icon=messagebox.WARNING,
-        ):
-            return
-        result = self._view_model.acknowledge_bpr_installation(device_id)
-        self._record_result(result)
-        self.refresh()
-        if result.succeeded:
-            messagebox.showinfo("Acknowledged", result.summary, parent=self._root)
-        else:
-            messagebox.showerror(
-                "Not acknowledged",
-                result.summary + "\n\n" + result.technical_details,
-                parent=self._root,
-            )
-
     def _open_scan_alicat(self) -> None:
         dialog = tk.Toplevel(self._root)
         dialog.title("Find Alicat devices")

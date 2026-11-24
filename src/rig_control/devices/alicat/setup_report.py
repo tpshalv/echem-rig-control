@@ -42,12 +42,12 @@ class AlicatSetupReport:
         # The primer (p. 25) describes upstream first on a dual-valve
         # controller, but a single-valve MC-2SLPM-D answers with four values,
         # so position cannot be trusted to mean upstream or downstream. The
-        # first value is this instrument's valve drive; any others are
-        # numbered rather than given a name we cannot stand behind.
-        return tuple(
+        # first value is this instrument's valve drive. The rest only mean
+        # something on multi-valve units, which this rig does not have; on
+        # ours they are always zero, so they are neither shown nor recorded.
+        return (
             DeviceMeasurement(
-                "valve_drive_percent" if index == 0 else f"valve_drive_{index + 1}_percent",
-                Measurement(value, "%", state.timestamp, state.quality),
-            )
-            for index, value in enumerate(drives)
+                "valve_drive_percent",
+                Measurement(drives[0], "%", state.timestamp, state.quality),
+            ),
         )

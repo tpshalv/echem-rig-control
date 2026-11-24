@@ -25,7 +25,7 @@ ABSOLUTE_PRESSURE_VARIABLE = 34
 #:
 #: That firmware setting follows a physical change: the valve must already be
 #: downstream of the sensing section. Nothing on the wire can confirm that,
-#: which is why adding a BPR asks the operator to acknowledge it.
+#: which is why adding a BPR warns the operator to check it.
 INVERSE_CONTROL_BIT = 32768
 
 _VARIABLE_NAMES = {
@@ -442,11 +442,13 @@ def role_label(role: str) -> str:
 
 
 def verify_role(observed: AlicatControlConfiguration | AlicatControlMode, *, bpr: bool,
-                flow_unit: str, downstream_confirmed: bool = False) -> None:
+                flow_unit: str) -> None:
     """Block control unless the live configuration still matches the saved role.
 
     The instrument's live control configuration is authoritative. Model and
     serial number are informational and are deliberately not required here.
+    A BPR's plumbing cannot be read off the wire; the operator is warned
+    about it once, when the BPR is added, and that is not checked again.
     """
 
     expected = "bpr" if bpr else "mfc"
@@ -463,11 +465,6 @@ def verify_role(observed: AlicatControlConfiguration | AlicatControlMode, *, bpr
         absolute_unit_factor(observed.setpoint_unit)
         if observed.minimum_setpoint is None or observed.maximum_setpoint is None:
             raise ValueError("Instrument pressure range could not be read")
-        if not downstream_confirmed:
-            raise ValueError(
-                "Back-pressure installation has not been acknowledged for this "
-                "device. Use 'Acknowledge BPR installation' in Device Setup."
-            )
     elif observed.setpoint_unit.casefold() != flow_unit.casefold():
         raise ValueError(
             f"Instrument reports setpoints in {observed.setpoint_unit!r} but this "

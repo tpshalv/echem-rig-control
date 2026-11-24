@@ -898,9 +898,9 @@ def test_both_documented_loop_reply_orders_are_understood() -> None:
     assert (observed.minimum_setpoint, observed.maximum_setpoint) == (0.0, 160.0)
 
 
-def test_extra_valve_drive_values_are_numbered_not_named_upstream(tmp_path) -> None:
-    """A single-valve MC answers VD with four values, so position cannot be
-    read as upstream/downstream."""
+def test_only_the_first_valve_drive_value_is_kept(tmp_path) -> None:
+    """A single-valve MC answers VD with four values; only the first is its
+    valve, and the always-zero rest would only clutter the screen and files."""
 
     from dataclasses import replace
 
@@ -931,5 +931,5 @@ def test_extra_valve_drive_values_are_numbered_not_named_upstream(tmp_path) -> N
     readings = {item.channel: item.measurement for item in controller.read_measurements()}
 
     assert readings["valve_drive_percent"].value == 45.0
-    assert readings["valve_drive_4_percent"].value == 0.0
-    assert "valve_drive_upstream_percent" not in readings
+    assert not [channel for channel in readings
+                if channel.startswith("valve_drive") and channel != "valve_drive_percent"]

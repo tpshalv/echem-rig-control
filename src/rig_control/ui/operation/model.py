@@ -27,6 +27,7 @@ from rig_control.data.annotations import (
 )
 from rig_control.data.electrolysers import ELECTROLYSER_METADATA_KEY, load_electrolyser, run_folder
 from rig_control.data.experiment import ExperimentMetadata
+from rig_control.data.graph_data_export import GraphDataChannel, write_graph_data
 from rig_control.data.experiment_naming import (
     existing_recording,
     make_experiment_id,
@@ -156,7 +157,9 @@ class _ChannelHistory:
     time bins, so the point count never depends on which store was used.
     """
 
-    _RAW_SECONDS = 28_800  # The longest fixed graph period ("Last 8 hours").
+    # Full detail for "Last 8 hours"; longer periods draw their older part
+    # from the thinned whole-run store.
+    _RAW_SECONDS = 28_800
     _RAW_LIMIT = 100_000  # Backstop for very fast polling.
     _RUN_LIMIT = 10_000
     _TRIM_CHUNK = 1_024
@@ -289,6 +292,32 @@ class _ChannelHistory:
                 self._row(samples, index) for index in dict.fromkeys(indices)
             )
         return tuple(rows)
+
+    def period_copy(self, seconds: int | None) -> GraphDataChannel | None:
+        """Every retained reading in the period, copied for saving elsewhere.
+
+        Only array slices are copied here, so it is quick enough for the UI
+        thread; turning them into rows is left to the writer.
+        """
+        if not self._raw or self._identity is None:
+            return None
+        latest = self._raw.times[-1]
+        start = self._first_time if seconds is None else max(latest - seconds, self._first_time)
+        raw_start = self._raw.times[0]
+        run_begin = bisect_left(self._run.times, start)
+        run_end = bisect_left(self._run.times, raw_start) if start < raw_start else run_begin
+        raw_begin = bisect_left(self._raw.times, start)
+        device_id, channel, unit = self._identity
+        return GraphDataChannel(
+            device_id=device_id,
+            channel=channel,
+            unit=unit,
+            times=self._run.times[run_begin:run_end] + self._raw.times[raw_begin:],
+            values=self._run.values[run_begin:run_end] + self._raw.values[raw_begin:],
+            quality_codes=bytes(self._run.qualities[run_begin:run_end] + self._raw.qualities[raw_begin:]),
+            quality_names=tuple(self._qualities),
+            thinned_count=run_end - run_begin,
+        )
 
     def nearest(self, timestamp: float) -> LiveMeasurementRow | None:
         """The retained reading closest in time; every candidate is a real reading."""
@@ -1064,6 +1093,40 @@ class OperationViewModel:
             for row in rows
         )
 
+    def graph_data_snapshot(self, seconds: int | None) -> tuple[GraphDataChannel, ...]:
+        """Copy every channel's graph history for a period, in the display units.
+
+        Quick enough for the UI thread; write it with ``save_graph_data``.
+        """
+        copies = []
+        for history in self._measurement_histories.values():
+            copy = history.period_copy(seconds)
+            if copy is None:
+                continue
+            unit = self.display_unit(copy.channel, copy.unit)
+            if unit != copy.unit:
+                copy = replace(
+                    copy,
+                    unit=unit,
+                    convert=lambda value, c=copy.channel, u=copy.unit: self._for_display(c, value, u)[0],
+                )
+            copies.append(copy)
+        return tuple(copies)
+
+    def save_graph_data(
+        self,
+        snapshot: tuple[GraphDataChannel, ...],
+        directory: str | Path,
+        period: str,
+    ) -> OperationActionResult:
+        """Write a ``graph_data_snapshot`` to a new folder; safe off the UI thread."""
+
+        try:
+            folder = write_graph_data(snapshot, directory, period=period)
+        except Exception as error:
+            return self._failure("save graph data", error)
+        return OperationActionResult(True, f"Graph data saved to {folder}")
+
     def display_unit(self, channel: str, unit: str) -> str:
         """The unit a reading of this channel is shown in on screens and graphs."""
 
@@ -1125,15 +1188,31 @@ class OperationViewModel:
             "esp32_heartbeats": heartbeat_diagnostics,
         }
 
-    def connect_all(self) -> tuple[OperationActionResult, ...]:
+    def faulted_devices(self) -> tuple[str, ...]:
+        """Faulted devices that reconnecting would put in their safe state first."""
+
+        return tuple(
+            device_id for device_id in self._device_manager.device_ids
+            if (device := self._device_manager.get(device_id)).status is DeviceStatus.FAULTED
+            and not device.passive_reconnect
+        )
+
+    def connect_all(self, *, reconnect_faulted: bool = False) -> tuple[OperationActionResult, ...]:
+        """Connect every device not yet connected.
+
+        A faulted device that is not a passive sensor is cycled (disconnect,
+        which applies its safe state, then connect) only when
+        ``reconnect_faulted`` says the operator agreed to that.
+        """
+
         results: list[OperationActionResult] = []
         for device_id in self._device_manager.device_ids:
             device = self._device_manager.get(device_id)
             status = device.status
-            if status is DeviceStatus.FAULTED and not device.passive_reconnect:
+            if status is DeviceStatus.FAULTED and not device.passive_reconnect and not reconnect_faulted:
                 results.append(OperationActionResult(False, (
-                    f"{device_id!r} is faulted. Disconnect and connect it from "
-                    "Diagnostics; disconnecting applies its safe state.")))
+                    f"{device_id!r} is faulted and was left as it is; reconnecting "
+                    "puts it in its safe state first.")))
                 continue
             if status not in (DeviceStatus.DISCONNECTED, DeviceStatus.FAULTED):
                 # Pressing Connect again must not re-open ports already in use.
@@ -1158,7 +1237,8 @@ class OperationViewModel:
             results.append(
                 OperationActionResult(
                     True,
-                    f"Connected {device_id!r}.",
+                    f"Reconnected {device_id!r}." if status is DeviceStatus.FAULTED
+                    else f"Connected {device_id!r}.",
                 )
             )
         for default_result in self.manual_control.initialize_manual_power_supply_defaults():

@@ -128,8 +128,7 @@ class DeviceProfileBuilder:
         if units["totalized_flow_unit"] is not None:
             settings["totalized_flow_unit"] = units["totalized_flow_unit"]
         if is_bpr:
-            # The acknowledgement belongs to this installation, so ordinary
-            # reconnects never ask for it again.
+            # A record that the installation warning was shown and accepted.
             settings.update(
                 downstream_valve_confirmed=True,
                 maximum_pressure_bara=DEFAULT_MAXIMUM_PRESSURE_BARA,

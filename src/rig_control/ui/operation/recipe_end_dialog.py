@@ -58,11 +58,15 @@ class EndStateDialog:
         self._initial = {d.device_id: d for d in end.devices}
         for index, role in enumerate(self._listed):
             self._add_device_row(scroller.content, index, role)
+        self._keep_recording = tk.BooleanVar(value=end.keep_recording)
+        ttk.Checkbutton(body, variable=self._keep_recording, text=(
+            "Keep recording afterwards, until you stop it in Operation")
+                        ).grid(row=2, column=0, sticky="w", pady=(8, 0))
         self._warning = ttk.Label(body, foreground=WARNING_TEXT, wraplength=_WRAP, justify="left")
-        self._warning.grid(row=2, column=0, sticky="w", pady=(8, 0))
+        self._warning.grid(row=3, column=0, sticky="w", pady=(8, 0))
         self._error = ttk.Label(body, foreground=ERROR_TEXT, wraplength=_WRAP, justify="left")
-        self._error.grid(row=3, column=0, sticky="w")
-        buttons = ttk.Frame(body); buttons.grid(row=4, column=0, sticky="e", pady=(10, 0))
+        self._error.grid(row=4, column=0, sticky="w")
+        buttons = ttk.Frame(body); buttons.grid(row=5, column=0, sticky="e", pady=(10, 0))
         ttk.Button(buttons, text="OK", command=self._ok, default="active").pack(side="left", padx=3)
         ttk.Button(buttons, text="Cancel", command=self._cancel).pack(side="left")
         top.bind("<Escape>", lambda _e: self._cancel())
@@ -153,7 +157,7 @@ class EndStateDialog:
                 continue  # Not listed means safe state.
             assignments = tuple(self._cards[role.device_id].read()) if action is EndAction.SET else ()
             devices.append(EndDevice(role.device_id, action, assignments))
-        return EndState(tuple(devices))
+        return EndState(tuple(devices), keep_recording=bool(self._keep_recording.get()))
 
     def _changed(self) -> None:
         if not hasattr(self, "_error"):

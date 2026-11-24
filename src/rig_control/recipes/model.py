@@ -432,12 +432,18 @@ class EndState:
     Any device not listed goes to its safe state (off), so forgetting a
     device is never the dangerous choice.  The rig's global safe state is
     separate: that is for emergencies and always turns everything off.
+
+    ``keep_recording`` leaves the run's recording going afterwards until the
+    operator stops it in Operation, so a rig left running is still recorded.
     """
     devices: tuple[EndDevice, ...] = ()
+    keep_recording: bool = True
 
     def __post_init__(self) -> None:
         if not isinstance(self.devices, tuple) or not all(isinstance(d, EndDevice) for d in self.devices):
             raise TypeError("End-state entries must be EndDevice")
+        if not isinstance(self.keep_recording, bool):
+            raise TypeError("End-state keep_recording must be true or false")
         ids = [d.device_id for d in self.devices]
         if len(ids) != len(set(ids)):
             raise ValueError("A device can appear only once in the end state")
@@ -567,7 +573,8 @@ def recipe_to_dict(recipe: Recipe) -> dict[str, object]:
             "steps": [_step_to_dict(s) for s in recipe.steps],
             "end_state": [{"device_id": d.device_id, "action": d.action.value,
                            "assignments": [_assignment_to_dict(a) for a in d.assignments]}
-                          for d in recipe.end_state.devices]}
+                          for d in recipe.end_state.devices],
+            "keep_recording_after_end": recipe.end_state.keep_recording}
 
 
 def _mapping(value: object, name: str) -> Mapping[str, object]:
@@ -634,6 +641,8 @@ def recipe_from_dict(data: Mapping[str, object]) -> Recipe:
     end = EndState(tuple(
         EndDevice(str(item["device_id"]), EndAction(str(item["action"])),
                   tuple(_assignment_from_dict(a) for a in _list(item.get("assignments", []), "end-state settings")))
-        for item in (_mapping(raw, "end-state device") for raw in _list(data.get("end_state", []), "end_state"))))
+        for item in (_mapping(raw, "end-state device") for raw in _list(data.get("end_state", []), "end_state"))),
+        # Older files stopped recording at the end; now it carries on unless switched off.
+        keep_recording=bool(data.get("keep_recording_after_end", True)))
     return Recipe(name=str(data["name"]), description=str(data.get("description", "")),
                   steps=tuple(_step_from_dict(s) for s in _list(data.get("steps", []), "steps")), end_state=end)

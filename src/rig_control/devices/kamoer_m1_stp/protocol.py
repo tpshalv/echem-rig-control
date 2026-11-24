@@ -32,11 +32,14 @@ Kamoer pump's documented frame (see CRC test fixtures).
 from collections.abc import Callable, Sequence
 from math import isfinite
 from threading import RLock
-from time import monotonic
+from time import monotonic, sleep
+from typing import TypeVar
 import struct
 
 from rig_control.transports.serial_binary import SerialBinaryTransport
 
+
+T = TypeVar("T")
 
 DEFAULT_BAUD_RATE = 9600
 
@@ -56,8 +59,29 @@ _COIL_ON = b"\xff\x00"
 _COIL_OFF = b"\x00\x00"
 
 
+#: Attempts per request.  On the bench a reply is now and then lost (no
+#: answer within the timeout) or garbled (a corrupted function byte, a bad
+#: CRC); every request here is a read or an absolute write (a speed, a coil
+#: state), so sending it again is harmless.
+REQUEST_ATTEMPTS = 3
+
+#: Quiet time kept between the end of one exchange and the next request.
+#: Modbus RTU asks for 3.5 characters (about 4 ms at 9600 baud); the pump
+#: answers more reliably with more room, especially just after a write.
+INTER_FRAME_GAP_SECONDS = 0.03
+
+#: After a bad reply, wait until the line has been silent this long (so the
+#: rest of a late or garbled reply is not read as the next one), up to the cap.
+RESYNC_QUIET_SECONDS = 0.1
+RESYNC_LIMIT_SECONDS = 1.0
+
+
 class KamoerM1StpProtocolError(RuntimeError):
     """A Modbus reply from the pump cannot be trusted."""
+
+
+class GarbledReply(KamoerM1StpProtocolError):
+    """The reply was damaged or misframed on the line; asking again may work."""
 
 
 def modbus_crc16(data: bytes) -> int:
@@ -126,6 +150,9 @@ class KamoerM1StpProtocol:
         timeout_seconds: float = 1.0,
         *,
         trace: Callable[[str, bytes], None] | None = None,
+        attempts: int = REQUEST_ATTEMPTS,
+        pause: Callable[[float], None] = sleep,
+        on_retry: Callable[[str], None] | None = None,
     ) -> None:
         if isinstance(slave, bool) or not isinstance(slave, int) or not 1 <= slave <= 247:
             raise ValueError("Modbus slave address must be between 1 and 247")
@@ -139,7 +166,15 @@ class KamoerM1StpProtocol:
         self.transport = transport
         self.slave = slave
         self.timeout_seconds = timeout_seconds
+        if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 1:
+            raise ValueError("Attempts must be a positive int")
         self._trace = trace
+        self._attempts = attempts
+        self._pause = pause
+        self._on_retry = on_retry
+        self._quiet_from = 0.0
+        #: Requests that needed more than one attempt, for diagnostics.
+        self.retried_requests = 0
         self._lock = RLock()
 
     def read_coils(self, address: int, count: int) -> tuple[bool, ...]:
@@ -167,35 +202,85 @@ class KamoerM1StpProtocol:
             raise ValueError("Modbus address must be in 0..65535")
         if not 1 <= count <= 125:
             raise ValueError("Modbus read count must be in 1..125")
-        with self._lock:
+
+        def exchange() -> bytes:
             deadline = self._send(function, struct.pack(">HH", address, count))
             self._receive_header(function, deadline)
             byte_count = self._read_exact(1, deadline)[0]
             if byte_count != expected_bytes:
-                raise KamoerM1StpProtocolError(
+                raise GarbledReply(
                     f"Expected {expected_bytes} response bytes, pump reported {byte_count}"
                 )
             data = self._read_exact(byte_count, deadline)
             self._verify_crc(bytes([self.slave, function, byte_count]) + data, deadline)
             return data
 
+        return self._with_retries(exchange)
+
     def _request_write(self, function: int, address: int, *, request_body: bytes, echoed_field: bytes) -> None:
         if not 0 <= address <= 0xFFFF:
             raise ValueError("Modbus address must be in 0..65535")
-        with self._lock:
+
+        def exchange() -> None:
             deadline = self._send(function, struct.pack(">H", address) + request_body)
             self._receive_header(function, deadline)
             tail = self._read_exact(4, deadline)
             self._verify_crc(bytes([self.slave, function]) + tail, deadline)
             expected_tail = struct.pack(">H", address) + echoed_field
             if tail != expected_tail:
+                # The CRC was good, so this is what the pump really said: not retried.
                 raise KamoerM1StpProtocolError(
                     f"Write was not confirmed: pump echoed {tail.hex(' ')}, "
                     f"expected {expected_tail.hex(' ')}"
                 )
 
+        self._with_retries(exchange)
+
+    def _with_retries(self, exchange: Callable[[], T]) -> T:
+        """Run one request/reply exchange, asking again after a lost or garbled reply.
+
+        A Modbus exception reply or an unconfirmed write is a real answer
+        from the pump and is raised at once.
+        """
+
+        with self._lock:
+            for attempt in range(1, self._attempts + 1):
+                try:
+                    result = exchange()
+                except (TimeoutError, GarbledReply) as error:
+                    self._quiet_from = monotonic()
+                    if attempt == self._attempts:
+                        if attempt > 1:
+                            raise type(error)(f"{error} (after {attempt} attempts)") from error
+                        raise
+                    if self._on_retry is not None:
+                        self._on_retry(f"{type(error).__name__}: {error}")
+                    self._resynchronise()
+                    continue
+                self._quiet_from = monotonic()
+                if attempt > 1:
+                    self.retried_requests += 1
+                return result
+            raise AssertionError("unreachable")
+
+    def _resynchronise(self) -> None:
+        """Let the rest of a late or garbled reply arrive and throw it away."""
+
+        give_up = monotonic() + RESYNC_LIMIT_SECONDS
+        while monotonic() < give_up:
+            chunk = self.transport.read(64, timeout_seconds=RESYNC_QUIET_SECONDS)
+            if self._trace is not None and chunk:
+                self._trace("RX discarded", chunk)
+            if not chunk:
+                break
+        self.transport.reset_input_buffer()
+        self._quiet_from = monotonic()
+
     def _send(self, function: int, body: bytes) -> float:
         frame = _append_crc(bytes([self.slave, function]) + body)
+        wait = self._quiet_from + INTER_FRAME_GAP_SECONDS - monotonic()
+        if wait > 0:
+            self._pause(wait)
         self.transport.reset_input_buffer()
         self.transport.write(frame)
         if self._trace is not None:
@@ -205,7 +290,7 @@ class KamoerM1StpProtocol:
     def _receive_header(self, function: int, deadline: float) -> None:
         slave, received_function = self._read_exact(2, deadline)
         if slave != self.slave:
-            raise KamoerM1StpProtocolError(f"Reply from slave {slave}, expected {self.slave}")
+            raise GarbledReply(f"Reply from slave {slave}, expected {self.slave}")
         if received_function == function | 0x80:
             code = self._read_exact(1, deadline)[0]
             self._verify_crc(bytes([slave, received_function, code]), deadline)
@@ -213,7 +298,7 @@ class KamoerM1StpProtocol:
                 f"Pump reported Modbus exception {code} for function 0x{function:02X}"
             )
         if received_function != function:
-            raise KamoerM1StpProtocolError(
+            raise GarbledReply(
                 f"Unexpected function 0x{received_function:02X}, expected 0x{function:02X}"
             )
 
@@ -221,7 +306,7 @@ class KamoerM1StpProtocol:
         received = self._read_exact(2, deadline)
         expected = struct.pack("<H", modbus_crc16(payload))
         if received != expected:
-            raise KamoerM1StpProtocolError(f"CRC mismatch in reply: {(payload + received).hex(' ')}")
+            raise GarbledReply(f"CRC mismatch in reply: {(payload + received).hex(' ')}")
 
     def _read_exact(self, size: int, deadline: float) -> bytes:
         buffer = bytearray()

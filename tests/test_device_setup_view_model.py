@@ -988,7 +988,7 @@ def test_second_saved_device_reuses_same_bb3_connection(tmp_path) -> None:
     assert (tmp_path / "rig-profile.toml").with_suffix(".toml.bak").exists()
 
 
-def test_acknowledgement_can_be_recorded_for_a_bpr_saved_earlier(tmp_path) -> None:
+def test_a_bpr_saved_by_an_earlier_version_checks_without_an_acknowledgement(tmp_path) -> None:
     model = empty_model(tmp_path, role="bpr")
     model.add_alicat_and_check(
         AddAlicatRequest(
@@ -996,7 +996,7 @@ def test_acknowledgement_can_be_recorded_for_a_bpr_saved_earlier(tmp_path) -> No
             downstream_valve_acknowledged=True,
         )
     )
-    # Simulate a device saved before the acknowledgement was stored with it.
+    # A device saved before the warning was recorded with it.
     role = model.profile.get_role("outlet_bpr")
     legacy = replace(
         model.profile,
@@ -1009,25 +1009,16 @@ def test_acknowledgement_can_be_recorded_for_a_bpr_saved_earlier(tmp_path) -> No
         profile_path=tmp_path / "rig-profile.toml",
         alicat_checker=alicat_checker_for("bpr"),
     )
-
-    blocked = model.check_device("outlet_bpr")
-    assert blocked.succeeded is False
-    assert "not been acknowledged" in blocked.technical_details
-
-    def inspect(configuration):
-        return alicat_configuration_reply("bpr")
-
-    import rig_control.ui.device_setup.model as model_module
-
-    original = model_module.read_alicat_configuration
-    model_module.read_alicat_configuration = inspect
-    try:
-        acknowledged = model.acknowledge_bpr_installation("outlet_bpr")
-    finally:
-        model_module.read_alicat_configuration = original
-
-    assert acknowledged.succeeded is True
     assert model.check_device("outlet_bpr").succeeded is True
+
+
+def test_adding_a_bpr_still_shows_the_installation_warning_first(tmp_path) -> None:
+    model = empty_model(tmp_path, role="bpr")
+    first = model.add_alicat_and_check(AddAlicatRequest("outlet_bpr", "Outlet BPR", "", "COM5", "B"))
+    assert first.succeeded is False
+    assert "double-check" in first.requires_acknowledgement
+    assert "2.5 bar absolute" in first.requires_acknowledgement
+    assert not any(r.device_id == "outlet_bpr" for r in model.profile.device_roles)
 
 
 def test_identified_keithley_is_saved_to_local_profile(tmp_path) -> None:

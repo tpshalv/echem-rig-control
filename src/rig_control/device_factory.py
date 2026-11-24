@@ -69,7 +69,7 @@ from rig_control.rig_profile import (
     RigProfile,
     ConnectionDefinition,
 )
-from rig_control.models import EventSink
+from rig_control.models import Event, EventSeverity, EventSink
 from rig_control.transports.socket_scpi import SocketScpiTransport
 from rig_control.transports.pyvisa_scpi import PyVisaScpiTransport
 from rig_control.devices.keithley_2260b.configuration import VisaScpiConfiguration
@@ -88,6 +88,19 @@ type Esp32TransportFactory = Callable[[ConnectionDefinition], DuplexTextTranspor
 
 class DeviceFactoryError(RuntimeError):
     """A rig profile device could not be constructed safely."""
+
+
+def _retry_reporter(device_id: str, event_sink: EventSink | None) -> Callable[[str], None] | None:
+    """Log each lost or garbled reply a device recovered from by asking again."""
+
+    if event_sink is None:
+        return None
+
+    def report(problem: str) -> None:
+        event_sink(Event(source=device_id, severity=EventSeverity.WARNING,
+                         message=f"No clean reply ({problem}); asking again."), None)
+
+    return report
 
 
 _SENSOR_CAPABILITIES = {
@@ -171,7 +184,10 @@ def _create_device(
                 )
                 return KamoerM1Stp(
                     configuration,
-                    KamoerM1StpProtocol(transport, configuration.slave, configuration.timeout_seconds),
+                    KamoerM1StpProtocol(
+                        transport, configuration.slave, configuration.timeout_seconds,
+                        on_retry=_retry_reporter(role.device_id, event_sink),
+                    ),
                 )
             except (KeyError, TypeError, ValueError) as error:
                 raise DeviceFactoryError(f"Invalid peristaltic-pump configuration: {error}") from error

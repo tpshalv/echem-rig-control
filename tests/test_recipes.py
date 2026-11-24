@@ -121,7 +121,31 @@ def test_wait_events_record_purpose_and_loop_position():
     assert [(w["purpose"], w["detail"], w["position"]) for w in waits] == [
         ("settle", "stabilise", ["flow 7 (1/1)"]), ("measure", "Measure", ["flow 7 (1/1)"]),
     ]
+    # By default the recording carries on after the recipe, until stopped in Operation.
+    assert writer.is_open is True
+    assert any('"recipe_recording_continues"' in e.message for e in writer.events)
+    runner._recorder.stop()
     assert writer.is_open is False
+
+
+def test_recording_stops_with_the_recipe_when_the_end_state_says_so():
+    runner, _supply, _mfc = make_runner()
+    writer = InMemoryExperimentWriter()
+    runner._recorder = ExperimentRecorder(writer_factory=lambda _root: writer)
+    runner.start(Recipe("stops", steps=(WaitStep(0),), end_state=EndState(keep_recording=False)),
+                 recording_root="unused")
+    assert runner.join(2).state is RecipeRunState.COMPLETED
+    assert writer.is_open is False
+
+
+def test_a_recipe_will_not_start_while_a_kept_recording_runs():
+    runner, _supply, _mfc = make_runner()
+    writer = InMemoryExperimentWriter()
+    runner._recorder = ExperimentRecorder(writer_factory=lambda _root: writer)
+    runner.start(Recipe("first", steps=(WaitStep(0),)), recording_root="unused")
+    runner.join(2)
+    with pytest.raises(RuntimeError, match="Stop it in Operation first"):
+        runner.start(Recipe("second", steps=(WaitStep(0),)), recording_root="unused")
 
 
 def test_stop_attempts_safe_state():
@@ -545,6 +569,10 @@ def test_recipes_saved_before_end_states_send_everything_to_safe_state():
     recipe = Recipe("rt", end_state=EndState((EndDevice("mfc", EndAction.LEAVE),
                                                EndDevice("supply", EndAction.SET, (Assignment("supply", "output_enabled", False),)))))
     assert recipe_from_dict(json.loads(json.dumps(recipe_to_dict(recipe)))) == recipe
+    # Keeping the recording going is the default, also for older files; switching it off round-trips.
+    assert old.end_state.keep_recording is True
+    off = Recipe("off", end_state=EndState(keep_recording=False))
+    assert recipe_from_dict(json.loads(json.dumps(recipe_to_dict(off)))).end_state.keep_recording is False
 
 
 def test_end_state_entries_are_checked():

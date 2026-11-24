@@ -607,3 +607,119 @@ def test_failed_direction_change_leaves_a_running_pump_stopped():
 
     assert coil_write_request(COIL_PUMP_SWITCH, True) not in transport.writes
     assert device.status is DeviceStatus.FAULTED
+
+
+class FlakyTransport(FakeTransport):
+    """Answers each request from a queue: the first replies can be lost or garbled."""
+
+    def __init__(self):
+        super().__init__()
+        self.queued: dict[bytes, list[bytes]] = {}
+
+    def write(self, data):
+        assert self._open
+        self.writes.append(data)
+        queue = self.queued.get(data)
+        self.pending = queue.pop(0) if queue and len(queue) > 1 else (queue[0] if queue else self.responses[data])
+
+
+def flaky_protocol(**kwargs):
+    transport = FlakyTransport()
+    transport.open()
+    retries = []
+    protocol = KamoerM1StpProtocol(transport, SLAVE, timeout_seconds=0.2, pause=lambda _s: None,
+                                   on_retry=retries.append, **kwargs)
+    return protocol, transport, retries
+
+
+def test_a_lost_reply_is_asked_for_again():
+    protocol, transport, retries = flaky_protocol()
+    request = read_request(0x03, REGISTER_SPEED, 2)
+    transport.queued[request] = [b"", read_response(0x03, pack_registers(uint32_to_words(5000)))]
+    assert protocol.read_holding_registers(REGISTER_SPEED, 2) == uint32_to_words(5000)
+    assert transport.writes.count(request) == 2
+    assert protocol.retried_requests == 1
+    assert len(retries) == 1 and "TimeoutError" in retries[0]
+
+
+def test_a_garbled_function_byte_is_asked_for_again():
+    # The overnight failure: the right slave, but 0x10 arrived as 0xA0.
+    protocol, transport, retries = flaky_protocol()
+    words = uint32_to_words(12000)
+    request = register_write_request(REGISTER_SPEED, words)
+    good = register_write_response(REGISTER_SPEED, 2)
+    transport.queued[request] = [bytes([SLAVE, 0xA0]) + good[2:], good]
+    protocol.write_registers(REGISTER_SPEED, words)
+    assert transport.writes.count(request) == 2
+    assert "Unexpected function 0xA0" in retries[0]
+
+
+def test_a_reply_that_never_comes_fails_after_every_attempt():
+    protocol, transport, retries = flaky_protocol()
+    request = read_request(0x04, INPUT_FAULT_STATUS, 1)
+    transport.responses[request] = b""
+    with pytest.raises(TimeoutError, match="after 3 attempts"):
+        protocol.read_input_registers(INPUT_FAULT_STATUS, 1)
+    assert transport.writes.count(request) == 3
+    assert len(retries) == 2
+
+
+def test_a_real_answer_from_the_pump_is_not_retried():
+    protocol, transport, retries = flaky_protocol()
+    request = read_request(0x03, REGISTER_SPEED, 2)
+    transport.responses[request] = frame(SLAVE, 0x83, bytes([0x02]))
+    with pytest.raises(KamoerM1StpProtocolError, match="exception 2"):
+        protocol.read_holding_registers(REGISTER_SPEED, 2)
+    assert transport.writes.count(request) == 1 and not retries
+
+
+def test_a_pump_that_recovers_on_the_retry_stays_ready():
+    device, _transport = make_device(FlakyTransport())
+    transport = _transport
+    connect_responses(transport)
+    device.connect()
+    words = uint32_to_words(10000)
+    transport.queued[register_write_request(REGISTER_SPEED, words)] = [
+        b"", register_write_response(REGISTER_SPEED, 2)]
+    transport.responses[read_request(0x03, REGISTER_SPEED, 2)] = read_response(0x03, pack_registers(words))
+    device.set_speed_rpm(100.0)
+    assert device.status is DeviceStatus.READY
+    assert device.speed_setpoint_rpm == 100.0
+
+
+def faulted_pump_in_manager():
+    device, transport = make_device()
+    connect_responses(transport)
+    transport.responses[coil_write_request(COIL_PUMP_SWITCH, False)] = coil_write_request(COIL_PUMP_SWITCH, False)
+    manager = DeviceManager()
+    manager.register(device)
+    manager.connect("pump1")
+    device._status = DeviceStatus.FAULTED  # As after a command that got no reply.
+    return manager, device, transport
+
+
+def test_diagnostics_connect_reconnects_a_faulted_pump_instead_of_saying_it_is_connected():
+    from rig_control.ui.diagnostics.model import DiagnosticViewModel
+
+    manager, device, transport = faulted_pump_in_manager()
+    model = DiagnosticViewModel(manager)
+    assert model.faulted_devices() == ("pump1",)
+    result = model.connect_device("pump1")
+    assert result.succeeded and "reconnected" in result.summary
+    assert device.status is DeviceStatus.READY
+    # Disconnecting on the way applied the safe state: the pump was switched off.
+    assert coil_write_request(COIL_PUMP_SWITCH, False) in transport.writes
+    assert model.connect_device("pump1").summary.endswith("already connected.")
+
+
+def test_diagnostics_connect_all_leaves_a_faulted_device_unless_told():
+    from rig_control.ui.diagnostics.model import DiagnosticViewModel
+
+    manager, device, _transport = faulted_pump_in_manager()
+    model = DiagnosticViewModel(manager)
+    left = model.connect_all(reconnect_faulted=False)
+    assert not left.succeeded and "left as it is" in left.summary
+    assert device.status is DeviceStatus.FAULTED
+    done = model.connect_all(reconnect_faulted=True)
+    assert done.succeeded and "pump1" in done.summary
+    assert device.status is DeviceStatus.READY

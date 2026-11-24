@@ -108,13 +108,14 @@ class ReadinessCheckResult:
     requires_acknowledgement: str = ""
 
 
-#: Shown once while a detected back-pressure controller is being added, and
-#: saved with the device so ordinary reconnects do not ask again.
+#: Shown once while a detected back-pressure controller is being added.
 BPR_INSTALLATION_WARNING = (
-    "This Alicat reports back-pressure control configuration. The software "
-    "cannot detect whether its physical valve position and plumbing are "
-    "correct. Check that the valve is downstream of the sensing section and "
-    "the instrument is installed for back-pressure regulation before continuing."
+    "This Alicat is set up for back-pressure control. The software cannot see "
+    "the plumbing, so double-check everything before continuing: the valve is "
+    "downstream of the sensing section, the instrument is installed for "
+    "back-pressure regulation, and every vessel on that line can take the pressure.\n\n"
+    "Pressure setpoints are limited to 2.5 bar absolute (about 1.5 bar above "
+    "atmosphere), assuming pressure-rated Duran bottles."
 )
 
 

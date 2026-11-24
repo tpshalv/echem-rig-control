@@ -65,7 +65,6 @@ class AlicatVerifiedControl:
                 observed,
                 bpr=self._configuration.is_bpr,
                 flow_unit=self._configuration.limits.flow_unit,
-                downstream_confirmed=self._configuration.downstream_valve_confirmed,
             )
             self.control_ready = True
             self.verification_message = "Confirmed: " + observed.description

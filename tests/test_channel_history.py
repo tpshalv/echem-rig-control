@@ -120,3 +120,22 @@ def test_nearest_reading_uses_the_whole_run_store_for_old_times() -> None:
 
     assert abs((old.timestamp - (START + timedelta(minutes=30))).total_seconds()) < 10
     assert recent.timestamp == START + timedelta(hours=9)
+
+
+def test_period_copy_has_every_reading_for_8_hours_and_thinned_before() -> None:
+    history = filled(10 * 3_600)
+    whole = history.period_copy(None)
+    times = list(whole.times)
+    assert times == sorted(times) and times[0] == START.timestamp()
+    full = times[whole.thinned_count:]
+    # Every reading of the last 8 hours (give or take the raw store's trim chunk).
+    assert full[-1] == (START + timedelta(seconds=10 * 3_600 - 1)).timestamp()
+    assert full[-1] - full[0] >= 8 * 3_600 - 1
+    assert len(full) == full[-1] - full[0] + 1
+    assert 0 < whole.thinned_count < 2 * 3_600 + 1_024
+    assert len(whole.values) == len(whole.quality_codes) == len(times)
+    assert whole.quality_names[whole.quality_codes[0]] == "good"
+
+    hour = history.period_copy(3_600)
+    assert hour.thinned_count == 0 and len(hour.times) == 3_601
+    assert history.period_copy(None) is not None and _ChannelHistory(10).period_copy(None) is None

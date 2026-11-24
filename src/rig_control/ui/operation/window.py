@@ -24,8 +24,9 @@ from rig_control.data.experiment_naming import (
 from rig_control.ui.operation.electrolyser_dialog import ElectrolyserDialog
 from rig_control.remembered_values import RememberedValues
 from rig_control.models import Event, EventSeverity, EventSink
+from rig_control.ui.common.reconnect import ask_reconnect_faulted
 from rig_control.ui.common.theme import (
-    ERROR_TEXT, MUTED_TEXT, SECTION_FONT, SUCCESS_BACKGROUND, SUCCESS_TEXT, TITLE_FONT,
+    ERROR_TEXT, INFO_TEXT, MUTED_TEXT, SECTION_FONT, SUCCESS_BACKGROUND, SUCCESS_TEXT, TITLE_FONT,
     WARNING_BACKGROUND, WARNING_TEXT,
 )
 from rig_control.ui.operation.annotation_dialog import RunReviewDialog
@@ -36,13 +37,16 @@ from rig_control.ui.operation.model import (
     OperationChannelRow,
     OperationViewModel,
 )
-from rig_control.ui.operation.trend_window import TrendWindow
+from rig_control.ui.operation.graph_data_dialog import GraphDataDialog
+from rig_control.ui.operation.trend_window import TIME_RANGES, TrendWindow
 from rig_control.ui.operation.dashboard_window import (
     DashboardSignal,
     LiveDashboardWindow,
 )
 from rig_control.ui.operation.recipe_window import RecipeBuilderWindow
 
+#: Lines of notes shown under the note box before it scrolls.
+NOTE_LIST_LINES = 4
 
 def format_operation_boolean(channel: str, value: bool) -> str:
     if channel == "watchdog_tripped":
@@ -345,6 +349,9 @@ class OperationWindow:
             actions, text="Review run…", command=self._review_past_run
         )
         self._review_button.grid(row=1, column=1, sticky="w", padx=(12, 0), pady=(8, 0))
+        ttk.Button(
+            actions, text="Save graph data…", command=self._save_graph_data
+        ).grid(row=2, column=0, sticky="w", pady=(8, 0))
         self._recording_status = ttk.Label(
             actions, text="Not recording", font=SECTION_FONT
         )
@@ -476,11 +483,24 @@ class OperationWindow:
         self._note_button.grid(row=0, column=2, padx=(4, 0))
         self._note_time = ttk.Label(box, foreground=MUTED_TEXT, width=9)
         self._note_time.grid(row=0, column=3, padx=(6, 0))
-        self._recent_notes = ttk.Label(
-            parent, foreground=MUTED_TEXT, justify="left", wraplength=320,
-            text="Notes: Ctrl+N to type one, or double-click a graph.",
+        # Every note of the run, newest first, in a few lines that scroll.
+        listing = ttk.Frame(parent)
+        listing.grid(row=row + 1, column=0, columnspan=3, sticky="ew", pady=(4, 0))
+        listing.columnconfigure(0, weight=1)
+        self._recent_notes = tk.Text(
+            listing, height=NOTE_LIST_LINES, width=36, wrap="word", relief="flat", borderwidth=0,
+            highlightthickness=0, foreground=MUTED_TEXT, font=("Segoe UI", 9),
+            background=ttk.Style(parent).lookup("TFrame", "background") or "SystemButtonFace",
+            cursor="arrow", takefocus=0, padx=0, pady=0,
         )
-        self._recent_notes.grid(row=row + 1, column=0, columnspan=3, sticky="w", pady=(2, 0))
+        self._recent_notes.grid(row=0, column=0, sticky="ew")
+        self._recent_notes_scroll = ttk.Scrollbar(listing, orient="vertical",
+                                                  command=self._recent_notes.yview)
+        self._recent_notes.configure(yscrollcommand=self._scroll_notes_if_needed)
+        self._recent_notes.tag_configure("time", foreground=INFO_TEXT)
+        # Wrapped lines of a long note line up under its text, not its time.
+        self._recent_notes.tag_configure("note", lmargin2=38, spacing1=2)
+        self._set_note_lines(())
         for sequence in ("<Control-n>", "<Control-N>"):
             self._root.bind(sequence, self._focus_note_box, add="+")
 
@@ -541,17 +561,37 @@ class OperationWindow:
         if notes == self._displayed_annotations:
             return
         self._displayed_annotations = notes
-        if not notes:
-            self._recent_notes.configure(
-                text="Notes: Ctrl+N to type one, or double-click a graph."
-            )
-            return
-        latest = sorted(notes, key=lambda note: note.created_at)[-3:]
-        self._recent_notes.configure(text="\n".join(
-            f"{note.timestamp.astimezone():%H:%M} · {note.kind_label} · "
-            + (note.text if len(note.text) <= 48 else note.text[:47] + "…").replace("\n", " ")
-            for note in reversed(latest)
+        newest_first = sorted(notes, key=lambda note: note.created_at, reverse=True)
+        self._set_note_lines(tuple(
+            (f"{note.timestamp.astimezone():%H:%M}", f"{note.kind_label} · {note.text}")
+            for note in newest_first
         ))
+
+    def _set_note_lines(self, lines: tuple[tuple[str, str], ...]) -> None:
+        """Show (time, text) lines in the read-only note list, scrolled to the newest."""
+        box = self._recent_notes
+        box.configure(state="normal")
+        box.delete("1.0", "end")
+        if not lines:
+            box.insert("end", "Notes: Ctrl+N to type one, or double-click a graph.")
+        for index, (time_text, text) in enumerate(lines):
+            if index:
+                box.insert("end", "\n")
+            box.insert("end", time_text, ("time", "note"))
+            box.insert("end", "  " + text.replace("\n", " "), ("note",))
+        box.configure(state="disabled")
+        box.yview_moveto(0.0)
+
+    def note_list_text(self) -> str:
+        return self._recent_notes.get("1.0", "end-1c")
+
+    def _scroll_notes_if_needed(self, first: str, last: str) -> None:
+        """Show the scrollbar only while there are more notes than fit."""
+        self._recent_notes_scroll.set(first, last)
+        if float(first) <= 0.0 and float(last) >= 1.0:
+            self._recent_notes_scroll.grid_remove()
+        else:
+            self._recent_notes_scroll.grid(row=0, column=1, sticky="ns", padx=(4, 0))
 
     def _open_recipe_builder(self) -> None:
         """Open one non-modal editor; execution itself stays off the Tk thread."""
@@ -616,11 +656,14 @@ class OperationWindow:
     def _connect_all(self) -> None:
         if self._connection_in_progress:
             return
+        reconnect = ask_reconnect_faulted(self._root, self._view_model.faulted_devices())
+        if reconnect is None:
+            return
         self._connection_in_progress = True
         self._connect_button.configure(state="disabled")
         Thread(
             target=lambda: self._connection_results.put(
-                self._view_model.connect_all()
+                self._view_model.connect_all(reconnect_faulted=reconnect)
             ),
             name="connect-configured-devices",
             daemon=True,
@@ -875,6 +918,24 @@ class OperationWindow:
         self._run_operation_action(
             "Exporting Excel", lambda: self._view_model.export_excel(directory)
         )
+
+    def _save_graph_data(self) -> None:
+        """Save what the graphs hold in memory, recorded or not, for a chosen period."""
+        if self._action_in_progress:
+            self._set_status(
+                f"Still busy: {self._action_description or 'previous action'}… — please wait."
+            )
+            return
+
+        def save(period: str, folder: str) -> None:
+            # Copied now, on this thread; written in the background.
+            snapshot = self._view_model.graph_data_snapshot(TIME_RANGES[period])
+            self._run_operation_action(
+                "Saving graph data",
+                lambda: self._view_model.save_graph_data(snapshot, folder, period),
+            )
+
+        GraphDataDialog(self._root, initial_folder=self._output_directory(), on_save=save)
 
     def _browse_output(self) -> None:
         selected = filedialog.askdirectory(parent=self._root)

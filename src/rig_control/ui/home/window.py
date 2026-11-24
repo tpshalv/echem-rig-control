@@ -1,4 +1,5 @@
 import argparse
+import os
 import tkinter as tk
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -29,8 +30,12 @@ from rig_control.ui.operation.window import OperationWindow
 class HomeWindow:
     """Single launcher and owner-facing view for the rig application."""
 
+    #: The look and the Operation screen; ``HomeWindowV2`` swaps both.
+    apply_theme = staticmethod(apply_blueprint_theme)
+    operation_window_class = OperationWindow
+
     def __init__(self, root: tk.Tk, view_model: HomeViewModel) -> None:
-        apply_blueprint_theme(root)
+        self.apply_theme(root)
         self._root = root
         self._view_model = view_model
         self._operation_child: tk.Toplevel | None = None
@@ -195,7 +200,7 @@ class HomeWindow:
             excess_flow=session.excess_flow,
             cell_area=session.cell_area,
         )
-        window = OperationWindow(
+        window = self.operation_window_class(
             child,
             model,
             profile_name=session.profile.friendly_name,
@@ -327,6 +332,12 @@ def main(arguments: Sequence[str] | None = None) -> int:
     parser.add_argument("--profile")
     parser.add_argument("--settings")
     parser.add_argument("--selection")
+    parser.add_argument(
+        "--ui", choices=("classic", "v2"),
+        default=os.environ.get("ECHEM_RIG_UI", "classic"),
+        help="classic (default) or the v2 layout being tried out; "
+             "the ECHEM_RIG_UI environment variable sets the default",
+    )
     parsed = parser.parse_args(arguments)
     profile_path = parsed.profile
     settings_path = parsed.settings
@@ -351,7 +362,12 @@ def main(arguments: Sequence[str] | None = None) -> int:
         selection_path=selection_path,
     )
     root = tk.Tk()
-    home_window = HomeWindow(root, model)
+    window_class = HomeWindow
+    if parsed.ui == "v2":
+        from rig_control.ui.home.window_v2 import HomeWindowV2
+
+        window_class = HomeWindowV2
+    home_window = window_class(root, model)
 
     def close() -> None:
         confirmed = messagebox.askyesno(

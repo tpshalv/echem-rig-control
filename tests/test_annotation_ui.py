@@ -373,7 +373,15 @@ def test_note_box_takes_the_time_when_typing_starts(root, tmp_path, monkeypatch)
         assert (note.text, note.kind, note.timestamp) == ("line 2 reconnected", "qc_flag", typed_at)
         assert window._note_entry.get() == "" and window._note_started_at is None
         assert window._note_kind.get() == "Lab note"
-        assert "QC flag · line 2 reconnected" in window._recent_notes.cget("text")
+        assert "QC flag · line 2 reconnected" in window.note_list_text()
+        # Every note stays listed in full, newest first, however many there are.
+        for number in range(1, 7):
+            window._note_entry.insert(0, f"note {number} " + "with a long explanation " * 3)
+            window._add_typed_note()
+        listed = window.note_list_text().splitlines()
+        assert len(listed) == 7
+        assert "note 6" in listed[0] and "line 2 reconnected" in listed[-1]
+        assert listed[0].endswith("with a long explanation")
 
         # Stopping offers the review straight away; saving refreshes the Excel file.
         window._run_in_background = lambda action, complete: complete(action(), None)

@@ -142,50 +142,6 @@ class DeviceSetupViewModel:
 
         return self._discovery.probe_alicat(port, address, baud_rate)
 
-    def acknowledge_bpr_installation(self, device_id: str) -> ReadinessCheckResult:
-        """Record the hardware acknowledgement for one already-saved BPR.
-
-        Adding a BPR records this automatically. This exists for devices saved
-        by an earlier version, so they never need a commissioning procedure.
-        """
-
-        try:
-            role = self._profiles.profile.get_role(device_id)
-            if role.driver != "alicat" or role.capability is not (
-                DeviceCapability.BACK_PRESSURE_CONTROLLER
-            ):
-                raise ValueError(f"{device_id!r} is not a saved Alicat BPR")
-            observed = self.inspect_alicat_configuration(device_id)
-            if observed.detected_role != "bpr":
-                raise ValueError(
-                    f"This device is saved as a BPR but now reports "
-                    f"{observed.description}. Acknowledgement was not recorded."
-                )
-            updated = replace(
-                role,
-                settings=dict(role.settings, downstream_valve_confirmed=True),
-            )
-            candidate = replace(
-                self.profile,
-                device_roles=tuple(
-                    updated if item.device_id == device_id else item
-                    for item in self.profile.device_roles
-                ),
-            )
-            self._profiles.commit(candidate)
-        except Exception as error:
-            return ReadinessCheckResult(
-                False,
-                f"The back-pressure installation acknowledgement was not saved "
-                f"for {device_id!r}.",
-                f"{type(error).__name__}: {error}",
-            )
-        return ReadinessCheckResult(
-            True,
-            f"Recorded the back-pressure installation acknowledgement for "
-            f"{device_id!r}. It will not be asked for again on reconnect.",
-        )
-
     def add_alicat_and_check(
         self,
         request: AddAlicatRequest,

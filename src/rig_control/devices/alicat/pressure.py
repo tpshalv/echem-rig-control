@@ -174,8 +174,7 @@ class AlicatBackPressureController(
         from rig_control.devices.alicat.verification import verify_role
         try:
             verify_role(observed, bpr=True,
-                        flow_unit=self._configuration.limits.flow_unit,
-                        downstream_confirmed=self._configuration.downstream_valve_confirmed)
+                        flow_unit=self._configuration.limits.flow_unit)
         except ValueError as error:
             raise RuntimeError(f"BPR shutdown blocked: {error}") from error
         self._state = self._protocol.hold_closed(self.unit_address)

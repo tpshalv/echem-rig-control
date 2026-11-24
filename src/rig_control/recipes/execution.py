@@ -255,7 +255,9 @@ class RecipeRunner:
             if self._thread is not None and self._thread.is_alive(): raise RuntimeError("A recipe is already running")
             if self._control.mode.value != "idle":
                 raise RuntimeError("Recipe control is unavailable while another control mode is active")
-            if self._recorder is not None and self._recorder.is_recording: raise RuntimeError("An experiment is already being recorded; recipe will not replace it")
+            if self._recorder is not None and self._recorder.is_recording:
+                raise RuntimeError("A recording is still running (perhaps kept going after the last recipe). "
+                                   "Stop it in Operation first, then start the recipe.")
             if replace_existing and metadata is not None and recording_root is not None:
                 existing = existing_recording(recording_root, metadata.experiment_id)
                 if existing is not None: remove_recording(existing)
@@ -509,7 +511,11 @@ class RecipeRunner:
             if self._control.mode.value == "recipe_active":
                 try: self._control.end_recipe_control()
                 except Exception as error: failure = failure or f"Could not release recipe control: {error}"; state = RecipeRunState.FAILED
-            if started_recording:
+            if started_recording and self._active(recipe).end_state.keep_recording:
+                # The rig may be left running: keep recording until the
+                # operator stops it in Operation.
+                self._emit("recipe_recording_continues", "Recording continues after the recipe until stopped in Operation")
+            elif started_recording:
                 try: self._recorder.stop()  # type: ignore[union-attr]
                 except Exception as error: failure = failure or f"Could not stop recording: {error}"; state = RecipeRunState.FAILED
             elapsed = self._clock() - started

@@ -17,7 +17,11 @@ TIME_RANGES = {
     "Last 10 minutes": 600,
     "Last 30 minutes": 1_800,
     "Last hour": 3_600,
+    "Last 2 hours": 7_200,
+    "Last 4 hours": 14_400,
     "Last 8 hours": 28_800,
+    "Last 12 hours": 43_200,
+    "Last 24 hours": 86_400,
     "Whole run": None,
 }
 

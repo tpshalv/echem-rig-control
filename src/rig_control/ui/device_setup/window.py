@@ -138,9 +138,6 @@ class DeviceSetupWindow:
             command=self._check_selected,
         )
         self._check_button.grid(row=0, column=2, padx=(0, 8))
-        acknowledge_bpr = ttk.Button(device_buttons, text="Acknowledge BPR installation",
-                   command=self._alicat_dialogs._acknowledge_bpr_installation)
-        acknowledge_bpr.grid(row=1, column=0, columnspan=2, sticky="w", pady=4)
         edit_interval = ttk.Button(
             device_buttons,
             text="Edit measurement interval",
@@ -154,8 +151,7 @@ class DeviceSetupWindow:
         )
         remove_selected.grid(row=0, column=4, padx=(0, 8))
         self._editing_buttons = (
-            edit_details, add_device, edit_selected, acknowledge_bpr,
-            edit_interval, remove_selected,
+            edit_details, add_device, edit_selected, edit_interval, remove_selected,
         )
         ttk.Button(
             device_buttons,

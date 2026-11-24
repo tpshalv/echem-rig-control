@@ -27,7 +27,6 @@ from rig_control.recipes import (
 from rig_control.data.experiment import ExperimentMetadata
 from rig_control.data.experiment_naming import describe_recording, existing_recording
 from rig_control.recipes.execution import ORDER_SEED_LIMIT, RecipeRunner, new_order_seed
-from rig_control.recipes import Assignment, Ramp, RampKind
 from rig_control.recipes.plan import PlannedRamp, has_shuffled_loops, plan, values_before
 from rig_control.recipes.preview import preview_items
 from rig_control.recipes.revision import RevisionRefused, finished_steps, remaining_plan
@@ -127,8 +126,7 @@ class RecipeBuilderWindow:
         bar = ttk.Frame(self._root, padding=(12, 4)); bar.grid(row=1, column=0, sticky="ew")
         ttk.Label(bar, text="Add after selected:").pack(side="left")
         for text, command in (("+ Set", self._add_set), ("+ Wait (time)", self._add_wait),
-                              ("+ Loop over values", self._add_loop), ("+ Repeat", self._add_repeat),
-                              ("+ Ramp", self._add_ramp)):
+                              ("+ Loop over values", self._add_loop), ("+ Repeat", self._add_repeat)):
             ttk.Button(bar, text=text, command=command).pack(side="left", padx=2)
         ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=10)
         for text, command in (("Edit…", self._edit_selected), ("▲ Up", lambda: self._move(-1)),
@@ -941,16 +939,6 @@ class RecipeBuilderWindow:
             messagebox.showerror("Add loop", str(error), parent=self._root); return
         values = (0.0,) if spec.kind == "number" else (True, False)  # type: ignore[attr-defined]
         self._add(LoopStep(device_id, spec.name, values, unit_for(spec)))  # type: ignore[attr-defined]
-
-    def _add_ramp(self) -> None:
-        """A Set step that ramps one setting between two fixed endpoints, for full control."""
-        numeric = [(r.device_id, spec) for r in self._roles for spec in SETTINGS[r.capability] if spec.kind == "number"]
-        if not numeric:
-            messagebox.showerror("Add ramp", "This rig profile has no setting that can be ramped", parent=self._root)
-            return
-        device_id, spec = numeric[0]
-        ramp = Ramp(RampKind.STEP_COUNT, 30.0, start=0.0, count=5)
-        self._add(SetStep((Assignment(device_id, spec.name, 0.0, unit_for(spec), ramp),), "Ramp"))
 
     def _add_repeat(self) -> None:
         self._add(RepeatStep(2))

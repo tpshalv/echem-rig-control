@@ -865,3 +865,40 @@ def test_graph_history_is_in_the_display_units_like_the_table() -> None:
     # The stored history keeps the instrument's own units.
     assert model.measurement_history("dev", "mass_flow")[0].unit == "SLPM"
     assert model.display_unit("temperature", "degC") == "degC"
+
+
+def test_graph_data_is_saved_in_the_display_units_whether_or_not_recording(tmp_path) -> None:
+    import csv
+    from rig_control.display_units import DisplayUnits
+
+    model, _, polling, _ = make_model()
+    model._display_units = DisplayUnits(current="mA")
+    for second in range(3):
+        polling.results.put(PollingBatch(
+            started_at=FIXED_TIME, finished_at=FIXED_TIME,
+            measurements=(MeasurementRecord(
+                device_id="dev", channel="current",
+                measurement=Measurement(0.25 + second, "A", timestamp=FIXED_TIME + timedelta(seconds=second),
+                                        quality=Quality.GOOD)),),
+            failures=(), events=(),
+        ))
+        model.collect_polling_results()
+    assert not model.is_recording
+
+    result = model.save_graph_data(model.graph_data_snapshot(None), tmp_path, "Whole run")
+    assert result.succeeded, result.summary
+    folder = next(tmp_path.iterdir())
+    assert folder.name.startswith("Graph data ") and folder.name.endswith("(Whole run)")
+    with open(folder / "all channels.csv", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    assert [(r["device"], r["channel"], r["unit"], float(r["value"]), r["resolution"]) for r in rows] == [
+        ("dev", "current", "mA", 250.0, "full"), ("dev", "current", "mA", 1250.0, "full"),
+        ("dev", "current", "mA", 2250.0, "full")]
+    assert (folder / "dev current.csv").read_text(encoding="utf-8") == (folder / "all channels.csv").read_text(encoding="utf-8")
+    assert rows[0]["time_utc"] == FIXED_TIME.astimezone(UTC).isoformat()
+
+
+def test_saving_graph_data_with_nothing_monitored_says_so(tmp_path) -> None:
+    model, *_ = make_model()
+    result = model.save_graph_data(model.graph_data_snapshot(600), tmp_path, "Last 10 minutes")
+    assert not result.succeeded and "no graph data yet" in result.summary

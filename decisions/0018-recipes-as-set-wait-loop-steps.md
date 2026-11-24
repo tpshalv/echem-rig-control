@@ -61,9 +61,9 @@ other users to as well.
   value ramps on from wherever the previous step left it, and each later
   value from the one before. An optional fixed start makes the setting
   jump there first. That start is required only when nothing earlier sets
-  the value, because the recipe never reads the instrument to guess. The
-  "+ Ramp" button adds a Set step with a fixed start, for full control of
-  both endpoints.
+  the value, because the recipe never reads the instrument to guess. A
+  ramp is added as a Set step with its ramp option ticked; a separate
+  "+ Ramp" button once did the same and was removed as a duplicate.
 - `recipes/plan.py` is the one in-order walk of a recipe. It expands loops
   and ramps into what is written and what is waited for. The runner
   executes it; the timeline, time estimate, per-step times and supply

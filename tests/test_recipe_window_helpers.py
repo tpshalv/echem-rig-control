@@ -160,14 +160,14 @@ def test_end_state_default_summary_and_warnings():
              SimpleNamespace(device_id="psu", friendly_name="Keithley", capability=DeviceCapability.DC_POWER_SUPPLY)]
     end = default_end_state(roles)
     assert [(d.device_id, d.action) for d in end.devices] == [("mfc", EndAction.LEAVE), ("bpr", EndAction.LEAVE)]
-    assert end_state_summary(end, roles, ValueDisplay()) == ["Left as they are: CO2 MFC, BPR", "Everything else: off (safe state)"]
+    assert end_state_summary(end, roles, ValueDisplay()) == ["Left as they are: CO2 MFC, BPR", "Everything else: off (safe state)", "Recording: keeps going until you stop it in Operation"]
     assert end_state_warnings(end, roles) == []
-    assert end_state_summary(EndState(), roles, ValueDisplay()) == ["Everything off (safe state)"]
+    assert end_state_summary(EndState(), roles, ValueDisplay()) == ["Everything off (safe state)", "Recording: keeps going until you stop it in Operation"]
     # MFC flowing into a closed outlet, and a supply left on, are both flagged.
     risky = EndState((EndDevice("mfc", EndAction.SET, (Assignment("mfc", "flow", 20),)),
                       EndDevice("psu", EndAction.LEAVE)))
     assert end_state_summary(risky, roles, ValueDisplay()) == [
-        "Left as it is: Keithley", "CO2 MFC: Flow setpoint (device's unit) 20", "Everything else: off (safe state)"]
+        "Left as it is: Keithley", "CO2 MFC: Flow setpoint (device's unit) 20", "Everything else: off (safe state)", "Recording: keeps going until you stop it in Operation"]
     warnings = end_state_warnings(risky, roles)
     assert "can pressurise" in warnings[0] and "output stays on" in warnings[1]
 
@@ -183,12 +183,12 @@ def test_end_state_hides_read_only_devices_and_flags_ones_with_no_safe_state():
              SimpleNamespace(device_id="esp", friendly_name="ESP32", capability=DeviceCapability.REMOTE_CONTROLLER)]
     assert [r.device_id for r in end_state_roles(roles)] == ["re72", "hp", "esp"]   # the sensor is not listed
     # The RE72 now has a safe state (0 degC target), so everything really is off.
-    assert end_state_summary(EndState(), roles, ValueDisplay()) == ["Everything off (safe state)"]
+    assert end_state_summary(EndState(), roles, ValueDisplay()) == ["Everything off (safe state)", "Recording: keeps going until you stop it in Operation"]
     assert end_state_warnings(EndState(), roles) == []
     # A device the session reports has no safe state keeps its settings, and the summary says so.
     no_safe = lambda role: role.device_id != "re72"
     assert end_state_summary(EndState(), roles, ValueDisplay(), no_safe) == [
-        "Left as it is: RE72 heater (no safe state)", "Everything else: off (safe state)"]
+        "Left as it is: RE72 heater (no safe state)", "Everything else: off (safe state)", "Recording: keeps going until you stop it in Operation"]
     assert "keeps its last settings" in end_state_warnings(EndState(), roles, no_safe)[0]
 
 

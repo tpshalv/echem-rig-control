@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from dataclasses import dataclass
 from math import ceil
 from statistics import fmean
@@ -131,13 +132,26 @@ class DiagnosticViewModel:
         self,
         device_id: str,
     ) -> DiagnosticActionResult:
-        """Attempt to connect a device without leaking exceptions to UI."""
+        """Connect a device, or reconnect it if it faulted.
 
+        A faulted driver keeps its port open but refuses commands, so a plain
+        connect would only say it is already connected; it is cycled instead
+        (disconnecting applies its safe state).  The window asks first.
+        """
+
+        status = DeviceStatus.DISCONNECTED
         try:
-            self._device_manager.connect(device_id)
+            status = self._device_manager.get(device_id).status
+            if status not in (DeviceStatus.DISCONNECTED, DeviceStatus.FAULTED):
+                return DiagnosticActionResult(
+                    succeeded=True, summary=f"Device {device_id!r} is already connected.")
+            if status is DeviceStatus.FAULTED:
+                self._device_manager.reconnect(device_id)
+            else:
+                self._device_manager.connect(device_id)
         except Exception as error:
             return self._failure_result(
-                operation="connect",
+                operation="reconnect" if status is DeviceStatus.FAULTED else "connect",
                 device_id=device_id,
                 error=error,
             )
@@ -145,8 +159,46 @@ class DiagnosticViewModel:
         return DiagnosticActionResult(
             succeeded=True,
             summary=(
-                f"Device {device_id!r} connected successfully."
+                f"Device {device_id!r} "
+                f"{'reconnected' if status is DeviceStatus.FAULTED else 'connected'} successfully."
             ),
+        )
+
+    def faulted_devices(self, device_ids: Sequence[str] | None = None) -> tuple[str, ...]:
+        """Which of these devices (default: all) a connect would cycle."""
+
+        return tuple(
+            device_id for device_id in (device_ids or self._device_manager.device_ids)
+            if self._device_manager.get(device_id).status is DeviceStatus.FAULTED
+        )
+
+    def connect_all(self, *, reconnect_faulted: bool) -> DiagnosticActionResult:
+        """Connect every device that is not connected; faulted ones only if agreed."""
+
+        done: list[str] = []
+        problems: list[str] = []
+        details: list[str] = []
+        for device_id in self._device_manager.device_ids:
+            status = self._device_manager.get(device_id).status
+            if status not in (DeviceStatus.DISCONNECTED, DeviceStatus.FAULTED):
+                continue
+            if status is DeviceStatus.FAULTED and not reconnect_faulted:
+                problems.append(f"{device_id}: faulted, left as it is")
+                continue
+            result = self.connect_device(device_id)
+            if result.succeeded:
+                done.append(device_id)
+            else:
+                problems.append(result.summary)
+                if result.technical_details:
+                    details.append(result.technical_details)
+        lines = [f"Connected: {', '.join(done)}." if done else "Nothing needed connecting."]
+        if problems:
+            lines += ["", "Problems:"] + [f"• {problem}" for problem in problems]
+        return DiagnosticActionResult(
+            succeeded=not problems,
+            summary="\n".join(lines),
+            technical_details="\n\n".join(details) or None,
         )
 
     def disconnect_device(

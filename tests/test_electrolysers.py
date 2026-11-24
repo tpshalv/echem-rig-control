@@ -222,7 +222,7 @@ def test_a_recipe_replaces_an_old_recording_only_when_it_can_start(tmp_path) -> 
                                               started_at=STARTED, experiment_type="recipe")
         runner, _supply, _mfc = make_runner()
         runner._recorder = model._experiment_recorder
-        with pytest.raises(RuntimeError, match="already being recorded"):
+        with pytest.raises(RuntimeError, match="recording is still running"):
             runner.start(Recipe("r", steps=(WaitStep(0),)), recording_root=root,
                          metadata=metadata, replace_existing=True)
         assert existing_recording(root, metadata.experiment_id) is not None  # Kept.

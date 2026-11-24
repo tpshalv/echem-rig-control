@@ -1,6 +1,6 @@
 import tkinter as tk
 from collections.abc import Callable
-from tkinter import ttk
+from tkinter import messagebox, ttk
 from datetime import datetime
 from queue import Empty, Queue
 from threading import Thread
@@ -9,6 +9,7 @@ from rig_control.ui.diagnostics.model import (
     DiagnosticActionResult,
     DiagnosticViewModel,
 )
+from rig_control.ui.common.reconnect import ask_reconnect_faulted
 from rig_control.ui.common.theme import (
     BODY_BOLD_FONT,
     BODY_FONT,
@@ -224,39 +225,46 @@ class DiagnosticWindow:
             pady=10,
         )
 
+        self._connect_all_button = ttk.Button(
+            buttons,
+            text="Connect all",
+            command=self._connect_all,
+        )
+        self._connect_all_button.grid(row=0, column=0, padx=(0, 8))
+
         self._connect_button = ttk.Button(
             buttons,
             text="Connect selected",
             command=self._connect_selected,
         )
-        self._connect_button.grid(row=0, column=0, padx=(0, 8))
+        self._connect_button.grid(row=0, column=1, padx=(0, 8))
 
         self._disconnect_button = ttk.Button(
             buttons,
             text="Disconnect selected",
             command=self._disconnect_selected,
         )
-        self._disconnect_button.grid(row=0, column=1, padx=(0, 8))
+        self._disconnect_button.grid(row=0, column=2, padx=(0, 8))
 
         self._test_button = ttk.Button(
             buttons,
             text="Test communication",
             command=self._test_selected_communication,
         )
-        self._test_button.grid(row=0, column=2, padx=(0, 8))
+        self._test_button.grid(row=0, column=3, padx=(0, 8))
 
         self._dump_button = ttk.Button(
             buttons,
             text="Dump settings",
             command=self._dump_selected_settings,
         )
-        self._dump_button.grid(row=0, column=3, padx=(0, 8))
+        self._dump_button.grid(row=0, column=4, padx=(0, 8))
 
         ttk.Button(
             buttons,
             text="Refresh",
             command=self.refresh,
-        ).grid(row=0, column=4)
+        ).grid(row=0, column=5)
 
         self._dump_hint = ttk.Label(
             main,
@@ -363,9 +371,25 @@ class DiagnosticWindow:
 
         if device_id is None:
             return
+        faulted = self._view_model.faulted_devices([device_id])
+        if faulted and not messagebox.askyesno(
+            "Reconnect faulted device?",
+            f"{device_id} is faulted. Reconnect it?\n\nIt is put in its safe state first "
+            "(a pump stops, a supply's output turns off), then connected again.",
+            parent=self._root,
+        ):
+            return
 
         self._start_device_action(
             lambda: self._view_model.connect_device(device_id)
+        )
+
+    def _connect_all(self) -> None:
+        reconnect = ask_reconnect_faulted(self._root, self._view_model.faulted_devices())
+        if reconnect is None:
+            return
+        self._start_device_action(
+            lambda: self._view_model.connect_all(reconnect_faulted=reconnect)
         )
 
     def _disconnect_selected(self) -> None:
@@ -416,6 +440,7 @@ class DiagnosticWindow:
         if self._action_in_progress:
             return
         self._action_in_progress = True
+        self._connect_all_button.configure(state="disabled")
         self._connect_button.configure(state="disabled")
         self._disconnect_button.configure(state="disabled")
         self._test_button.configure(state="disabled")
@@ -433,6 +458,7 @@ class DiagnosticWindow:
             pass
         else:
             self._action_in_progress = False
+            self._connect_all_button.configure(state="normal")
             self._connect_button.configure(state="normal")
             self._disconnect_button.configure(state="normal")
             self._test_button.configure(state="normal")

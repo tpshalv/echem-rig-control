@@ -535,6 +535,8 @@ def end_state_summary(end, roles, units: "ValueDisplay", has_safe_state=capabili
     lines += [f"{names.get(d.device_id, d.device_id)}: {_assignments_text(d.assignments, units)}"
               for d in end.devices if d.action.value == "set"]
     lines.append("Everything else: off (safe state)" if lines else "Everything off (safe state)")
+    lines.append("Recording: keeps going until you stop it in Operation"
+                 if getattr(end, "keep_recording", True) else "Recording: stops")
     return lines
 
 

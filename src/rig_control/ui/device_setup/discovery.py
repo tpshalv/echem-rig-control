@@ -292,8 +292,7 @@ class DeviceDiscovery:
                     + (diagnostic.verification_error or "no detail was reported")
                 )
             verify_role(observed, bpr=configuration.is_bpr,
-                        flow_unit=configuration.limits.flow_unit,
-                        downstream_confirmed=configuration.downstream_valve_confirmed)
+                        flow_unit=configuration.limits.flow_unit)
             difference = frame_mismatch(
                 configuration.unit_address,
                 observed.frame_description,

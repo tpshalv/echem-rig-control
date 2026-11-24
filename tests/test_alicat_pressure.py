@@ -158,13 +158,11 @@ def test_detected_configuration_change_blocks_every_operating_write(changes):
     assert not controller.control_ready
 
 
-def test_missing_physical_confirmation_does_not_become_ready():
-    for changes in (dict(downstream_valve_confirmed=False),):
-        controller, protocol = device(**changes)
-        assert not controller.control_ready
-        with pytest.raises(RuntimeError):
-            controller.set_pressure_setpoint(2)
-        assert not protocol.writes
+def test_a_bpr_saved_without_the_installation_flag_still_controls():
+    # The plumbing warning is shown when a BPR is added; it is not checked again.
+    controller, protocol = device(downstream_valve_confirmed=False)
+    controller.set_pressure_setpoint(2)
+    assert protocol.writes
 
 
 def test_failed_setpoint_readback_faults_without_retrying_write():
@@ -261,7 +259,7 @@ def test_mode_detection_does_not_require_labelled_identity_fields():
     assert result.serial_number is None
     assert result.model is None
     assert result.detected_role == "bpr"
-    verify_role(result, bpr=True, flow_unit="SCCM", downstream_confirmed=True)
+    verify_role(result, bpr=True, flow_unit="SCCM")
 
 
 def test_ascii_queries_are_read_only_and_9v_uses_pressure_full_scale():
